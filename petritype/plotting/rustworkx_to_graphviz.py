@@ -1,9 +1,10 @@
-from typing import Sequence, Union
+from typing import Callable, Sequence, Union
 from rustworkx import NodeIndices, PyDiGraph
 
 from petritype.core.data_structures import (
     FunctionFullName, FunctionWithAnnotations, NodeIndex, TypeName, TypeRelationship, TypeVariableWithAnnotations
 )
+from petritype.core.executable_graph_components import ExecutableGraph, FunctionTransitionNode, ListPlaceNode
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
@@ -16,20 +17,19 @@ type TypeNamesToNodeIndices = dict[TypeName, int]
 type FunctionNamesToNodeIndices = dict[FunctionFullName, int]
 
 
-class RustworkxToGraphviz:
+class NodeLabel:
 
-    # def rustworkx_type_relationship_edges(
-    #     node_names_to_type_relationships: NamesToTypeRelationships,
-    #     node_names_to_node_indices: dict[Union[TypeName, FunctionFullName], int]
-    # ) -> Sequence[tuple[NodeIndex, NodeIndex, TypeRelationship]]:
-    #     return [
-    #         (
-    #             node_names_to_node_indices[name_from],
-    #             node_names_to_node_indices[name_to],
-    #             relationship
-    #         )
-    #         for (name_from, name_to), relationship in node_names_to_type_relationships
-    #     ]
+    def default_place(node: ListPlaceNode) -> str:
+        label = f"{node.name}\n({node.type.__name__})"
+        value_strings = [str(x) for x in node.values]
+        values_string = "\n".join(value_strings)
+        return f"{label}\n{values_string}"
+
+    def default_transition(node: FunctionTransitionNode) -> str:
+        return f"{node.name}\n({node.function.__qualname__})"
+
+
+class RustworkxToGraphviz:
 
     def type_relationship_edges(
         function_node_indices: NodeIndex,
@@ -126,3 +126,57 @@ class RustworkxToGraphviz:
             'label': edge.value,
             'color': RustworkxToGraphviz.edge_value_to_colour(edge.value)
         }
+
+    def generate_flow_node_attr_fn(
+        graph: ExecutableGraph
+    ) -> Callable[[ListPlaceNode | FunctionTransitionNode], dict[str, Union[str, int, float, bool]]]:
+        """Generate a function that returns node attributes for the flow graph.
+
+        This is used to colour nodes depending on recent graph activation history stored in the ExecutableGraph.
+        """
+
+        # Extract the last entry from each kind of history
+        last_transition = graph.transition_history[-1] if graph.transition_history else None
+        last_input_place = graph.input_place_history[-1] if graph.input_place_history else None
+        last_output_place = graph.output_place_history[-1] if graph.output_place_history else None
+
+        # Create a set of node names to be outlined in magenta
+        magenta_outlined_nodes = set()
+        if last_transition:
+            magenta_outlined_nodes.add(last_transition.name)
+        if last_input_place:
+            magenta_outlined_nodes = magenta_outlined_nodes.union({x.name for x in last_input_place})
+        if last_output_place:
+            magenta_outlined_nodes = magenta_outlined_nodes.union({x.name for x in last_output_place})
+
+        def flow_node_attr_fn(node):
+            if isinstance(node, ListPlaceNode):
+                attrs = {
+                    "label": NodeLabel.default_place(node),
+                    'fillcolor': 'deepskyblue',
+                    'style': 'filled',
+                    'shape': 'oval',
+                    'color': 'black',  # default outline color
+                    'penwidth': '1'
+                }
+                if node.name in magenta_outlined_nodes:
+                    attrs['color'] = 'magenta'
+                    attrs['penwidth'] = '2'
+                return attrs
+            elif isinstance(node, FunctionTransitionNode):
+                attrs = {
+                    "label": NodeLabel.default_transition(node),
+                    'fillcolor': 'lightgreen',
+                    'style': 'filled',
+                    'shape': 'box',
+                    'color': 'black',  # default outline color
+                    'penwidth': '1'
+                }
+                if node.name in magenta_outlined_nodes:
+                    attrs['color'] = 'magenta'
+                    attrs['penwidth'] = '3'
+                return attrs
+            else:
+                raise ValueError("Invalid node data type.")
+
+        return flow_node_attr_fn
