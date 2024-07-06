@@ -1,5 +1,6 @@
-from typing import Union, Sequence, Iterable
+from typing import Optional, Union, Sequence, Iterable
 
+from pydantic import BaseModel
 from rustworkx import PyDiGraph
 
 from petritype.core.data_structures import (
@@ -10,6 +11,42 @@ from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition, ExecutableGraph, ReturnedEdgeFromTransition
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
+
+
+class RustworkxArgumentEdgeData(BaseModel):
+    source_place_node_name: PlaceNodeName
+    target_transition_node_name: TransitionNodeName
+    argument: ArgumentName
+
+    def __hash__(self):
+        return hash((self.source_place_node_name, self.target_transition_node_name, self.argument))
+
+    def __eq__(self, other):
+        if not isinstance(other, RustworkxArgumentEdgeData):
+            return NotImplemented
+        return (
+            self.source_place_node_name == other.source_place_node_name and
+            self.target_transition_node_name == other.target_transition_node_name and
+            self.argument == other.argument
+        )
+
+
+class RustworkxReturnedEdgeData(BaseModel):
+    source_transition_node_name: TransitionNodeName
+    target_place_node_name: PlaceNodeName
+    return_index: Optional[ReturnIndex]
+
+    def __hash__(self):
+        return hash((self.source_transition_node_name, self.target_place_node_name, self.return_index))
+
+    def __eq__(self, other):
+        if not isinstance(other, RustworkxReturnedEdgeData):
+            return NotImplemented
+        return (
+            self.source_transition_node_name == other.source_transition_node_name and
+            self.target_place_node_name == other.target_place_node_name and
+            self.return_index == other.return_index
+        )
 
 
 class RustworkxGraph:
@@ -33,7 +70,7 @@ class RustworkxGraph:
         edges_to_transitions: Iterable[ArgumentEdgeToTransition],
         place_names_to_indices: dict[PlaceNodeName, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
-    ) -> Sequence[tuple[NodeIndex, NodeIndex, ArgumentName]]:
+    ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxArgumentEdgeData]]:
         out = []
         for edge in edges_to_transitions:
             if not isinstance(edge, ArgumentEdgeToTransition):
@@ -41,7 +78,11 @@ class RustworkxGraph:
             out.append((
                 place_names_to_indices[edge.place_node_name],
                 transition_names_to_indices[edge.transition_node_name],
-                edge.argument,
+                RustworkxArgumentEdgeData(
+                    source_place_node_name=edge.place_node_name,
+                    target_transition_node_name=edge.transition_node_name,
+                    argument=edge.argument,
+                ),
             ))
         return tuple(out)
 
@@ -49,7 +90,7 @@ class RustworkxGraph:
         edges_from_transitions: Iterable[ReturnedEdgeFromTransition],
         place_names_to_indices: dict[PlaceNodeName, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
-    ) -> Sequence[tuple[NodeIndex, NodeIndex, ReturnIndex]]:
+    ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxReturnedEdgeData]]:
         out = []
         for edge in edges_from_transitions:
             if not isinstance(edge, ReturnedEdgeFromTransition):
@@ -57,7 +98,11 @@ class RustworkxGraph:
             out.append((
                 transition_names_to_indices[edge.transition_node_name],
                 place_names_to_indices[edge.place_node_name],
-                edge.return_index,
+                RustworkxReturnedEdgeData(
+                    source_transition_node_name=edge.transition_node_name,
+                    target_place_node_name=edge.place_node_name,
+                    return_index=edge.return_index,
+                ),
             ))
         return tuple(out)
 

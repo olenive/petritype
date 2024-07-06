@@ -8,7 +8,7 @@ from petritype.core.executable_graph_components import ExecutableGraph, Function
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
-from petritype.core.rustworkx_graph import RustworkxGraph
+from petritype.core.rustworkx_graph import RustworkxArgumentEdgeData, RustworkxGraph, RustworkxReturnedEdgeData
 from petritype.helpers.structures import SafeMerge
 
 
@@ -127,9 +127,12 @@ class RustworkxToGraphviz:
             'color': RustworkxToGraphviz.edge_value_to_colour(edge.value)
         }
 
-    def generate_flow_node_attr_fn(
+    def generate_attr_fn(
         graph: ExecutableGraph
-    ) -> Callable[[ListPlaceNode | FunctionTransitionNode], dict[str, Union[str, int, float, bool]]]:
+    ) -> tuple[
+        Callable[[Union[ListPlaceNode, FunctionTransitionNode]], dict[str, Union[str, int, float, bool]]],
+        Callable[[str], dict[str, Union[str, int, float, bool]]]
+    ]:
         """Generate a function that returns node attributes for the flow graph.
 
         This is used to colour nodes depending on recent graph activation history stored in the ExecutableGraph.
@@ -141,15 +144,15 @@ class RustworkxToGraphviz:
         last_output_place = graph.output_place_history[-1] if graph.output_place_history else None
 
         # Create a set of node names to be outlined in magenta
-        magenta_outlined_nodes = set()
+        magenta_outlined_node_names = set()
         if last_transition:
-            magenta_outlined_nodes.add(last_transition.name)
+            magenta_outlined_node_names.add(last_transition.name)
         if last_input_place:
-            magenta_outlined_nodes = magenta_outlined_nodes.union({x.name for x in last_input_place})
+            magenta_outlined_node_names = magenta_outlined_node_names.union({x.name for x in last_input_place})
         if last_output_place:
-            magenta_outlined_nodes = magenta_outlined_nodes.union({x.name for x in last_output_place})
+            magenta_outlined_node_names = magenta_outlined_node_names.union({x.name for x in last_output_place})
 
-        def flow_node_attr_fn(node):
+        def node_attr_fn(node):
             if isinstance(node, ListPlaceNode):
                 attrs = {
                     "label": NodeLabel.default_place(node),
@@ -159,7 +162,7 @@ class RustworkxToGraphviz:
                     'color': 'black',  # default outline color
                     'penwidth': '1'
                 }
-                if node.name in magenta_outlined_nodes:
+                if node.name in magenta_outlined_node_names:
                     attrs['color'] = 'magenta'
                     attrs['penwidth'] = '2'
                 return attrs
@@ -172,11 +175,32 @@ class RustworkxToGraphviz:
                     'color': 'black',  # default outline color
                     'penwidth': '1'
                 }
-                if node.name in magenta_outlined_nodes:
+                if node.name in magenta_outlined_node_names:
                     attrs['color'] = 'magenta'
                     attrs['penwidth'] = '3'
                 return attrs
             else:
                 raise ValueError("Invalid node data type.")
 
-        return flow_node_attr_fn
+        def edge_attr_fn(edge: str) -> dict[str, Union[str, int, float, bool]]:
+
+            def should_be_magenta(edge_data: RustworkxArgumentEdgeData | RustworkxReturnedEdgeData) -> bool:
+                if isinstance(edge_data, RustworkxArgumentEdgeData):
+                    return (
+                        edge_data.target_transition_node_name in magenta_outlined_node_names
+                        and edge_data.source_place_node_name in magenta_outlined_node_names
+                    )
+                elif isinstance(edge_data, RustworkxReturnedEdgeData):
+                    return (
+                        edge_data.source_transition_node_name in magenta_outlined_node_names
+                        and edge_data.target_place_node_name in magenta_outlined_node_names
+                    )
+                else:
+                    raise ValueError(f"Invalid edge data type: {type(edge_data)}")
+
+            if should_be_magenta(edge):
+                return {'color': 'magenta', 'penwidth': '2'}
+            else:
+                return {'color': 'black', 'penwidth': '1'}
+
+        return node_attr_fn, edge_attr_fn
