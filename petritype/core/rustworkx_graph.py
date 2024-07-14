@@ -57,7 +57,10 @@ class RustworkxGraph:
     ) -> Sequence[tuple[NodeIndex, NodeIndex, TypeRelationship]]:
         out = []
         for (name_from, name_to), relationship in node_names_to_type_relationships.items():
-            index_from: NodeIndex = node_names_to_node_indices[name_from]
+            try:
+                index_from: NodeIndex = node_names_to_node_indices[name_from]
+            except KeyError:
+                import pdb; pdb.set_trace()
             try:
                 index_to: NodeIndex = node_names_to_node_indices[name_to]
             except KeyError:

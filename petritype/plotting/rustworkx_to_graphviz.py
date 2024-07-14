@@ -19,11 +19,23 @@ type FunctionNamesToNodeIndices = dict[FunctionFullName, int]
 
 class NodeLabel:
 
-    def default_place(node: ListPlaceNode) -> str:
+    def default_token_summariser(token: any, maximum_length=100) -> str:
+        # If the token has a summary_text method, use that.
+        if hasattr(token, "summary"):
+            try:
+                return token.summary()
+            except Exception as e:
+                return f"Error: {e}"
+        token_info = str(token)
+        if len(token_info) > maximum_length:
+            token_info = token_info[:maximum_length] + "..."
+        return token_info
+
+    def default_place(node: ListPlaceNode, token_summariser=default_token_summariser) -> str:
         label = f"{node.name}\n({node.type.__name__})"
-        value_strings = [str(x) for x in node.values]
-        values_string = "\n".join(value_strings)
-        return f"{label}\n{values_string}"
+        value_strings = [token_summariser(x) for x in node.tokens]
+        tokens_string = "\n".join(value_strings)
+        return f"{label}\n{tokens_string}"
 
     def default_transition(node: FunctionTransitionNode) -> str:
         return f"{node.name}\n({node.function.__qualname__})"
@@ -127,8 +139,9 @@ class RustworkxToGraphviz:
             'color': RustworkxToGraphviz.edge_value_to_colour(edge.value)
         }
 
-    def generate_attr_fn(
-        graph: ExecutableGraph
+    def activation_coloured_attr_functions(
+        graph: ExecutableGraph,
+        token_summariser=NodeLabel.default_token_summariser,
     ) -> tuple[
         Callable[[Union[ListPlaceNode, FunctionTransitionNode]], dict[str, Union[str, int, float, bool]]],
         Callable[[str], dict[str, Union[str, int, float, bool]]]
@@ -155,7 +168,7 @@ class RustworkxToGraphviz:
         def node_attr_fn(node):
             if isinstance(node, ListPlaceNode):
                 attrs = {
-                    "label": NodeLabel.default_place(node),
+                    "label": NodeLabel.default_place(node, token_summariser),
                     'fillcolor': 'deepskyblue',
                     'style': 'filled',
                     'shape': 'oval',

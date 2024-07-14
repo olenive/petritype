@@ -10,8 +10,8 @@ TEMPLATE_01_STRING = """' something on the first line.
 Start ()
 
 Some Text
-\t .Thing1 "{values_0}"
-\t .Thing2 "{values_1}"  ' 0.01
+\t .Thing1 "{tokens_0}"
+\t .Thing2 "{tokens_1}"  ' 0.01
 Other Text
 
 Finish

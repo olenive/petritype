@@ -11,13 +11,16 @@ COMMON_TYPES = {
     "str", "int", "float", "bool", "None", "set", "list", "dict", "tuple",
 
     # Types of types.
-    "Optional", "Union", "Any",
+    "Optional", "Union", "Any", "Sequence", "Iterable", "Callable", "Type",
 
     # Datetime types.
     "datetime",
 
     # Pydantic types.
     "BaseModel"
+
+    # Numpy types.
+    "ndarray", "np.ndarray", "numpy.ndarray"
 }
 
 
@@ -49,7 +52,7 @@ class ImportPath(BaseModel):
 # This can be dataclass with fields or a pydantic model with fields or simply a type alias.
 class TypeVariableWithAnnotations(BaseModel):
     name: TypeName
-    # TODO: Figure out how to ensure that type_name values are unique.
+    # TODO: Figure out how to ensure that type_name tokens are unique.
     # TODO: Figure out how to determine type_name from type annotation.
     parent_type: Optional[TypeName]
     subtypes: set[TypeName]  # This is used for type aliases.
@@ -60,7 +63,7 @@ class TypeVariableWithAnnotations(BaseModel):
 
 class FunctionWithAnnotations(BaseModel):
     function_full_name: FunctionFullName  # For now this can be ClassName.function_name
-    # TODO: Figure out how to ensure that function_full_name values are unique.
+    # TODO: Figure out how to ensure that function_full_name tokens are unique.
     class_name: Optional[ClassName]
     function_name: FunctionName
     argument_types: ArgumentTypes

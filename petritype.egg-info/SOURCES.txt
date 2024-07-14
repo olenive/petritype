@@ -1,0 +1,9 @@
+LICENSE-MIT
+README.md
+setup.py
+petritype/__init__.py
+petritype.egg-info/PKG-INFO
+petritype.egg-info/SOURCES.txt
+petritype.egg-info/dependency_links.txt
+petritype.egg-info/requires.txt
+petritype.egg-info/top_level.txt

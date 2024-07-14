@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: petritype
+Version: 0.1.0
+License-File: LICENSE-MIT
+Requires-Dist: pydantic==2.7.1
+Requires-Dist: rustworkx==0.14.2
+Requires-Dist: setuptools==69.5.1
