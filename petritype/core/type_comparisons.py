@@ -15,7 +15,7 @@ class CompareTypes:
         if expected is Any:
             return True
 
-        # Handle None values gracefully
+        # Handle None tokens gracefully
         if value is None:
             if expected is None:
                 return True

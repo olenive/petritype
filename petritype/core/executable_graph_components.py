@@ -17,12 +17,12 @@ type TransitionName = str
 class ListPlaceNode(BaseModel):
     name: PlaceNodeName
     type: Any  # Temporarily accept any value
-    values: list[Any] = []
-    # TODO: Add validation to check that type matches values
+    tokens: list[Any] = []
+    # TODO: Add validation to check that type matches tokens
 
     @model_validator(mode="before")
-    def check_type(cls, values):
-        type_of_value = values.get('type', None)
+    def check_type(cls, tokens):
+        type_of_value = tokens.get('type', None)
         if type_of_value is not None:
             if not (
                 isinstance(type_of_value, Type)
@@ -38,9 +38,9 @@ class ListPlaceNode(BaseModel):
             raise NotImplementedError(
                 "Unclear at the time of writing what it means for a place node to have no type."
             )
-        return values
+        return tokens
 
-    def copy_sans_values(self) -> "ListPlaceNode":
+    def copy_sans_tokens(self) -> "ListPlaceNode":
         return ListPlaceNode(name=self.name, type=self.type)
 
 
@@ -72,6 +72,22 @@ class ExecutableGraph(BaseModel):
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
     token_history: Sequence[Any] = []
+
+    def place_named(self, name: str) -> Optional[ListPlaceNode]:
+        place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
+        if len(set(place_names_to_nodes.keys())) != len(place_names_to_nodes.keys()):
+            raise ValueError("Duplicate place names found!")
+        return place_names_to_nodes.get(name)
+
+    @model_validator(mode='before')
+    def check_unique_names(cls, tokens):
+        place_names = [place.name for place in tokens.get('places', [])]
+        transition_names = [transition.name for transition in tokens.get('transitions', [])]
+        if len(place_names) != len(set(place_names)):
+            raise ValueError("Place names must be unique.")
+        if len(transition_names) != len(set(transition_names)):
+            raise ValueError("Transition names must be unique.")
+        return tokens
 
 
 # This is intended as shorthand for the common case when adding a transition with output(s) to a graph.
@@ -185,7 +201,7 @@ class ExecutableGraphCheck:
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges[transition.name]
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
-            if len(place.values) == 0:
+            if len(place.tokens) == 0:
                 return False
         return True
 
@@ -233,7 +249,7 @@ class ExecutableGraphCheck:
     def ensure_all_token_types_match_place_types(executable_graph: ExecutableGraph):
         places = (x for x in executable_graph if isinstance(x, ListPlaceNode))
         for place in places:
-            for token in place.values:
+            for token in place.tokens:
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, place)
 
     def return_indices_ara_a_mix_of_none_and_non_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
@@ -283,7 +299,7 @@ class ExecutableGraphOperations:
                 raise ValueError(f"Unexpected node type: {type(node)}")
         return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from)
 
-    def extract_argument_values_from_places(
+    def extract_argument_tokens_from_places(
         transition: FunctionTransitionNode,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
@@ -297,13 +313,13 @@ class ExecutableGraphOperations:
         input_places = [] if place_history_length >= 1 else None
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
-            token = place.values.pop()
+            token = place.tokens.pop()
             if place_history_length >= 1:
-                place_copy = place.copy_sans_values()
+                place_copy = place.copy_sans_tokens()
                 input_places.append(place_copy)
                 if allow_token_copying and token_history_length >= 1:
                     token_copy = deepcopy(token)
-                    place_copy.values.append(token_copy)
+                    place_copy.tokens.append(token_copy)
             out[edge.argument] = token
         return out, input_places
 
@@ -329,7 +345,7 @@ class ExecutableGraphOperations:
 
         # Pop the input tokens out of the input places.
         outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
-        tokens_kwargs, history_input_places = ExecutableGraphOperations.extract_argument_values_from_places(
+        tokens_kwargs, history_input_places = ExecutableGraphOperations.extract_argument_tokens_from_places(
             transition=transition,
             transition_names_to_incoming_edges=transition_names_to_incoming_edges,
             place_names_to_nodes=place_names_to_nodes,
@@ -365,22 +381,28 @@ class ExecutableGraphOperations:
             elif len(matching_places) > 1 and allow_token_copying:
                 for place in matching_places:
                     output_token = deepcopy(result)
-                    place.values.append(output_token)
+                    place.tokens.append(output_token)
                     if place_history_length >= 1:
-                        history_place = place.copy_sans_values()
+                        history_place = place.copy_sans_tokens()
                         history_output_places.append(history_place)
                         if token_history_length >= 1:
-                            history_place.values.append(deepcopy(output_token))
+                            history_place.tokens.append(deepcopy(output_token))
             elif len(matching_places) == 1:
                 matching_place = next(iter(matching_places))
-                matching_place.values.append(result)
+                matching_place.tokens.append(result)
                 if place_history_length >= 1:
-                    history_place = matching_place.copy_sans_values()
+                    history_place = matching_place.copy_sans_tokens()
                     history_output_places.append(history_place)
                     if token_history_length >= 1 and allow_token_copying:
-                        history_place.values.append(deepcopy(result))
+                        history_place.tokens.append(deepcopy(result))
             else:
-                raise ValueError("Unexpected branch...")
+                if len(matching_places) == 0:
+                    raise ValueError(
+                        f"No matching places found for result of transition \"{transition.name}\". "
+                        f"Expected a place of type {type(result)}."
+                    )
+                else:
+                    raise ValueError("Unexpected branch...")
         else:  # Use the given output distribution function to determine where the tokens should go.
             # TODO: determine if we actually want this to be an option.
             if not ExecutableGraphCheck.all_return_indices_are_none(outgoing_edges):
@@ -399,9 +421,9 @@ class ExecutableGraphOperations:
                 destination_place = place_names_to_nodes[place_name]
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                 if token is not None:
-                    destination_place.values.append(token)
+                    destination_place.tokens.append(token)
                     if place_history_length >= 1:
-                        history_place = destination_place.copy_sans_values()
+                        history_place = destination_place.copy_sans_tokens()
                         history_output_places.append(history_place)
                         # Token history is not recorded when token copying is not allowed.
             elif len(destination_place_names_to_tokens) > 1 and allow_token_copying:
@@ -409,12 +431,12 @@ class ExecutableGraphOperations:
                     destination_place = place_names_to_nodes[place_name]
                     ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                     if token is not None:
-                        destination_place.values.append(token)
+                        destination_place.tokens.append(token)
                         if place_history_length >= 1:
-                            history_place = destination_place.copy_sans_values()
+                            history_place = destination_place.copy_sans_tokens()
                             history_output_places.append(history_place)
                             if token_history_length >= 1:
-                                history_place.values.append(deepcopy(token))
+                                history_place.tokens.append(deepcopy(token))
         return history_input_places, history_output_places
 
     async def execute_graph(

@@ -68,9 +68,9 @@ class TestExecutableGraphCheck:
         type DBValue = str
         type DBKeyValuePair = tuple[DBKey, DBValue]
         potential_places = (
-            ListPlaceNode(name='CachedValueFound', type=DBKeyValuePair, values=[]),
-            ListPlaceNode(name='KeyForDBRetrieval', type=DBKey, values=[])
+            ListPlaceNode(name='CachedValueFound', type=DBKeyValuePair, tokens=[]),
+            ListPlaceNode(name='KeyForDBRetrieval', type=DBKey, tokens=[])
         )
-        expected = (ListPlaceNode(name='KeyForDBRetrieval', type=DBKey, values=[]),)
+        expected = (ListPlaceNode(name='KeyForDBRetrieval', type=DBKey, tokens=[]),)
         result = ExecutableGraphCheck.value_and_places_types_match('h_0', potential_places)
         assert result == expected

@@ -3,8 +3,8 @@
 Start ()
 
 Some Text
-	 .Thing1 "{values_0}"
-	 .Thing2 "{values_1}"  ' 0.01
+	 .Thing1 "{tokens_0}"
+	 .Thing2 "{tokens_1}"  ' 0.01
 Other Text
 
 Finish
