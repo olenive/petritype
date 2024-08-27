@@ -60,10 +60,13 @@ class RustworkxGraph:
             try:
                 index_from: NodeIndex = node_names_to_node_indices[name_from]
             except KeyError:
-                import pdb; pdb.set_trace()
+                # NOTE: This often occurs when name_from is a common type that is not included in COMMON_TYPES.
+                print(f"KeyError: {name_from}")
+                continue
             try:
                 index_to: NodeIndex = node_names_to_node_indices[name_to]
             except KeyError:
+                # NOTE: This often occurs when name_to is a common type that is not included in COMMON_TYPES.
                 print(f"KeyError: {name_to}")
                 continue
             out.append((index_from, index_to, relationship))

@@ -7,3 +7,13 @@ petritype.egg-info/SOURCES.txt
 petritype.egg-info/dependency_links.txt
 petritype.egg-info/requires.txt
 petritype.egg-info/top_level.txt
+petritype/core/__init__.py
+petritype/core/ast_extraction.py
+petritype/core/data_structures.py
+petritype/core/descriptions.py
+petritype/core/executable_graph_components.py
+petritype/core/parse_modules.py
+petritype/core/relationship_graph_components.py
+petritype/core/rustworkx_graph.py
+petritype/core/type_comparisons.py
+petritype/core/type_relationship_graph_components.py

@@ -14,10 +14,10 @@ COMMON_TYPES = {
     "Optional", "Union", "Any", "Sequence", "Iterable", "Callable", "Type",
 
     # Datetime types.
-    "datetime",
+    "datetime", "timedelta",
 
     # Pydantic types.
-    "BaseModel"
+    "BaseModel",
 
     # Numpy types.
     "ndarray", "np.ndarray", "numpy.ndarray"

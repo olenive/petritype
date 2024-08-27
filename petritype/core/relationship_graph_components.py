@@ -43,7 +43,7 @@ class RelationshipEdges:
                     subtypes = TypeAnnotation.subtypes(attr_type, ignored_types=set())
                     if subtypes.intersection(ignored_types) == set():
                         from_to = (attr_type, type_variable.name)
-                        out[from_to] = TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE
+                        out[from_to] = TypeRelationship.CONTAINED_IN_ATTRIBUTE_TYPE
                 attr_subtypes = TypeAnnotation.subtypes(attr_type, ignored_types=ignored_types)
                 for subtype in attr_subtypes:
                     if subtype not in ignored_types:
