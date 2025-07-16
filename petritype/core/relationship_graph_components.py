@@ -38,21 +38,27 @@ class RelationshipEdges:
                 from_to = (parent_type, type_variable.name)
                 out[from_to] = TypeRelationship.PARENT_OF
             for _, attr_type in type_variable.attribute_types.items():
-                if attr_type not in ignored_types:
-                    # Check if any of the subtypes are in the ignored types.
-                    subtypes = TypeAnnotation.subtypes(attr_type, ignored_types=set())
-                    if subtypes.intersection(ignored_types) == set():
-                        from_to = (attr_type, type_variable.name)
+                if attr_type in ignored_types:
+                    continue
+                # If not ignored, then the attr_type is automatically contained as an attribute type.
+                out[(attr_type, type_variable.name)] = TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE
+                subtypes = TypeAnnotation.subtypes(attr_type, ignored_types=set())
+                if subtypes.intersection(ignored_types) == set():
+                    from_to = (attr_type, type_variable.name)
+                    # Check if the type is already present as an exact attribute type.
+                    if out.get(from_to) != TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE:
                         out[from_to] = TypeRelationship.CONTAINED_IN_ATTRIBUTE_TYPE
                 attr_subtypes = TypeAnnotation.subtypes(attr_type, ignored_types=ignored_types)
                 for subtype in attr_subtypes:
-                    if subtype not in ignored_types:
-                        from_to = (subtype, type_variable.name)
-                        out[from_to] = TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE
+                    if subtype in ignored_types:
+                        continue
+                    from_to = (subtype, type_variable.name)
+                    out[from_to] = TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE
             for subtype in type_variable.subtypes:
-                if subtype not in ignored_types:
-                    from_to = (type_variable.name, subtype)
-                    out[from_to] = TypeRelationship.CONTAINS_AS_SUBTYPE
+                if subtype in ignored_types:
+                    continue
+                from_to = (type_variable.name, subtype)
+                out[from_to] = TypeRelationship.CONTAINS_AS_SUBTYPE
         return out
 
     def type_to_function(

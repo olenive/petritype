@@ -261,6 +261,8 @@ class TestRelationshipEdges:
         )
         result = RelationshipEdges.type_to_type(types=types, ignored_types=set(["str"]))
         expected = {
+            # TODO: Should Optional[T] be ignored if T is ignored?
+            ('Optional[str]', 'B'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('Optional', 'B'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
         }
         assert result == expected
@@ -291,6 +293,8 @@ class TestRelationshipEdges:
         )
         result = RelationshipEdges.type_to_type(types=types, ignored_types=set(["str"]))
         expected = {
+            # TODO: Should 'str | None' be ignored if T is ignored?
+            ('str | None', 'B'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('Optional', 'B'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
         }
         assert result == expected
@@ -298,15 +302,33 @@ class TestRelationshipEdges:
     def test_type_to_type_on_example_01_sans_common_types(self):
         types = example_types_01()
         result = RelationshipEdges.type_to_type(types=types, ignored_types=COMMON_TYPES)
+        # TODO: Should various Optional and dict types be ignored if Optional and dict are in COMMON_TYPES?
         expected = {
             ('Document', 'ScrapeDocument'): TypeRelationship.PARENT_OF,
             ('Collection', 'ScrapesCollection'): TypeRelationship.PARENT_OF,
+            ('dict[str, ScrapeDocument]', 'ScrapesCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('ScrapeDocument', 'ScrapesCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
             ('Document', 'AnnotationsDocument'): TypeRelationship.PARENT_OF,
+            ('dict[str, Any]', 'AnnotationsDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('Collection', 'AnnotationsCollection'): TypeRelationship.PARENT_OF,
+            ('dict[str, AnnotationsDocument]', 'AnnotationsCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('AnnotationsDocument', 'AnnotationsCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
             ('Document', 'TeamDocument'): TypeRelationship.PARENT_OF,
+            ('Optional[str]', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
+            ('Optional[int]', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('ScrapesCollection', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
+            ('Optional[AnnotationsCollection]', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
             ('AnnotationsCollection', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
         }
+        # should_be_expected? = {
+        #     ('Document', 'ScrapeDocument'): TypeRelationship.PARENT_OF,
+        #     ('Collection', 'ScrapesCollection'): TypeRelationship.PARENT_OF,
+        #     ('ScrapeDocument', 'ScrapesCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
+        #     ('Document', 'AnnotationsDocument'): TypeRelationship.PARENT_OF,
+        #     ('Collection', 'AnnotationsCollection'): TypeRelationship.PARENT_OF,
+        #     ('AnnotationsDocument', 'AnnotationsCollection'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
+        #     ('Document', 'TeamDocument'): TypeRelationship.PARENT_OF,
+        #     ('ScrapesCollection', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE,
+        #     ('AnnotationsCollection', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
+        # }
         assert result == expected

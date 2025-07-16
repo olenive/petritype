@@ -49,7 +49,6 @@ class ImportPath(BaseModel):
     function_name: Optional[FunctionName]
 
 
-# This can be dataclass with fields or a pydantic model with fields or simply a type alias.
 class TypeVariableWithAnnotations(BaseModel):
     name: TypeName
     # TODO: Figure out how to ensure that type_name tokens are unique.
@@ -78,8 +77,8 @@ class TypeRelationship(Enum):
     CONTAINS_AS_SUBTYPE = "contains as subtype"
     CONTAINS_AS_ATTRIBUTE_TYPE = "contains as attribute type"
     CONTAINS_AS_ATTRIBUTE_SUBTYPE = "contains as attribute subtype"
-    CONTAINED_IN_ATTRIBUTE_TYPE = "in attribute type"
-    CONTAINED_IN_ATTRIBUTE_SUBTYPE = "in attribute subtype"
+    # CONTAINED_IN_ATTRIBUTE_TYPE = "in attribute type"
+    # CONTAINED_IN_ATTRIBUTE_SUBTYPE = "in attribute subtype"
     CHILD_OF = "child of"
     PARENT_OF = "parent of"
     ANNOTATED_AS = "annotated as"
