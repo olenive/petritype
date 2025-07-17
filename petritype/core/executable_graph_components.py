@@ -275,7 +275,7 @@ class ExecutableGraphOperations:
         - Are there sufficient input tokens?
 
     ### 2. Fire the transition.
-    - Remove input tokens from places (pop?).
+    - Remove input tokens from places.
     - Call transition function with the input tokens to generate the output tokens.
     - Add output tokens (append?).
     """
@@ -299,31 +299,129 @@ class ExecutableGraphOperations:
                 raise ValueError(f"Unexpected node type: {type(node)}")
         return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from)
 
-    def extract_argument_tokens_from_places(
+    def stage_1_extract_argument_tokens_from_places(
         transition: FunctionTransitionNode,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
         allow_token_copying: bool = False,
-        place_history_length: int = 1,
+        # place_history_length: int = 1,
         token_history_length: int = 0,
-    ) -> tuple[dict[ArgumentName, any], Optional[Sequence[ListPlaceNode]]]:
+    ) -> tuple[dict[ArgumentName, any], Sequence[ListPlaceNode]]:
+        """Remove input tokens from source places
+        
+        Return input tokens matched to function arguments and the input places without the removed tokens.
+        """
         # TODO Do we need a way to put the tokens back in case a transition fails?
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges[transition.name]
-        out = dict()
-        input_places = [] if place_history_length >= 1 else None
+        input_edges_to_tokens = dict()
+        input_places = [] # if place_history_length >= 1 else None
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
             token = place.tokens.pop()
-            if place_history_length >= 1:
-                place_copy = place.copy_sans_tokens()
-                input_places.append(place_copy)
-                if allow_token_copying and token_history_length >= 1:
-                    token_copy = deepcopy(token)
-                    place_copy.tokens.append(token_copy)
-            out[edge.argument] = token
-        return out, input_places
+            # if place_history_length >= 1:
+            place_copy = place.copy_sans_tokens()
+            input_places.append(place_copy)
+            if allow_token_copying and token_history_length >= 1:
+                token_copy = deepcopy(token)
+                place_copy.tokens.append(token_copy)
+            input_edges_to_tokens[edge.argument] = token
+        return input_edges_to_tokens, input_places
 
-    async def fire_transition(
+    async def stage_2_call_transition_function(
+        transition: FunctionTransitionNode,
+        tokens_kwargs: dict[ArgumentName, any],
+        transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]],
+        place_names_to_nodes: dict[str, ListPlaceNode],
+        allow_token_copying: bool = False,
+    ) -> dict[ListPlaceNode, Any]:
+        """Call the transition function and match output tokens to destination places.
+
+        Return a mapping of output places to the tokens to be added to them.
+        """
+        if transition.kwargs is not None:
+            merged_kwargs = SafeMerge.dictionaries(tokens_kwargs, transition.kwargs)
+        else:
+            merged_kwargs = tokens_kwargs
+        if inspect.iscoroutinefunction(transition.function):
+            result = await transition.function(**merged_kwargs)
+        else:
+            result = transition.function(**merged_kwargs)
+        output_places_to_tokens = dict()
+        outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
+        if transition.output_distribution_function is None:
+            # Use place types to determine where tokens should go.
+            potential_output_places: Iterable[ListPlaceNode] = tuple(
+                place_names_to_nodes[edge.place_node_name] for edge in outgoing_edges
+            )
+            matching_places: Iterable[ListPlaceNode] = ExecutableGraphCheck.value_and_places_types_match(
+                result, potential_output_places,
+            )
+            if len(matching_places) > 1 and not allow_token_copying:
+                # Multiple matching places but token copying is not allowed.
+                raise ValueError(
+                    "There are multiple matching destination place nodes but token copying is not allowed. "
+                    "Expected only a single output place. To allow the same token to be copied to multiple places, "
+                    "set the `allow_token_copying` parameter to True."
+                )
+            elif len(matching_places) > 1 and allow_token_copying:
+                # There are multiple matching places and the token can be copied to each of them.
+                for place in matching_places:
+                    output_places_to_tokens[place] = deepcopy(result)
+            elif len(matching_places) == 1:
+                # There is a single matching place.
+                matching_place = next(iter(matching_places))
+                output_places_to_tokens[matching_place] = result
+            else:
+                # No matching places found.
+                if len(matching_places) == 0:
+                    raise ValueError(
+                        f"No matching places found for result of transition \"{transition.name}\". "
+                        f"Expected a place of type {type(result)}."
+                    )
+                else:
+                    raise ValueError("Unexpected branch...")
+        else:  # TODO: create and test separate functions for these two branches.
+            # Use the given output distribution function to determine where the tokens should go.
+            if not ExecutableGraphCheck.all_return_indices_are_none(outgoing_edges):
+                raise ValueError(
+                    "Expected all return indices to be None when an output distribution function is used but this is"
+                    f" not the case for transition \"{transition.name}\" and outgoing_edges:\n{outgoing_edges}."
+                )
+            destination_place_names_to_tokens = transition.output_distribution_function(result)
+            if len(destination_place_names_to_tokens) > 1 and not allow_token_copying:
+                raise ValueError(
+                    "Expected only a single output place. To allow the same token to be copied to multiple places, "
+                    "set the `allow_token_copying` parameter to True."
+                )
+            elif len(destination_place_names_to_tokens) == 1 and not allow_token_copying:
+                place_name, token = next(iter(destination_place_names_to_tokens.items()))
+                destination_place = place_names_to_nodes[place_name]
+                ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
+                if token is not None:
+                    output_places_to_tokens[destination_place] = token
+            elif len(destination_place_names_to_tokens) > 1 and allow_token_copying:
+                for place_name, token in destination_place_names_to_tokens.items():
+                    destination_place = place_names_to_nodes[place_name]
+                    ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
+                    if token is not None:
+                        output_places_to_tokens[destination_place] = token
+            else:
+                raise ValueError(
+                    "Unexpected branch: no output places found for the result of the transition."
+                )
+        return output_places_to_tokens
+
+    def stage_3_distribute_output_tokens(
+        output_places_to_tokens: dict[ListPlaceNode, Any],
+    ) -> Sequence[ListPlaceNode]:
+        # Distribute the output tokens to the corresponding places.
+        for place, token in output_places_to_tokens.items():
+            place.tokens.append(token)
+        return list(output_places_to_tokens.keys())
+
+    # TODO: Attempt to replace the old fire_transition with stages 1-3.
+
+    async def old_fire_transition(
         transition: FunctionTransitionNode,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]],
@@ -332,7 +430,14 @@ class ExecutableGraphOperations:
         place_history_length: int = 1,
         token_history_length: int = 0,
     ) -> tuple[Optional[Sequence[ListPlaceNode]], Optional[Sequence[ListPlaceNode]]]:
-        """TODO: test how this handles missing in/out edges and places.
+        """First pass at an impure function that fires a transition.
+        NOTE: To create detailed animations of tokens moving from source places to transition node and then to
+        destination places, it makes sense to split up this function into 3 stages:
+        1. Extract tokens from input places.
+        2. Call the transition function with the extracted tokens.
+        3. Distribute the result to the output places.
+        
+        TODO: test how this handles missing in/out edges and places.
         TODO: check for kwargs and transition kwargs clashes as part of graph validation before execution.
         """
 
@@ -345,7 +450,7 @@ class ExecutableGraphOperations:
 
         # Pop the input tokens out of the input places.
         outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
-        tokens_kwargs, history_input_places = ExecutableGraphOperations.extract_argument_tokens_from_places(
+        tokens_kwargs, history_input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
             transition=transition,
             transition_names_to_incoming_edges=transition_names_to_incoming_edges,
             place_names_to_nodes=place_names_to_nodes,
@@ -480,7 +585,7 @@ class ExecutableGraphOperations:
             if transition is None:
                 print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
                 return executable_graph, transitions_fired
-            input_history, output_history = await ExecutableGraphOperations.fire_transition(
+            input_history, output_history = await ExecutableGraphOperations.old_fire_transition(
                 transition=transition,
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                 transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
