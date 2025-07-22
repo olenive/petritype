@@ -313,7 +313,7 @@ class ExecutableGraphOperations:
         """
         # TODO Do we need a way to put the tokens back in case a transition fails?
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges[transition.name]
-        input_edges_to_tokens = dict()
+        input_edge_names_to_tokens: dict[ArgumentName, any] = dict()
         input_places = [] # if place_history_length >= 1 else None
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
@@ -324,8 +324,8 @@ class ExecutableGraphOperations:
             if allow_token_copying and token_history_length >= 1:
                 token_copy = deepcopy(token)
                 place_copy.tokens.append(token_copy)
-            input_edges_to_tokens[edge.argument] = token
-        return input_edges_to_tokens, input_places
+            input_edge_names_to_tokens[edge.argument] = token
+        return input_edge_names_to_tokens, input_places
 
     async def stage_2_call_transition_function(
         transition: FunctionTransitionNode,
@@ -346,7 +346,7 @@ class ExecutableGraphOperations:
             result = await transition.function(**merged_kwargs)
         else:
             result = transition.function(**merged_kwargs)
-        output_places_to_tokens = dict()
+        output_place_names_to_tokens: dict[PlaceNodeName, Any] = dict()
         outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
         if transition.output_distribution_function is None:
             # Use place types to determine where tokens should go.
@@ -366,11 +366,11 @@ class ExecutableGraphOperations:
             elif len(matching_places) > 1 and allow_token_copying:
                 # There are multiple matching places and the token can be copied to each of them.
                 for place in matching_places:
-                    output_places_to_tokens[place] = deepcopy(result)
+                    output_place_names_to_tokens[place.name] = deepcopy(result)
             elif len(matching_places) == 1:
                 # There is a single matching place.
                 matching_place = next(iter(matching_places))
-                output_places_to_tokens[matching_place] = result
+                output_place_names_to_tokens[matching_place.name] = result
             else:
                 # No matching places found.
                 if len(matching_places) == 0:
@@ -398,26 +398,30 @@ class ExecutableGraphOperations:
                 destination_place = place_names_to_nodes[place_name]
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                 if token is not None:
-                    output_places_to_tokens[destination_place] = token
+                    output_place_names_to_tokens[destination_place.name] = token
             elif len(destination_place_names_to_tokens) > 1 and allow_token_copying:
                 for place_name, token in destination_place_names_to_tokens.items():
                     destination_place = place_names_to_nodes[place_name]
                     ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                     if token is not None:
-                        output_places_to_tokens[destination_place] = token
+                        output_place_names_to_tokens[destination_place.name] = token
             else:
                 raise ValueError(
                     "Unexpected branch: no output places found for the result of the transition."
                 )
-        return output_places_to_tokens
+        return output_place_names_to_tokens
 
     def stage_3_distribute_output_tokens(
-        output_places_to_tokens: dict[ListPlaceNode, Any],
+        output_place_names_to_tokens: dict[PlaceNodeName, Any],
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
     ) -> Sequence[ListPlaceNode]:
         # Distribute the output tokens to the corresponding places.
-        for place, token in output_places_to_tokens.items():
-            place.tokens.append(token)
-        return list(output_places_to_tokens.keys())
+        output_place_names = set()
+        for place_name, token in output_place_names_to_tokens.items():
+            output_place_names.add(place_name)
+            place_names_to_nodes[place_name].tokens.append(token)
+        # We don't want duplicate output places since this is used for visualization.
+        return [place_names_to_nodes[name] for name in output_place_names]
 
     # TODO: Attempt to replace the old fire_transition with stages 1-3.
 
@@ -585,15 +589,37 @@ class ExecutableGraphOperations:
             if transition is None:
                 print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
                 return executable_graph, transitions_fired
-            input_history, output_history = await ExecutableGraphOperations.old_fire_transition(
+            # input_history, output_history = await ExecutableGraphOperations.old_fire_transition(
+            #     transition=transition,
+            #     transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+            #     transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
+            #     place_names_to_nodes=place_names_to_nodes,
+            #     allow_token_copying=allow_token_copying,
+            #     place_history_length=place_history_length,
+            #     token_history_length=token_history_length,
+            # )
+            #
+            # TODO: Where is this used? Should we use the new stage 1-3 functions instead?
+            input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
                 transition=transition,
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                place_names_to_nodes=place_names_to_nodes,
+                allow_token_copying=allow_token_copying,
+                # place_history_length=place_history_length,
+                token_history_length=token_history_length,
+            )
+            output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
+                transition=transition,
+                tokens_kwargs=input_args_to_tokens,
                 transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
                 place_names_to_nodes=place_names_to_nodes,
                 allow_token_copying=allow_token_copying,
-                place_history_length=place_history_length,
-                token_history_length=token_history_length,
             )
+            output_places: Sequence[ListPlaceNode] = ExecutableGraphOperations.stage_3_distribute_output_tokens(
+                output_place_names_to_tokens=output_place_names_to_tokens,
+                place_names_to_nodes=place_names_to_nodes,
+            )
+
             transitions_fired += 1
             # Update transition history.
             if transition_history_length == 1:
@@ -604,11 +630,11 @@ class ExecutableGraphOperations:
                     executable_graph.transition_history.pop(0)
             # Update place history.
             if place_history_length == 1:
-                executable_graph.input_place_history = [input_history]
-                executable_graph.output_place_history = [output_history]
+                executable_graph.input_place_history = [input_places]
+                executable_graph.output_place_history = [output_places]
             elif place_history_length > 1:
-                executable_graph.input_place_history.append(input_history)
-                executable_graph.output_place_history.append(output_history)
+                executable_graph.input_place_history.append(input_places)
+                executable_graph.output_place_history.append(output_places)
                 if len(executable_graph.input_place_history) > place_history_length:
                     executable_graph.input_place_history.pop(0)
                     executable_graph.output_place_history.pop(0)

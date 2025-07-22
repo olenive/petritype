@@ -1,6 +1,7 @@
 LICENSE-MIT
 README.md
 setup.py
+examples/__init__.py
 petritype/__init__.py
 petritype.egg-info/PKG-INFO
 petritype.egg-info/SOURCES.txt
