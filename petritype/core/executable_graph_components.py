@@ -434,6 +434,11 @@ class ExecutableGraphOperations:
         place_history_length: int = 1,
         token_history_length: int = 0,
     ) -> tuple[Optional[Sequence[ListPlaceNode]], Optional[Sequence[ListPlaceNode]]]:
+        raise RuntimeError(
+            "This function is deprecated and will be removed in a future version. "
+            "Use stage_1_extract_argument_tokens_from_places, stage_2_call_transition_function, and "
+            "stage_3_distribute_output_tokens instead."
+        )
         """First pass at an impure function that fires a transition.
         NOTE: To create detailed animations of tokens moving from source places to transition node and then to
         destination places, it makes sense to split up this function into 3 stages:
