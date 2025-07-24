@@ -10,6 +10,7 @@ build
 
 # Misc
 TRASH
+commit-notes.txt
 
 # Data
 data/
