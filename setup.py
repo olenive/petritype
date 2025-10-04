@@ -6,9 +6,9 @@ setup(
     version='0.1.0',
     packages=find_packages(),
     install_requires=[
-        "pydantic==2.7.1",
+        "pydantic==2.11.9",
         "rustworkx==0.14.2",
-        "setuptools==69.5.1",
+        "setuptools==80.9.0",
     ],
     entry_points={
         'console_scripts': [
