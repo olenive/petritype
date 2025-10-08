@@ -14,50 +14,71 @@ from petritype.helpers.structures import SafeMerge
 type TransitionName = str
 
 
-class ListPlaceNode(BaseModel):
+class PositionalArgsBaseModel(BaseModel):
+    """Base class that enables positional arguments for Pydantic models."""
+    
+    def __init__(self, *args, **kwargs):
+        # Get the field names in order from the model
+        field_names = list(self.__class__.model_fields.keys())
+        
+        # Map positional arguments to field names
+        for i, arg in enumerate(args):
+            if i < len(field_names):
+                field_name = field_names[i]
+                if field_name not in kwargs:
+                    kwargs[field_name] = arg
+        
+        # Let Pydantic handle everything else
+        super().__init__(**kwargs)
+
+
+class ListPlaceNode(PositionalArgsBaseModel):
     name: PlaceNodeName
     type: Any  # Temporarily accept any value
     tokens: list[Any] = []
     # TODO: Add validation to check that type matches tokens
 
-    @model_validator(mode="before")
-    def check_type(cls, tokens):
-        type_of_value = tokens.get('type', None)
+    @model_validator(mode="after")
+    def validate_type_field(self):
+        type_of_value = self.type
+        
         if type_of_value is not None:
             if not (
-                isinstance(type_of_value, Type)
+                isinstance(type_of_value, type)  # Changed Type to type (builtin)
                 or isinstance(type_of_value, _UnionGenericAlias)
                 or isinstance(type_of_value, _GenericAlias)
                 or isinstance(type_of_value, GenericAlias)
                 or isinstance(type_of_value, TypeAliasType)
             ):
                 raise ValueError(
-                    f"Expected type to be a Type, _UnionGenericAlias, or _GenericAlias but got: {type_of_value}"
+                    f"Expected type to be a Type, _UnionGenericAlias, or _GenericAlias but got: {type_of_value} "
+                    f"(type: {type(type_of_value)})"
                 )
-        if type_of_value is None:
+        else:
             raise NotImplementedError(
                 "Unclear at the time of writing what it means for a place node to have no type."
             )
-        return tokens
+        
+        return self
 
     def copy_sans_tokens(self) -> "ListPlaceNode":
-        return ListPlaceNode(name=self.name, type=self.type)
+        return ListPlaceNode(self.name, self.type)
 
 
-class FunctionTransitionNode(BaseModel):
+class FunctionTransitionNode(PositionalArgsBaseModel):
     name: str
     function: Callable
     kwargs: Optional[KwArgs] = None
     output_distribution_function: Optional[Callable[[Any], dict[PlaceNodeName, Any]]] = None
 
 
-class ArgumentEdgeToTransition(BaseModel):
+class ArgumentEdgeToTransition(PositionalArgsBaseModel):
     place_node_name: PlaceNodeName
     transition_node_name: FunctionName
     argument: ArgumentName
 
 
-class ReturnedEdgeFromTransition(BaseModel):
+class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
     transition_node_name: FunctionName
     place_node_name: PlaceNodeName
     return_index: Optional[ReturnIndex] = None
@@ -259,6 +280,24 @@ class ExecutableGraphCheck:
         )
 
     def value_and_places_types_match(value: Any, places: Iterable[ListPlaceNode]) -> Iterable[ListPlaceNode]:
+        """
+        Find places whose types match the value.
+        
+        Handles:
+        - Direct type matches: value type matches place type
+        - List values: Check if list elements match place type
+        """
+        # If value is a list with elements, check if elements match place types
+        if isinstance(value, list) and len(value) > 0:
+            # Check each element in the list against place types
+            matching = []
+            for place in places:
+                # All elements must match the place type
+                if all(CompareTypes.between_value_and_type(item, place.type) for item in value):
+                    matching.append(place)
+            return tuple(matching)
+        
+        # For non-list values or empty lists, use direct type matching
         bools = (CompareTypes.between_value_and_type(value, place.type) for place in places)
         return tuple(place for place, match in zip(places, bools) if match)
 
@@ -298,6 +337,10 @@ class ExecutableGraphOperations:
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
         return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from)
+
+    def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
+        """Update the given place by appending the result token to its tokens list."""
+        place.tokens.append(result)
 
     def stage_1_extract_argument_tokens_from_places(
         transition: FunctionTransitionNode,
@@ -369,7 +412,7 @@ class ExecutableGraphOperations:
                     output_place_names_to_tokens[place.name] = deepcopy(result)
             elif len(matching_places) == 1:
                 # There is a single matching place.
-                matching_place = next(iter(matching_places))
+                matching_place = matching_places[0]
                 output_place_names_to_tokens[matching_place.name] = result
             else:
                 # No matching places found.
@@ -419,7 +462,16 @@ class ExecutableGraphOperations:
         output_place_names = set()
         for place_name, token in output_place_names_to_tokens.items():
             output_place_names.add(place_name)
-            place_names_to_nodes[place_name].tokens.append(token)
+            
+            # If token is a list and place type is not a list, extend place tokens with list elements
+            # Otherwise, append the token as-is
+            if isinstance(token, list) and len(token) > 0 and not (
+                isinstance(place_names_to_nodes[place_name].type, list)  # Token holds a list but place type is not one.
+            ):  # TODO: maybe we want more type checks here?
+                place_names_to_nodes[place_name].tokens.extend(token)
+            else:
+                place_names_to_nodes[place_name].tokens.append(token)
+                
         # We don't want duplicate output places since this is used for visualization.
         return [place_names_to_nodes[name] for name in output_place_names]
 

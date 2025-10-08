@@ -153,4 +153,3 @@ class TestCompareTypes:
         type MyAlias = tuple[str, int]
         assert CompareTypes.between_value_and_type(("abc", 123), MyAlias)
         assert not CompareTypes.between_value_and_type("efg", MyAlias)
-

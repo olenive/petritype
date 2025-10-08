@@ -74,3 +74,16 @@ class TestExecutableGraphCheck:
         expected = (ListPlaceNode(name='KeyForDBRetrieval', type=DBKey, tokens=[]),)
         result = ExecutableGraphCheck.value_and_places_types_match('h_0', potential_places)
         assert result == expected
+
+    def test_value_and_places_types_match_inside_list(self):
+        """If the given value is a list and the place is of type ListPlaceNode, check if the inner types match."""
+        places = [
+            ListPlaceNode(name='place1', type=int),
+            ListPlaceNode(name='place2', type=list[int]), # Second inner list so this should not match.
+            ListPlaceNode(name='place3', type=int),
+            ListPlaceNode(name='place4', type=list[str]),
+            ListPlaceNode(name='place5', type=str),
+        ]
+        value = [42, 43]
+        result = ExecutableGraphCheck.value_and_places_types_match(value, places)
+        assert list(result) == [places[0], places[2]]
