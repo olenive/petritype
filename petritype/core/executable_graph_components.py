@@ -68,8 +68,8 @@ class ListPlaceNode(PositionalArgsBaseModel):
 class FunctionTransitionNode(PositionalArgsBaseModel):
     name: str
     function: Callable
-    kwargs: Optional[KwArgs] = None
     output_distribution_function: Optional[Callable[[Any], dict[PlaceNodeName, Any]]] = None
+    kwargs: Optional[KwArgs] = None
 
 
 class ArgumentEdgeToTransition(PositionalArgsBaseModel):
