@@ -20,12 +20,6 @@ type FunctionNamesToNodeIndices = dict[FunctionFullName, int]
 class NodeLabel:
 
     def default_token_summariser(token: any, maximum_length=100) -> str:
-        # If the token has a summary_text method, use that.
-        if hasattr(token, "summary"):
-            try:
-                return token.summary()
-            except Exception as e:
-                return f"Error: {e}"
         token_info = str(token)
         if len(token_info) > maximum_length:
             token_info = token_info[:maximum_length] + "..."
