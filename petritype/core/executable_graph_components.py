@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import _GenericAlias, _UnionGenericAlias, TypeAliasType
 from types import GenericAlias
-from typing import Callable, Iterable, Optional, Sequence, Type, Union, Any
+from typing import Callable, Iterable, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, model_validator
 import inspect
 from typeguard import TypeCheckError, check_type
@@ -18,9 +18,7 @@ class PositionalArgsBaseModel(BaseModel):
     """Base class that enables positional arguments for Pydantic models."""
     
     def __init__(self, *args, **kwargs):
-        # Get the field names in order from the model
         field_names = list(self.__class__.model_fields.keys())
-        
         # Map positional arguments to field names
         for i, arg in enumerate(args):
             if i < len(field_names):
@@ -28,13 +26,12 @@ class PositionalArgsBaseModel(BaseModel):
                 if field_name not in kwargs:
                     kwargs[field_name] = arg
         
-        # Let Pydantic handle everything else
         super().__init__(**kwargs)
 
 
 class ListPlaceNode(PositionalArgsBaseModel):
     name: PlaceNodeName
-    type: Any  # Temporarily accept any value
+    type: Any  # Temporarily accept any value  
     tokens: list[Any] = []
     # TODO: Add validation to check that type matches tokens
 
@@ -61,8 +58,23 @@ class ListPlaceNode(PositionalArgsBaseModel):
         
         return self
 
+    @model_validator(mode="after")
+    def check_type_matches_tokens(self):
+        for token in self.tokens:
+            try:
+                check_type(token, self.type)  # Note: isinstance() argument 2 cannot be a parameterized generic.
+            except TypeCheckError as e:
+                raise TypeError(
+                    f"Expected token to be of type {self.type} in {self.name}, got {type(token)}.\nTypeGuard error: {e}"
+                    f"\nToken: {token}"
+                )
+        return self
+
     def copy_sans_tokens(self) -> "ListPlaceNode":
         return ListPlaceNode(self.name, self.type)
+
+
+# An alias to ListPlaceNode just called PlaceNode.
 
 
 class FunctionTransitionNode(PositionalArgsBaseModel):
@@ -101,14 +113,96 @@ class ExecutableGraph(BaseModel):
         return place_names_to_nodes.get(name)
 
     @model_validator(mode='before')
-    def check_unique_names(cls, tokens):
-        place_names = [place.name for place in tokens.get('places', [])]
-        transition_names = [transition.name for transition in tokens.get('transitions', [])]
+    def check_unique_names(cls, values):
+        place_names = [place.name for place in values.get('places', [])]
+        transition_names = [transition.name for transition in values.get('transitions', [])]
         if len(place_names) != len(set(place_names)):
             raise ValueError("Place names must be unique.")
         if len(transition_names) != len(set(transition_names)):
             raise ValueError("Transition names must be unique.")
-        return tokens
+        return values
+    
+    @model_validator(mode="before")
+    def check_edge_names(cls, values):
+        places = values.get('places', [])
+        transitions = values.get('transitions', [])
+        argument_edges = values.get('argument_edges', [])
+        return_edges = values.get('return_edges', [])
+        
+        place_names = {place.name for place in places}
+        transition_names = {transition.name for transition in transitions}
+        
+        for edge in argument_edges:
+            if edge.place_node_name not in place_names:
+                raise ValueError(f"Argument edge references unknown place: {edge.place_node_name}")
+            if edge.transition_node_name not in transition_names:
+                raise ValueError(f"Argument edge references unknown transition: {edge.transition_node_name}")
+        
+        for edge in return_edges:
+            if edge.place_node_name not in place_names:
+                raise ValueError(f"Return edge references unknown place: {edge.place_node_name}")
+            if edge.transition_node_name not in transition_names:
+                raise ValueError(f"Return edge references unknown transition: {edge.transition_node_name}")
+        
+        return values
+
+    @model_validator(mode="before")
+    def check_edge_types(cls, values):
+        places = values.get('places', [])
+        transitions = values.get('transitions', [])
+        argument_edges = values.get('argument_edges', [])
+        return_edges = values.get('return_edges', [])
+        place_names_to_nodes = {place.name: place for place in places}
+        transition_names_to_nodes = {transition.name: transition for transition in transitions}
+
+        for edge in argument_edges:
+            if not isinstance(edge, ArgumentEdgeToTransition):
+                raise TypeError(f"Expected ArgumentEdgeToTransition, got {type(edge)}")
+            place = place_names_to_nodes[edge.place_node_name]
+            if not isinstance(place, ListPlaceNode):
+                raise NotImplementedError("Currently only ListPlaceNode is supported.")
+            transition = transition_names_to_nodes[edge.transition_node_name]
+            if not isinstance(transition, FunctionTransitionNode):
+                raise NotImplementedError("Currently only FunctionTransitionNode is supported.")
+            place_type = place.type  # This needs to be the value of the 'type' field of the place.
+            argument_type = get_type_hints(transition.function).get(edge.argument)
+            if place_type is not None and argument_type is not None:
+                if not CompareTypes.between_annotations_where_one_maybe_in_list(
+                    annotation_not_in_list=place_type,  # The place.type contains the inner type event if the place
+                    # is a ListPlaceNode that holds a list of tokens.
+                    annotation_maybe_in_list=argument_type,  # This is to allow the case of passing in all the tokens
+                    # at once as a list.
+                ):
+                    raise TypeError(
+                        f"Type mismatch for argument edge from place '{place.name}' to transition "
+                        f"'{transition.name}': place type '{place_type}' does not match argument type "
+                        f"'{argument_type}'."
+                    )
+
+        for edge in return_edges:
+            if not isinstance(edge, ReturnedEdgeFromTransition):
+                raise TypeError(f"Expected ReturnedEdgeFromTransition, got {type(edge)}")
+            place = place_names_to_nodes[edge.place_node_name]
+            if not isinstance(place, ListPlaceNode):
+                raise NotImplementedError("Currently only ListPlaceNode is supported.")
+            transition = transition_names_to_nodes[edge.transition_node_name]
+            if not isinstance(transition, FunctionTransitionNode):
+                raise NotImplementedError("Currently only FunctionTransitionNode is supported.")
+            place_type = get_type_hints(place).get('type')
+            return_type = get_type_hints(transition.function).get('return')
+            if place_type is not None and return_type is not None:
+                if not CompareTypes.between_annotations_where_one_maybe_in_list(
+                    annotation_not_in_list=place_type,  # The place type contains the inner type even if the place
+                    # is a ListPlaceNode that holds a list of tokens.
+                    annotation_maybe_in_list=return_type,  # All the tokens could be returned at once as a list.
+                ):
+                    raise TypeError(
+                        f"Type mismatch for return edge from transition '{transition.name}' to place "
+                        f"'{place.name}': place type '{place_type}' does not match return type "
+                        f"'{return_type}'."
+                    )
+        
+        return values
 
 
 # This is intended as shorthand for the common case when adding a transition with output(s) to a graph.
@@ -322,7 +416,7 @@ class ExecutableGraphOperations:
     def construct_graph(
         mixed_nodes_and_edges: Iterable[
             Union[ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition]
-        ]
+        ],
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         for node in mixed_nodes_and_edges:
@@ -360,14 +454,37 @@ class ExecutableGraphOperations:
         input_places = [] # if place_history_length >= 1 else None
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
-            token = place.tokens.pop()
-            # if place_history_length >= 1:
             place_copy = place.copy_sans_tokens()
             input_places.append(place_copy)
-            if allow_token_copying and token_history_length >= 1:
-                token_copy = deepcopy(token)
-                place_copy.tokens.append(token_copy)
-            input_edge_names_to_tokens[edge.argument] = token
+            argument_type = get_type_hints(transition.function).get(edge.argument)
+            place_type = place.type
+            # Two cases - passing a single token or passing all tokens as a list.
+            print("argument_type:", argument_type   
+                  , "place_type:", place_type
+                  , "place.tokens:", place.tokens
+                  )
+            argument_origin = get_origin(argument_type)
+            print("argument_origin is list:", argument_origin is list)
+            if argument_origin is list and CompareTypes.between_annotations_where_one_maybe_in_list(
+                annotation_not_in_list=place_type,
+                annotation_maybe_in_list=argument_type,
+            ):  # If the argument type is a list and the type inside the list matches the place type,
+                # pass all tokens as a list.
+                tokens = place.tokens
+                print("tokens to pass as list:", tokens)
+                place.tokens = []
+                if allow_token_copying and token_history_length >= 1:
+                    tokens_copy = deepcopy(tokens)
+                    place_copy.tokens.extend(tokens_copy)
+                input_edge_names_to_tokens[edge.argument] = tokens
+            else:  # Pass in a single token.
+                token = place.tokens.pop()
+                print("token to pass as single:", token)
+                # if place_history_length >= 1:
+                if allow_token_copying and token_history_length >= 1:
+                    token_copy = deepcopy(token)
+                    place_copy.tokens.append(token_copy)
+                input_edge_names_to_tokens[edge.argument] = token
         return input_edge_names_to_tokens, input_places
 
     async def stage_2_call_transition_function(
@@ -400,6 +517,7 @@ class ExecutableGraphOperations:
                 result, potential_output_places,
             )
             if len(matching_places) > 1 and not allow_token_copying:
+                import pdb; pdb.set_trace()
                 # Multiple matching places but token copying is not allowed.
                 raise ValueError(
                     "There are multiple matching destination place nodes but token copying is not allowed. "
