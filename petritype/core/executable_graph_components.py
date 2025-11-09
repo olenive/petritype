@@ -4,7 +4,6 @@ from types import GenericAlias
 from typing import Callable, Iterable, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, model_validator
 import inspect
-from typeguard import TypeCheckError, check_type
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
 from petritype.core.type_comparisons import CompareTypes
@@ -61,11 +60,9 @@ class ListPlaceNode(PositionalArgsBaseModel):
     @model_validator(mode="after")
     def check_type_matches_tokens(self):
         for token in self.tokens:
-            try:
-                check_type(token, self.type)  # Note: isinstance() argument 2 cannot be a parameterized generic.
-            except TypeCheckError as e:
+            if not CompareTypes.between_value_and_type(token, self.type):
                 raise TypeError(
-                    f"Expected token to be of type {self.type} in {self.name}, got {type(token)}.\nTypeGuard error: {e}"
+                    f"Expected token to be of type {self.type} in {self.name}, got {type(token)}."
                     f"\nToken: {token}"
                 )
         return self
@@ -353,11 +350,19 @@ class ExecutableGraphCheck:
         return True
 
     def ensure_token_type_matches_place_type(token: any, place: ListPlaceNode):
-        try:
-            check_type(token, place.type)  # Note: isinstance() argument 2 cannot be a parameterized generic.
-        except TypeCheckError as e:
+        # Handle the case where we have ListPlaceNode being given a list of tokens of the matching inner type.
+        if isinstance(place, ListPlaceNode) and isinstance(token, list):
+            inner_type = place.type
+            for item in token:
+                if not CompareTypes.between_value_and_type(item, inner_type):
+                    raise TypeError(
+                        f"Expected token item to be of type {inner_type} in {place.name}, got {type(item)}."
+                        f"\nToken item: {item}"
+                    )
+            return
+        if not CompareTypes.between_value_and_type(token, place.type):
             raise TypeError(
-                f"Expected token to be of type {place.type} in {place.name}, got {type(token)}.\nTypeGuard error: {e}"
+                f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
                 f"\nToken: {token}"
             )
 
@@ -526,8 +531,9 @@ class ExecutableGraphOperations:
                 )
             elif len(matching_places) > 1 and allow_token_copying:
                 # There are multiple matching places and the token can be copied to each of them.
+                # Note: actual copying will be handled by add_tokens_to_places
                 for place in matching_places:
-                    output_place_names_to_tokens[place.name] = deepcopy(result)
+                    output_place_names_to_tokens[place.name] = result
             elif len(matching_places) == 1:
                 # There is a single matching place.
                 matching_place = matching_places[0]
@@ -550,10 +556,17 @@ class ExecutableGraphOperations:
                 )
             destination_place_names_to_tokens = transition.output_distribution_function(result)
             if len(destination_place_names_to_tokens) > 1 and not allow_token_copying:
-                raise ValueError(
-                    "Expected only a single output place. To allow the same token to be copied to multiple places, "
-                    "set the `allow_token_copying` parameter to True."
-                )
+            #     raise ValueError(
+            #         "Expected only a single output place. To allow the same token to be copied to multiple places, "
+            #         "set the `allow_token_copying` parameter to True."
+            #     )
+                # TODO: Check that none of the tokens refer to the same piece of memory here?
+                # Use the distribution function to result to put tokens in the output places.
+                for place_name, token in destination_place_names_to_tokens.items():
+                    destination_place = place_names_to_nodes[place_name]
+                    ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
+                    if token is not None:
+                        output_place_names_to_tokens[destination_place.name] = token
             elif len(destination_place_names_to_tokens) == 1 and not allow_token_copying:
                 place_name, token = next(iter(destination_place_names_to_tokens.items()))
                 destination_place = place_names_to_nodes[place_name]
@@ -572,156 +585,73 @@ class ExecutableGraphOperations:
                 )
         return output_place_names_to_tokens
 
-    def stage_3_distribute_output_tokens(
+    def add_tokens_to_places(  # Stage 3
         output_place_names_to_tokens: dict[PlaceNodeName, Any],
         place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
-    ) -> Sequence[ListPlaceNode]:
-        # Distribute the output tokens to the corresponding places.
-        output_place_names = set()
-        for place_name, token in output_place_names_to_tokens.items():
-            output_place_names.add(place_name)
-            
-            # If token is a list and place type is not a list, extend place tokens with list elements
-            # Otherwise, append the token as-is
-            if isinstance(token, list) and len(token) > 0 and not (
-                isinstance(place_names_to_nodes[place_name].type, list)  # Token holds a list but place type is not one.
-            ):  # TODO: maybe we want more type checks here?
-                place_names_to_nodes[place_name].tokens.extend(token)
-            else:
-                place_names_to_nodes[place_name].tokens.append(token)
-                
-        # We don't want duplicate output places since this is used for visualization.
-        return [place_names_to_nodes[name] for name in output_place_names]
-
-    # TODO: Attempt to replace the old fire_transition with stages 1-3.
-
-    async def old_fire_transition(
-        transition: FunctionTransitionNode,
-        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
-        transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]],
-        place_names_to_nodes: dict[str, ListPlaceNode],
         allow_token_copying: bool = False,
-        place_history_length: int = 1,
-        token_history_length: int = 0,
-    ) -> tuple[Optional[Sequence[ListPlaceNode]], Optional[Sequence[ListPlaceNode]]]:
-        raise RuntimeError(
-            "This function is deprecated and will be removed in a future version. "
-            "Use stage_1_extract_argument_tokens_from_places, stage_2_call_transition_function, and "
-            "stage_3_distribute_output_tokens instead."
-        )
-        """First pass at an impure function that fires a transition.
-        NOTE: To create detailed animations of tokens moving from source places to transition node and then to
-        destination places, it makes sense to split up this function into 3 stages:
-        1. Extract tokens from input places.
-        2. Call the transition function with the extracted tokens.
-        3. Distribute the result to the output places.
+        check_types: bool = True,
+    ) -> dict[PlaceNodeName, ListPlaceNode]:
+        """Distribute the output tokens to the corresponding places.
         
-        TODO: test how this handles missing in/out edges and places.
-        TODO: check for kwargs and transition kwargs clashes as part of graph validation before execution.
+        Handle token copying if required.
+        Handle updating ListPlaceNode with either a single token or a list of tokens.
+        Handle updating multiple place nodes with the same token if copying is allowed.
+        Handle updating multiple place nodes with different tokens.
         """
-
-        if token_history_length >= 1 and not allow_token_copying:
-            raise ValueError(
-                "Token history can only be recorded when token copying is allowed. Adding tokens to the history list "
-                "without making a copy means that history will be altered when the tokens are modified by subsequent "
-                "transitions."
-            )
-
-        # Pop the input tokens out of the input places.
-        outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
-        tokens_kwargs, history_input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
-            transition=transition,
-            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-            place_names_to_nodes=place_names_to_nodes,
-            allow_token_copying=allow_token_copying,
-            place_history_length=place_history_length,
-            token_history_length=token_history_length,
-        )
-
-        # Use the information from incoming edges together with tokens & kwargs to execute the transition function.
-        if transition.kwargs is not None:
-            merged_kwargs = SafeMerge.dictionaries(tokens_kwargs, transition.kwargs)
-        else:
-            merged_kwargs = tokens_kwargs
-        if inspect.iscoroutinefunction(transition.function):
-            result = await transition.function(**merged_kwargs)
-        else:
-            result = transition.function(**merged_kwargs)
-
-        # Distribute the result to the outgoing places.
-        history_output_places = [] if place_history_length >= 1 else None
-        if transition.output_distribution_function is None:  # Use place types to determine where tokens should go.
-            potential_output_places: Iterable[ListPlaceNode] = tuple(
-                place_names_to_nodes[edge.place_node_name] for edge in outgoing_edges
-            )
-            matching_places: Iterable[ListPlaceNode] = ExecutableGraphCheck.value_and_places_types_match(
-                result, potential_output_places,
-            )
-            if len(matching_places) > 1 and not allow_token_copying:
-                raise ValueError(
-                    "Expected only a single output place. To allow the same token to be copied to multiple places, "
-                    "set the `allow_token_copying` parameter to True."
-                )
-            elif len(matching_places) > 1 and allow_token_copying:
-                for place in matching_places:
-                    output_token = deepcopy(result)
-                    place.tokens.append(output_token)
-                    if place_history_length >= 1:
-                        history_place = place.copy_sans_tokens()
-                        history_output_places.append(history_place)
-                        if token_history_length >= 1:
-                            history_place.tokens.append(deepcopy(output_token))
-            elif len(matching_places) == 1:
-                matching_place = next(iter(matching_places))
-                matching_place.tokens.append(result)
-                if place_history_length >= 1:
-                    history_place = matching_place.copy_sans_tokens()
-                    history_output_places.append(history_place)
-                    if token_history_length >= 1 and allow_token_copying:
-                        history_place.tokens.append(deepcopy(result))
-            else:
-                if len(matching_places) == 0:
-                    raise ValueError(
-                        f"No matching places found for result of transition \"{transition.name}\". "
-                        f"Expected a place of type {type(result)}."
-                    )
+        updated_places = {}
+        token_usage = {}  # Maps id(token) -> list of place_names where it's used
+        need_to_copy = False
+        
+        # First pass: track token usage
+        for place_name, token in output_place_names_to_tokens.items():
+            if token is None:
+                continue  # Skip None tokens
+            token_id = id(token)
+            if token_id not in token_usage:
+                token_usage[token_id] = []
+            token_usage[token_id].append(place_name)
+        
+        # Second pass: add tokens to places
+        for place_name, token in output_place_names_to_tokens.items():
+            if token is None:
+                continue  # Skip None tokens
+            place = place_names_to_nodes[place_name]
+            token_id = id(token)
+            
+            # Determine if we need to copy this token
+            if len(token_usage[token_id]) > 1:
+                if allow_token_copying:
+                    need_to_copy = True
                 else:
-                    raise ValueError("Unexpected branch...")
-        else:  # Use the given output distribution function to determine where the tokens should go.
-            # TODO: determine if we actually want this to be an option.
-            if not ExecutableGraphCheck.all_return_indices_are_none(outgoing_edges):
-                raise ValueError(
-                    "Expected all return indices to be None when an output distribution function is used but this is"
-                    f" not the case for transition \"{transition.name}\" and outgoing_edges:\n{outgoing_edges}."
-                )
-            destination_place_names_to_tokens = transition.output_distribution_function(result)
-            if len(destination_place_names_to_tokens) > 1 and not allow_token_copying:
-                raise ValueError(
-                    "Expected only a single output place. To allow the same token to be copied to multiple places, "
-                    "set the `allow_token_copying` parameter to True."
-                )
-            elif len(destination_place_names_to_tokens) == 1 and not allow_token_copying:
-                place_name, token = next(iter(destination_place_names_to_tokens.items()))
-                destination_place = place_names_to_nodes[place_name]
-                ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
-                if token is not None:
-                    destination_place.tokens.append(token)
-                    if place_history_length >= 1:
-                        history_place = destination_place.copy_sans_tokens()
-                        history_output_places.append(history_place)
-                        # Token history is not recorded when token copying is not allowed.
-            elif len(destination_place_names_to_tokens) > 1 and allow_token_copying:
-                for place_name, token in destination_place_names_to_tokens.items():
-                    destination_place = place_names_to_nodes[place_name]
-                    ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
-                    if token is not None:
-                        destination_place.tokens.append(token)
-                        if place_history_length >= 1:
-                            history_place = destination_place.copy_sans_tokens()
-                            history_output_places.append(history_place)
-                            if token_history_length >= 1:
-                                history_place.tokens.append(deepcopy(token))
-        return history_input_places, history_output_places
+                    raise RuntimeError(
+                        "Token is being added to multiple places but token copying is not allowed.\n"
+                        f"Token: {token}, used in places: {token_usage[token_id]}"
+                    )
+            
+            # Get the token to add (copy if needed and not the first usage)
+            if need_to_copy and token_usage[token_id].index(place_name) > 0:
+                token_or_list_to_add = deepcopy(token)
+            else:
+                token_or_list_to_add = token
+
+            # If token is a list and place type is not a list, extend with list elements. Otherwise, append the token.
+            place_type_origin = get_origin(place.type)
+            if (
+                isinstance(token_or_list_to_add, list)
+                and len(token_or_list_to_add) > 0
+                and place_type_origin is not list
+            ):
+                if check_types:  # Check that the place type matches the type of every token in the list.
+                    for single_token in token_or_list_to_add:
+                        CompareTypes.between_value_and_type(single_token, place.type)
+                place.tokens.extend(token_or_list_to_add)
+            else:
+                if check_types:
+                    CompareTypes.between_value_and_type(token_or_list_to_add, place.type)
+                place.tokens.append(token_or_list_to_add)
+            updated_places[place_name] = place
+        return updated_places
+
 
     async def execute_graph(
         executable_graph: ExecutableGraph,
@@ -774,7 +704,6 @@ class ExecutableGraphOperations:
             #     token_history_length=token_history_length,
             # )
             #
-            # TODO: Where is this used? Should we use the new stage 1-3 functions instead?
             input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
                 transition=transition,
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
@@ -790,10 +719,12 @@ class ExecutableGraphOperations:
                 place_names_to_nodes=place_names_to_nodes,
                 allow_token_copying=allow_token_copying,
             )
-            output_places: Sequence[ListPlaceNode] = ExecutableGraphOperations.stage_3_distribute_output_tokens(
+            updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
                 output_place_names_to_tokens=output_place_names_to_tokens,
                 place_names_to_nodes=place_names_to_nodes,
+                allow_token_copying=allow_token_copying,
             )
+            output_places: Sequence[ListPlaceNode] = list(updated_places_dict.values())
 
             transitions_fired += 1
             # Update transition history.
