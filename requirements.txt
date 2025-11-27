@@ -54,8 +54,8 @@ jupyterlab_server==2.27.2
 jupyterlab_widgets==3.0.11
 kiwisolver==1.4.5
 MarkupSafe==2.1.5
-matplotlib==3.9.1
-matplotlib-inline==0.1.7
+matplotlib==3.10.7
+matplotlib-inline==0.2.1
 mistune==3.0.2
 nbclient==0.10.0
 nbconvert==7.16.4
@@ -63,7 +63,7 @@ nbformat==5.10.4
 nest-asyncio==1.6.0
 notebook==7.2.1
 notebook_shim==0.2.4
-numpy==2.0.0
+numpy==2.3.5
 overrides==7.7.0
 packaging==24.1
 pandocfilters==1.5.1

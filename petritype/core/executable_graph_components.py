@@ -27,6 +27,10 @@ class PositionalArgsBaseModel(BaseModel):
         
         super().__init__(**kwargs)
 
+    model_config = {
+        "extra": "forbid"
+    }
+
 
 class ListPlaceNode(PositionalArgsBaseModel):
     name: PlaceNodeName
