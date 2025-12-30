@@ -1,4 +1,5 @@
 import pytest
+from pydantic import BaseModel
 from typing import Optional, Union
 from petritype.core.executable_graph_components import ExecutableGraphCheck, ExecutableGraphOperations, ListPlaceNode
 
@@ -83,15 +84,14 @@ class TestExecutableGraphCheck:
     def test_value_and_places_types_match_inside_list(self):
         """If the given value is a list and the place is of type ListPlaceNode, check if the inner types match."""
         places = [
-            ListPlaceNode(name='place1', type=int),
-            ListPlaceNode(name='place2', type=list[int]), # Second inner list so this should not match.
-            ListPlaceNode(name='place3', type=int),
-            ListPlaceNode(name='place4', type=list[str]),
-            ListPlaceNode(name='place5', type=str),
+            ListPlaceNode(name='place_0', type=int),  # Matches because the returned value can be unpacked to int tokens
+            ListPlaceNode(name='place_1', type=list[int]),  # Also matches as the token could be a list[int] instance.
+            ListPlaceNode(name='place_2', type=int),  # Same as place1
+            ListPlaceNode(name='place_3', type=list[str]),
+            ListPlaceNode(name='place_4', type=str),
         ]
-        value = [42, 43]
-        result = ExecutableGraphCheck.value_and_places_types_match(value, places)
-        assert list(result) == [places[0], places[2]]
+        result = ExecutableGraphCheck.value_and_places_types_match([42, 43], places)
+        assert list(result) == [places[1], places[0], places[2]]
 
     @pytest.mark.parametrize(
         "value, expected_indices",
@@ -111,6 +111,95 @@ class TestExecutableGraphCheck:
         expected_places = [places[i] for i in expected_indices]
         assert list(result) == expected_places
 
+    def test_value_and_places_types_match_when_comparing_an_empty_list_case_01(self):
+        """At run time we do not know if the empty list matches list[str] or list[int].
+        We do know that an empty list is not itself a token here because there are no
+        places which could accept a type of list[list] (or just list).
+        """
+        places = [
+            ListPlaceNode(name='transactions', type=str, tokens=[]),
+            ListPlaceNode(name='transaction_list', type=list[str], tokens=[]),
+            ListPlaceNode(name='transaction_count', type=list[int], tokens=[]),
+            ListPlaceNode(name='amounts', type=float, tokens=[]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1], places[2]]
+
+    def test_value_and_places_types_match_when_comparing_an_empty_list_case_02(self):
+        """An empty list is potentially compatible with places typed as list or list of lists."""
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=[]),
+            ListPlaceNode(name='mixed_list', type=list, tokens=[[1], ["a", "b"]]),
+            ListPlaceNode(name='nested_list', type=list[list], tokens=[[[1]], [["a", "b"]]]),
+            ListPlaceNode(name='integers', type=int, tokens=[]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1], places[2]]
+    
+    def test_value_and_places_types_match_ambiguously_to_an_empty_list(self):
+        """An empty list could match either list[T] or list[list] - copying would be required to satisfy both."""
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=["a", "b"]),
+            ListPlaceNode(name="int_list", type=list[int], tokens=[[1, 2], [3, 4]]),
+            ListPlaceNode(name="nested_list", type=list[list], tokens=[[[1]], [[2, 3]]]),
+            ListPlaceNode(name='integers', type=int, tokens=[10, 11, 12]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1], places[2]]
+    
+    def test_value_and_places_types_match_with_empty_list_debug_01(self):
+
+        class A(BaseModel):
+            id: int
+
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=["a", "b"]),
+            ListPlaceNode(name="list_of_A", type=list[A], tokens=[[A(id=1)], [A(id=2)]]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1]]
+
+    def test_value_and_place_types_match_with_empty_list_debug_02(self):
+        """Returned type is list[T] and the place is of type T but the returned list is empty"""
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=["a", "b"]),
+            ListPlaceNode(name="int_list", type=list[int], tokens=[[1, 2], [3, 4]]),
+            ListPlaceNode(name="nested_list", type=list[list], tokens=[[[1]], [[2, 3]]]),
+            ListPlaceNode(name="nested_list", type=list[list[float]], tokens=[[[1.0]], [[2.0, 3.0]]]),
+            ListPlaceNode(name='integers', type=int, tokens=[10, 11, 12]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1], places[2], places[3]]       
+
+    def test_value_and_place_types_match_with_empty_list_debug_03a(self):
+        """Returned type is list[T] and the place is of type T but the returned list is nested floats
+        """
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=["a", "b"]),
+            ListPlaceNode(name="int_list", type=list[int], tokens=[[1, 2], [3, 4]]),
+            ListPlaceNode(name="nested_list", type=list[list], tokens=[[[1]], [[2, 3]]]),
+            ListPlaceNode(name="nested_list", type=list[list[float]], tokens=[[[1.0]], [[2.0, 3.0]]]),
+            ListPlaceNode(name='integers', type=int, tokens=[10, 11, 12]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([], places)
+        assert list(result) == [places[1], places[2], places[3]]   
+
+    def test_value_and_place_types_match_with_empty_list_debug_03b(self):
+        """Returned type is list[T] and the places are of types list[T] and just T."""
+
+        class T(BaseModel):
+            id: int
+
+        places = [
+            ListPlaceNode(name='strings', type=str, tokens=[]),
+            ListPlaceNode(name='mixed_list', type=list, tokens=[[1], ["a", "b"]]),
+            ListPlaceNode(name='nested_list', type=list[list], tokens=[[[1]], [["a", "b"]]]),
+            ListPlaceNode(name='integers', type=int, tokens=[]),
+            ListPlaceNode(name='list_of_T', type=list[T], tokens=[[T(id=1)], [T(id=2)]]),
+            ListPlaceNode(name='just_T', type=T, tokens=[T(id=3), T(id=4)]),
+        ]
+        result = ExecutableGraphCheck.value_and_places_types_match([T(id=10), T(id=11)], places)
+        assert list(result) == [places[1], places[4], places[5]]
 
 class TestExecutableGraphOperations:
 
@@ -159,6 +248,36 @@ class TestExecutableGraphOperations:
         expected = {'place1': place}
         assert place.tokens == expected_tokens
         assert result == expected
+
+    def test_add_tokens_to_places_empty_list_to_unparameterised_list_type(self):
+        """Test adding an empty list to a place with type=list (unparameterised).
+        
+        This is the follow-up test case for test_value_and_places_types_match_when_comparing_an_empty_list_case_02.
+        When a place has type=list (not list[T]), an empty list token is appended as a single element.
+        """
+        place = ListPlaceNode(name='place1', type=list, tokens=[[1], ["a", "b"]])
+        place_names_to_nodes = {'place1': place}
+        tokens_to_add = {'place1': []}
+        result = ExecutableGraphOperations.add_tokens_to_places(
+            tokens_to_add, place_names_to_nodes, allow_token_copying=False
+        )
+        expected = {'place1': place}
+        # The empty list is appended as a token (a single element), not extended
+        assert place.tokens == [[1], ["a", "b"], []]
+        assert result == expected
+
+    def test_add_tokens_to_places_empty_list_to_two_parameterised_list_type(self):
+        """This would probably require a distribution function to disambiguate."""
+        place_names_to_nodes = {
+            "place1": ListPlaceNode(name='place1', type=list[int], tokens=[[1, 2], [3, 4]]),
+            "place2": ListPlaceNode(name='place2', type=list[str], tokens=[["a", "b"], ["c"]])
+        }
+        tokens_to_add = {'place1': [], 'place2': []}
+        result = ExecutableGraphOperations.add_tokens_to_places(
+            tokens_to_add, place_names_to_nodes, allow_token_copying=False
+        )
+        assert place_names_to_nodes['place1'].tokens == [[1, 2], [3, 4], []]
+        assert place_names_to_nodes['place2'].tokens == [["a", "b"], ["c"], []]
 
     def test_add_tokens_to_places_raises_when_a_token_is_added_to_multiple_places_without_copying(self):
         place1 = ListPlaceNode(name='place1', type=int, tokens=[])

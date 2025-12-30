@@ -383,26 +383,38 @@ class ExecutableGraphCheck:
         )
 
     def value_and_places_types_match(value: Any, places: Iterable[ListPlaceNode]) -> Iterable[ListPlaceNode]:
-        """
-        Find places whose types match the value.
+        """Find places whose types match the value.
         
+        Issues with handling empty lists:
+        At run time we can not distinguish the intended type of an empty list's contents.
+        Theoretically the intended token type may even be actual empty lists.
+        One approach is to somehow require disambiguation at graph construction time.
+        However this may be inconvenient and verbose for most use cases.
+
+        Proposed solution: Rely on multiple matches and assume the user knows what they are doing (could be confusing).
         Handles:
         - Direct type matches: value type matches place type
         - List values: Check if list elements match place type
         """
+        matching_by_list_contents = []
+        matching_by_direct_type = []
         # If value is a list with elements, check if elements match place types
         if isinstance(value, list) and len(value) > 0:
             # Check each element in the list against place types
-            matching = []
             for place in places:
                 # All elements must match the place type
                 if all(CompareTypes.between_value_and_type(item, place.type) for item in value):
-                    matching.append(place)
-            return tuple(matching)
+                    matching_by_list_contents.append(place)
         
         # For non-list values or empty lists, use direct type matching
-        bools = (CompareTypes.between_value_and_type(value, place.type) for place in places)
-        return tuple(place for place, match in zip(places, bools) if match)
+        # bools = (CompareTypes.between_value_and_type(value, place.type) for place in places)
+        # bools = [CompareTypes.between_value_and_type(value, place.type) for place in places]
+        # import pdb; pdb.set_trace()
+        # matching_by_direct_type = [place for place, match in zip(places, bools) if match]
+        for place in places:
+            if CompareTypes.between_value_and_type(value, place.type):
+                matching_by_direct_type.append(place)
+        return tuple(matching_by_direct_type + matching_by_list_contents)
 
 
 class ExecutableGraphOperations:

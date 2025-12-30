@@ -115,6 +115,12 @@ class TestCompareTypes:
         assert CompareTypes.between_value_and_type(("abc", 123), MyAlias)
         assert not CompareTypes.between_value_and_type("efg", MyAlias)
 
+    def test_between_value_and_type_with_list_of_floats(self):
+        assert CompareTypes.between_value_and_type([0.1, 0.2, 0.3], list[float])
+
+    def test_between_value_and_type_with_list_of_lists_of_floats(self):
+        assert CompareTypes.between_value_and_type([[0.1], [0.2, 0.3]], list[list[float]])
+
     @pytest.mark.parametrize(
         "annotation1, annotation2, expected_result",
         [
