@@ -168,10 +168,10 @@ class ExecutableGraph(BaseModel):
             place_type = place.type  # This needs to be the value of the 'type' field of the place.
             argument_type = get_type_hints(transition.function).get(edge.argument)
             if place_type is not None and argument_type is not None:
-                if not CompareTypes.between_annotations_where_one_maybe_in_list(
-                    annotation_not_in_list=place_type,  # The place.type contains the inner type event if the place
+                if not CompareTypes.between_annotations_where_both_maybe_in_list(
+                    annotation1=place_type,  # The place.type contains the inner type event if the place
                     # is a ListPlaceNode that holds a list of tokens.
-                    annotation_maybe_in_list=argument_type,  # This is to allow the case of passing in all the tokens
+                    annotation2=argument_type,  # This is to allow the case of passing in all the tokens
                     # at once as a list.
                 ):
                     raise TypeError(
@@ -407,10 +407,6 @@ class ExecutableGraphCheck:
                     matching_by_list_contents.append(place)
         
         # For non-list values or empty lists, use direct type matching
-        # bools = (CompareTypes.between_value_and_type(value, place.type) for place in places)
-        # bools = [CompareTypes.between_value_and_type(value, place.type) for place in places]
-        # import pdb; pdb.set_trace()
-        # matching_by_direct_type = [place for place, match in zip(places, bools) if match]
         for place in places:
             if CompareTypes.between_value_and_type(value, place.type):
                 matching_by_direct_type.append(place)
