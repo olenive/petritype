@@ -405,6 +405,10 @@ class ExecutableGraphCheck:
                 # All elements must match the place type
                 if all(CompareTypes.between_value_and_type(item, place.type) for item in value):
                     matching_by_list_contents.append(place)
+        elif isinstance(value, list) and len(value) == 0:
+            # For empty lists, we can't determine the intended type of contents.
+            # So an empty list can actually match any ListPlaceNode regardless of its inner type.
+            return tuple(places)
         
         # For non-list values or empty lists, use direct type matching
         for place in places:
@@ -534,7 +538,6 @@ class ExecutableGraphOperations:
                 result, potential_output_places,
             )
             if len(matching_places) > 1 and not allow_token_copying:
-                import pdb; pdb.set_trace()
                 # Multiple matching places but token copying is not allowed.
                 raise ValueError(
                     "There are multiple matching destination place nodes but token copying is not allowed. "
@@ -657,6 +660,18 @@ class ExecutableGraphOperations:
                     for single_token in token_or_list_to_add:
                         CompareTypes.between_value_and_type(single_token, place.type)
                 place.tokens.extend(token_or_list_to_add)
+            elif ( # If the token is an empty list and place type is a list, add the empty list as a token.
+                isinstance(token_or_list_to_add, list)
+                and len(token_or_list_to_add) == 0
+                and (place_type_origin is list or place.type is list)
+            ):
+                place.tokens.append([])
+            elif ( # If token is an empty list and place type is not a list, do nothing.
+                isinstance(token_or_list_to_add, list)
+                and len(token_or_list_to_add) == 0
+                and place_type_origin is not list
+            ):
+                pass
             else:
                 if check_types:
                     CompareTypes.between_value_and_type(token_or_list_to_add, place.type)
