@@ -1,12 +1,38 @@
 # Petritype
 
-An experimental, Petri net inspired, tool for prototyping and visualising data processing pipelines.
+Petritype is an experimental, Petri net inspired, tool for prototyping and visualising data processing pipelines.
 
 *This is an early concept sketch, feel free to get in touch if you find it interesting.*
 
-## Overview
+# Overview
+
+## What is a Petri Net
+A Petri net (https://en.wikipedia.org/wiki/Petri_net) is a (bipartite) graph used to model a process.
+They can be used to represent various processes in chemistry, logistics, ecology and many other fields.
+A Petri net has two types of nodes, "places" and "transitions" connected by directed edges referred to as "arcs".
+The state of the system (e.g. numbers of molecules, quantity and locations of objects)
+Here the focus is on using Petri nets as a tool for structuring and visualising data processing pipelines.
+In Petritype, transitions are functions, tokens are instances of data structures or types and places are containers for those data structures.
+
+
+## Why Petri Nets
+Graph representations of data pipelines quickly and intuitively communicate how data flows through various steps.
+Associating place nodes with specific data types communicates how the data is represented at each step and constrains types of inputs and output to/from each transition function.
+Petri net tokens display the current state of the system. By breaking up the data flow into tokens we can easily represent when various cases (e.g. successes/failures/corner cases) occur in our process and how they are handled.
+See the GIF below for an illustrative example depicting a hypothetical web scraping process.
+
+
+# Quickstart
+
+Note: claude skill -> prompt
+
+
+
+---
+---
+# Previous README.md
+
 A minimalistic, Petri net based tool, for data processing.
-This is an early version, feel free to get in touch or open an issue if you have any questions or suggestions.
 
 A Petri net is a bipartite graph consisting of place nodes and transition nodes connected by edges called arcs.
 Each place node can hold "tokens". When a transition fires, tokens in the input and output place nodes are updated according to the rules of the transition.
