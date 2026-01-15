@@ -1,5 +1,6 @@
 LICENSE-MIT
 README.md
+pyproject.toml
 setup.py
 examples/__init__.py
 petritype/__init__.py

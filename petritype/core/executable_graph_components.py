@@ -314,7 +314,10 @@ class ExecutableGraphCheck:
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
     ) -> bool:
-        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges[transition.name]
+        # Transitions with no incoming edges (generators) are always ready to fire
+        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
+            transition.name, tuple()
+        )
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
             if len(place.tokens) == 0:
@@ -470,7 +473,10 @@ class ExecutableGraphOperations:
         Return input tokens matched to function arguments and the input places without the removed tokens.
         """
         # TODO Do we need a way to put the tokens back in case a transition fails?
-        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges[transition.name]
+        # Transitions with no incoming edges (generators) have no tokens to extract
+        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
+            transition.name, tuple()
+        )
         input_edge_names_to_tokens: dict[ArgumentName, any] = dict()
         input_places = [] # if place_history_length >= 1 else None
         for edge in incoming_edges:
