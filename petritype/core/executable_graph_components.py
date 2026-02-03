@@ -79,10 +79,26 @@ class ListPlaceNode(PositionalArgsBaseModel):
 
 
 class FunctionTransitionNode(PositionalArgsBaseModel):
+    """A transition node that executes a function when fired.
+
+    Attributes:
+        name: Unique identifier for the transition
+        function: The function to execute when this transition fires
+        output_distribution_function: Optional function to distribute outputs to places
+        kwargs: Optional keyword arguments to pass to the function
+        activation_function: Optional function to determine if/when transition should fire.
+            Can be used by custom transition selectors. No prescribed signature -
+            the selector determines how to interpret the return value.
+            Common patterns:
+            - () -> bool: guard function (True = can fire)
+            - () -> float: priority score or countdown timer
+            - (ExecutableGraph) -> Any: context-aware activation
+    """
     name: str
     function: Callable
     output_distribution_function: Optional[Callable[[Any], dict[PlaceNodeName, Any]]] = None
     kwargs: Optional[KwArgs] = None
+    activation_function: Optional[Callable] = None
 
 
 class ArgumentEdgeToTransition(PositionalArgsBaseModel):
@@ -98,6 +114,23 @@ class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
 
 
 class ExecutableGraph(BaseModel):
+    """A Petri net graph that can be executed.
+
+    Attributes:
+        places: Collection of place nodes that hold tokens
+        transitions: Collection of transition nodes that transform tokens
+        argument_edges: Edges from places to transitions (input)
+        return_edges: Edges from transitions to places (output)
+        transition_history: History of fired transitions
+        input_place_history: History of input place states
+        output_place_history: History of output place states
+        token_history: History of tokens
+        transition_selector: Optional function to select which transition fires next.
+            Signature: (graph, enabled_transitions) -> transition_to_fire
+            If None, defaults to firing the last enabled transition (current behavior).
+            The selector receives the full graph context and list of enabled transitions,
+            allowing for sophisticated selection strategies (priority-based, random, etc.).
+    """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
     argument_edges: Sequence[ArgumentEdgeToTransition]
@@ -106,6 +139,7 @@ class ExecutableGraph(BaseModel):
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
     token_history: Sequence[Any] = []
+    transition_selector: Optional[Callable] = None
 
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
@@ -694,10 +728,27 @@ class ExecutableGraphOperations:
         transition_history_length=1,
         place_history_length=1,
         token_history_length=0,
+        transition_selector: Optional[Callable[[ExecutableGraph, list[FunctionTransitionNode]], Optional[FunctionTransitionNode]]] = None,
     ) -> tuple[ExecutableGraph, int]:
-        """
+        """Execute the Petri net graph.
+
         By default allow_token_copying is set to false because some object may behave in unexpected ways when copied,
         even when using deepcopy.
+
+        Args:
+            executable_graph: The graph to execute
+            max_transitions: Maximum number of transitions to fire
+            allow_token_copying: Whether to allow copying tokens
+            verbose: Whether to print verbose output
+            transition_history_length: Length of transition history to maintain
+            place_history_length: Length of place history to maintain
+            token_history_length: Length of token history to maintain
+            transition_selector: Optional function to select which transition to fire.
+                Signature: (graph, enabled_transitions) -> transition_to_fire
+                If None, uses graph.transition_selector or default behavior.
+
+        Returns:
+            Tuple of (updated_graph, transitions_fired_count)
         """
 
         if token_history_length > 0 and not allow_token_copying:
@@ -707,6 +758,14 @@ class ExecutableGraphOperations:
                 "transitions."
             )
 
+        # Default selector: fire last enabled transition (preserves current behavior)
+        def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]) -> Optional[FunctionTransitionNode]:
+            """Default selector that fires the last enabled transition."""
+            return enabled[-1] if enabled else None
+
+        # Choose selector: provided > graph's > default
+        selector = transition_selector or executable_graph.transition_selector or default_selector
+
         transitions_fired = 0
         ExecutableGraphCheck.ensure_all_token_types_match_place_types(executable_graph)
         place_names_to_nodes: dict[str, ListPlaceNode] = MapPlaceNames.to_list_place_nodes(executable_graph)
@@ -714,16 +773,26 @@ class ExecutableGraphOperations:
             MapTransitionNames.to_incoming_edges(executable_graph)
         transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]] = \
             MapTransitionNames.to_outgoing_edges(executable_graph)
+
         while True:
             if transitions_fired >= max_transitions:
                 if verbose:
                     print(f"Performed {transitions_fired} transitions, maximum transitions count reached.")
                 return executable_graph, transitions_fired
-            transition = ExecutableGraphCheck.next_transition(
-                executable_graph=executable_graph,
-                place_names_to_nodes=place_names_to_nodes,
-                transition_names_to_incoming_edges=transition_names_to_incoming_edges
-            )
+
+            # Get all enabled transitions (those with sufficient tokens)
+            enabled_transitions = []
+            for transition in reversed(executable_graph.transitions):  # Preserve ordering for default behavior
+                if ExecutableGraphCheck.sufficient_tokens_are_available(
+                    transition=transition,
+                    transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                    place_names_to_nodes=place_names_to_nodes,
+                ):
+                    enabled_transitions.append(transition)
+
+            # Let selector choose which transition to fire
+            transition = selector(executable_graph, enabled_transitions)
+
             if transition is None:
                 print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
                 return executable_graph, transitions_fired

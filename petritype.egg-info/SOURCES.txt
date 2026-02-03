@@ -19,3 +19,8 @@ petritype/core/relationship_graph_components.py
 petritype/core/rustworkx_graph.py
 petritype/core/type_comparisons.py
 petritype/core/type_relationship_graph_components.py
+petritype/helpers/__init__.py
+petritype/helpers/structures.py
+petritype/helpers/io/__init__.py
+petritype/helpers/io/io_helper.py
+tests/test_transition_selection.py
