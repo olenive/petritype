@@ -140,6 +140,7 @@ class ExecutableGraph(BaseModel):
     output_place_history: Sequence[ListPlaceNode] = []
     token_history: Sequence[Any] = []
     transition_selector: Optional[Callable] = None
+    allow_token_copying: bool = False
 
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
@@ -723,7 +724,7 @@ class ExecutableGraphOperations:
     async def execute_graph(
         executable_graph: ExecutableGraph,
         max_transitions: Optional[int] = 1,
-        allow_token_copying=False,
+        allow_token_copying: Optional[bool] = None,
         verbose=False,
         transition_history_length=1,
         place_history_length=1,
@@ -732,13 +733,14 @@ class ExecutableGraphOperations:
     ) -> tuple[ExecutableGraph, int]:
         """Execute the Petri net graph.
 
-        By default allow_token_copying is set to false because some object may behave in unexpected ways when copied,
-        even when using deepcopy.
+        Token copying allows the same token to be output to multiple places via deepcopy.
+        By default this uses the graph's allow_token_copying field (which defaults to False),
+        but can be overridden by passing an explicit value here.
 
         Args:
             executable_graph: The graph to execute
             max_transitions: Maximum number of transitions to fire
-            allow_token_copying: Whether to allow copying tokens
+            allow_token_copying: Whether to allow copying tokens. If None, uses the graph's setting.
             verbose: Whether to print verbose output
             transition_history_length: Length of transition history to maintain
             place_history_length: Length of place history to maintain
@@ -750,6 +752,9 @@ class ExecutableGraphOperations:
         Returns:
             Tuple of (updated_graph, transitions_fired_count)
         """
+
+        if allow_token_copying is None:
+            allow_token_copying = executable_graph.allow_token_copying
 
         if token_history_length > 0 and not allow_token_copying:
             raise ValueError(

@@ -15,87 +15,216 @@ Dynamic: license-file
 
 # Petritype
 
-Petritype is an experimental, Petri net inspired, tool for prototyping and visualising data processing pipelines.
+Typed, executable, visual Petri nets in Python.
 
-*This is an early concept sketch, feel free to get in touch if you find it interesting.*
+Petritype turns [Petri nets](https://en.wikipedia.org/wiki/Petri_net) into a practical tool for building and visualising data processing pipelines. Places are typed containers, transitions are real Python functions, and tokens are your actual data — Pydantic models, dataclasses, primitives, whatever you need. Types are enforced at runtime, so wiring errors surface immediately rather than silently propagating.
 
-# Overview
-
-## What is a Petri Net
-A Petri net (https://en.wikipedia.org/wiki/Petri_net) is a (bipartite) graph used to model a process.
-They can be used to represent various processes in chemistry, logistics, ecology and many other fields.
-A Petri net has two types of nodes, "places" and "transitions" connected by directed edges (a.k.a. arcs).
-The state of the system (e.g. numbers of molecules, quantity and locations of objects)
-Here the focus is on using Petri nets as a tool for structuring and visualising data processing pipelines.
-In Petritype, transitions are functions, tokens are instances of data structures or types and places are containers for those data structures.
-
-
-## Why Petri Nets
-Graph representations of data pipelines quickly and intuitively communicate how data flows through various steps.
-Associating place nodes with specific data types communicates how the data is represented at each step and constrains types of inputs and output to/from each transition function.
-Petri net tokens display the current state of the system. By breaking up the data flow into tokens we can easily represent when various cases (e.g. successes/failures/corner cases) occur in our process and how they are handled.
-See the diagram below for an illustrative example depicting a hypothetical web scraping process. Place nodes and transitions are represented by blue ovals and green rectangles respectively. Each place node and transition node has a title (top line) and a type or function name associated with it (in brackets) and tokens are moved between place nodes (square brackets) when transitions fire.
+*Early stage — contributions and feedback welcome.*
 
 <p align="center"><img src="images/docs/illustrations/readme_example/animation.gif" alt="Pipeline animation" width="380"></p>
 
+## Core Idea
 
-# Quickstart
+A Petri net has two kinds of nodes connected by directed edges:
 
-Note: claude skill -> prompt
+- **Places** (blue ovals) — typed containers that hold tokens
+- **Transitions** (green rectangles) — functions that consume tokens from input places and produce tokens into output places
 
-Transition function execution is priorities according to order in which they are given in the graph definition (TODO: add example).
-A transition will only fire if the necessary tokens are available.
-NOTE: It is possible to use a Petri net to create complex dynamics/logic but for simpler situations it seems more practical to design processes in such a way that the order in which tokens are processed is not important for the final result.
+A transition can only fire when all of its input places have tokens available. When it fires, it pops tokens from input places, calls its function, and routes the result to output places based on type matching. The current set of tokens across all places represents the live state of the system.
 
-## Constraints
-Place and transition nodes must be unique. Tokens do not need to be unique.
+Petritype adds a type system on top of this: each place declares the Python type it accepts, and every token is checked against that type. This means the graph itself encodes the shape of your data pipeline — what types flow where, what each function expects, and where different outcomes end up.
 
-# Docs TODOs
-[ . ] Describe order of transition activation.
+## Quickstart
 
-[ . ] Describe distribution functions.
+```python
+import asyncio
+from petritype.core.executable_graph_components import (
+    ExecutableGraphOperations,
+    FunctionTransitionNode,
+    ListPlaceNode,
+    ArgumentEdgeToTransition,
+    ReturnedEdgeFromTransition,
+)
+
+# 1. Define your types and functions
+def double(x: int) -> int:
+    return x * 2
+
+# 2. Build the graph
+graph = ExecutableGraphOperations.construct_graph([
+    ListPlaceNode('Input', int, [1, 2, 3]),
+    ArgumentEdgeToTransition('Input', 'Double', 'x'),
+    FunctionTransitionNode('Double', double),
+    ReturnedEdgeFromTransition('Double', 'Output'),
+    ListPlaceNode('Output', int),
+])
+
+# 3. Execute
+graph, fired = asyncio.run(
+    ExecutableGraphOperations.execute_graph(graph, max_transitions=3)
+)
+
+print(graph.place_named('Output').tokens)  # [6, 4, 2]
+```
+
+`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find enabled transitions, select one, fire it, repeat.
+
+## Key Features
+
+### Runtime type checking
+
+Places declare types. Tokens are validated on entry. If a transition returns a `str` but the output place expects `int`, you get an immediate error — not a silent downstream failure.
+
+```python
+ListPlaceNode('Scores', float, [0.95, 0.87])   # only accepts float tokens
+ListPlaceNode('Labels', str, ['cat', 'dog'])     # only accepts str tokens
+```
+
+Type matching also governs output routing: when a transition has multiple output places, the result is sent to the place whose type matches.
+
+### Async execution
+
+Transition functions can be `async`. The execution loop handles both sync and async functions transparently.
+
+```python
+async def fetch(url: str) -> str:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            return await resp.text()
+
+FunctionTransitionNode('Fetch', fetch)
+```
+
+### Transition selectors and activation functions
+
+Control which transition fires next with pluggable selectors. Attach activation functions to individual transitions for guards, priorities, or context-aware logic.
+
+```python
+# Activation function: only fire when pool has enough items
+def batch_ready(graph):
+    return len(graph.place_named('Pool').tokens) >= 10
+
+FunctionTransitionNode(
+    'BatchProcess', batch_process,
+    activation_function=batch_ready,
+)
+
+# Selector: fire highest-priority enabled transition
+def priority_selector(graph, enabled):
+    def get_priority(t):
+        return t.activation_function() if t.activation_function else 0.0
+    return max(enabled, key=get_priority) if enabled else None
+
+graph.transition_selector = priority_selector
+```
+
+See [TRANSITION_SELECTION.md](TRANSITION_SELECTION.md) for guard-based, round-robin, bottleneck-aware, and other selector patterns.
+
+### Visualisation
+
+Built-in Graphviz rendering shows the graph structure, types, and current token state. In Jupyter, you can step through execution with animated visualisation.
+
+```python
+from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
+
+# Static graph image
+SimpleGraphvizVisualization.graph(graph)
+
+# Step-by-step animation in Jupyter
+async for step in SimpleGraphvizVisualization.animate_execution_generator(graph):
+    display(step)
+```
+
+### Output distribution
+
+When a transition has multiple output places, tokens are routed by type matching. For custom routing logic, provide an output distribution function:
+
+```python
+def route_result(result) -> dict[str, Any]:
+    if result.score > 0.9:
+        return {'Approved': result}
+    else:
+        return {'NeedsReview': result}
+
+FunctionTransitionNode(
+    'Classify', classify,
+    output_distribution_function=route_result,
+)
+```
+
+### List-mode transitions
+
+If a transition argument is typed as `list[T]` and the input place holds tokens of type `T`, all tokens are passed as a list in a single call — useful for batch operations.
+
+```python
+def summarise(items: list[str]) -> str:
+    return f"Processed {len(items)} items"
+
+# All str tokens from 'Items' are passed at once
+ArgumentEdgeToTransition('Items', 'Summarise', 'items')
+```
+
+### Decorator for registration
+
+Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.
+
+```python
+from petritype import petri_net
+
+@petri_net(name="data-pipeline", mode="batch")
+def data_pipeline() -> ExecutableGraph:
+    return ExecutableGraphOperations.construct_graph([...])
+
+@petri_net(name="health-check", mode="cron", schedule="*/5 * * * *")
+def health_check() -> ExecutableGraph:
+    return ExecutableGraphOperations.construct_graph([...])
+```
+
+Modes: `manual` (default), `24/7` (continuous), `batch` (run once), `cron` (scheduled).
+
+## When to Use This
+
+Petritype is useful when you have stateful data processing where:
+
+1. **Data flows through multiple stages with different representations** — the typed places make the shape of each stage explicit.
+2. **Outcomes are not easily predictable** — different result types route to different places, making branching logic visible in the graph rather than hidden in conditionals.
+3. **You need to reason about complex processes** — the graph is both the implementation and the documentation.
+
+It has been particularly useful for processes involving many calls to stateful external data sources, where the data flow paths depend on responses and not all paths can be known in advance.
+
+## When Not to Use This
+
+1. **Simple pipelines** — if your processing is a straightforward chain of pure functions, the Petri net overhead adds complexity without benefit.
+2. **Order-sensitive processing with shared state** — each transition firing mutates the graph in place. If the order matters and is hard to control, this can be a source of bugs.
+3. **Complex net dynamics** — cycles, deadlocks, and infinite loops are all possible in Petri nets and can be difficult to debug. Use the formalism with care.
+
+## Background: What is a Petri Net?
+
+A [Petri net](https://en.wikipedia.org/wiki/Petri_net) is a bipartite directed graph used to model concurrent processes. It was originally developed by Carl Adam Petri in 1962 and has been applied across chemistry, logistics, manufacturing, protocol verification, and many other fields.
+
+The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is enabled when all its input places contain at least one token. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
+
+What makes Petri nets powerful is that they can model concurrency, synchronisation, and resource contention in a way that is both formally analysable and visually intuitive.
+
+Petritype builds on this foundation by making places typed (so tokens must match a declared Python type) and making transitions executable (so they call real functions). The result is a system where the Petri net is not just a model of your process — it *is* your process.
+
+<!-- ## Installation
 
 
+```bash
+pip install petritype
+``` 
 
----
----
+Install with uv
 
-# Discussion
+-->
 
-### When to Use This
-You may want to use this if you have to deal with a complex stateful processes. Here are some ways in which this library may be useful:
-1. Petri nets lend themselves to visualisation and can be used to help structure complex data processing pipelines.
-2. When the outcomes of individual data processing steps are not easily predictable or not deterministic, the Petri net structure can encode how different cases are handled and how the order of processing is determined.
-3. The formalism of tokens, places and transitions may be helpful in creating interfaces between different stages of the process.
-Such interfaces can compartmentalise data transformation steps, making them easier to reason about.
+Requires Python 3.14+.
 
-I have found this to be useful for processes that requires a lot of calls to stateful external data sources, with the data flow paths depending on the responses.
-In particular, if all the possible paths can not be known in advance, the Petri Net structure can help to reason about how to handle new cases as they arise.
+<!-- ## Examples
 
-### When Not to Use This
-If your data processing can be easily composed from pure function calls, you probably don't want to use this. Some things to consider:
-1. For simple tasks, the extra code needed to set up the Petri net may be a source of unnecessary complexity.
-2. Each time a transition fires, the Petri net is changed in place. This mutable state can be hard to keep track of. Does order of processing matter for your use case?
-3. The Petri Net formalism is powerful and should be used with care. Cycles, deadlocks and infinite loops are all possible and can be difficult to debug.
+See the [`examples/`](examples/) directory:
 
-
-
-<!-- ### Transition Priority Functions
-Each transition has a priority function associated with it.
-When using library functions, the transition for which the priority is computed to be the highest will be selected to fire next.
-You can provide your own transition priority function which takes in the input and output place nodes or you can use a built in function that simply returns a pre-determined constant value.
-*** If a transition priority is computed to be zero, the transition does not fire. ***
-
-### Token Priority
-A value associated with each token that can be used to determine which token is selected to be processed next.
-
-TODO: Consider adding a way to skip a transition and go on to the next one.
-
-### Edge Direction
-Edges in a Petri Net, also known as arcs, are directed either from a place node to a transition node or vice versa.
-Note, given that transitions can call arbitrary functions and affect both the input and output places, information can flow in both directions.
-
-## Examples
-See the `examples` directory for how this can be used.
-
-TODO: add pictures of example graphs. -->
+- **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
+- **ML Training** — multi-step model training pipeline with evaluation and retraining loops
+- **Time Series** — statistical processing of time series data -->
