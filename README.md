@@ -137,6 +137,16 @@ FunctionTransitionNode(
 )
 ```
 
+### Token copying
+
+When a transition produces a token that matches multiple output places by type, Petritype raises an error by default — this prevents accidental duplication. If you want the same token to be sent to multiple output places (via `deepcopy`), enable token copying when constructing the graph:
+
+```python
+graph = ExecutableGraphOperations.construct_graph([...], allow_token_copying=True)
+```
+
+This is useful when the same piece of data needs to flow down multiple independent paths — for example, a configuration token consumed by both a planning stage and a data-fetching stage.
+
 ### List-mode transitions
 
 If a transition argument is typed as `list[T]` and the input place holds tokens of type `T`, all tokens are passed as a list in a single call — useful for batch operations.

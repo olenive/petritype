@@ -476,6 +476,7 @@ class ExecutableGraphOperations:
         mixed_nodes_and_edges: Iterable[
             Union[ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition]
         ],
+        allow_token_copying: bool = False,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         for node in mixed_nodes_and_edges:
@@ -489,7 +490,7 @@ class ExecutableGraphOperations:
                 edges_from.append(node)
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
-        return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from)
+        return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from, allow_token_copying=allow_token_copying)
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
         """Update the given place by appending the result token to its tokens list."""
