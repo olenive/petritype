@@ -121,6 +121,14 @@ class ExecutableGraph(BaseModel):
         transitions: Collection of transition nodes that transform tokens
         argument_edges: Edges from places to transitions (input)
         return_edges: Edges from transitions to places (output)
+        step_count: Monotonic count of transitions that have fired since this
+            graph was created. Increments by one every time ``execute_graph``
+            successfully fires a transition. Use this as a stable sequence
+            number when you need to identify "which step are we on" — e.g.
+            for idempotency / compare-and-swap semantics over an unreliable
+            transport, or for replay / fork-from-step features. Independent
+            of ``transition_history``, which is capped for memory and is
+            therefore unsuitable as an authoritative counter.
         transition_history: History of fired transitions
         input_place_history: History of input place states
         output_place_history: History of output place states
@@ -135,6 +143,7 @@ class ExecutableGraph(BaseModel):
     transitions: Sequence[FunctionTransitionNode]
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
+    step_count: int = 0
     transition_history: Sequence[FunctionTransitionNode] = []
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
@@ -835,6 +844,9 @@ class ExecutableGraphOperations:
             output_places: Sequence[ListPlaceNode] = list(updated_places_dict.values())
 
             transitions_fired += 1
+            # Authoritative monotonic counter — never trimmed. See class
+            # docstring for the idempotency / replay use case.
+            executable_graph.step_count += 1
             # Update transition history.
             if transition_history_length == 1:
                 executable_graph.transition_history = [transition]
