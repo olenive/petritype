@@ -630,34 +630,19 @@ class ExecutableGraphOperations:
                     f" not the case for transition \"{transition.name}\" and outgoing_edges:\n{outgoing_edges}."
                 )
             destination_place_names_to_tokens = transition.output_distribution_function(result)
-            if len(destination_place_names_to_tokens) > 1 and not allow_token_copying:
-            #     raise ValueError(
-            #         "Expected only a single output place. To allow the same token to be copied to multiple places, "
-            #         "set the `allow_token_copying` parameter to True."
-            #     )
-                # TODO: Check that none of the tokens refer to the same piece of memory here?
-                # Use the distribution function to result to put tokens in the output places.
-                for place_name, token in destination_place_names_to_tokens.items():
-                    destination_place = place_names_to_nodes[place_name]
-                    ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
-                    if token is not None:
-                        output_place_names_to_tokens[destination_place.name] = token
-            elif len(destination_place_names_to_tokens) == 1 and not allow_token_copying:
-                place_name, token = next(iter(destination_place_names_to_tokens.items()))
+            if not destination_place_names_to_tokens:
+                raise ValueError(
+                    "Unexpected branch: no output places found for the result of the transition."
+                )
+            # Token copying (and rejection of multi-place reuse when copying is
+            # off) is enforced later in add_tokens_to_places, so the number of
+            # destinations and the allow_token_copying flag don't change what we
+            # do here: place each (place_name -> token) the distributor produced.
+            for place_name, token in destination_place_names_to_tokens.items():
                 destination_place = place_names_to_nodes[place_name]
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                 if token is not None:
                     output_place_names_to_tokens[destination_place.name] = token
-            elif len(destination_place_names_to_tokens) > 1 and allow_token_copying:
-                for place_name, token in destination_place_names_to_tokens.items():
-                    destination_place = place_names_to_nodes[place_name]
-                    ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
-                    if token is not None:
-                        output_place_names_to_tokens[destination_place.name] = token
-            else:
-                raise ValueError(
-                    "Unexpected branch: no output places found for the result of the transition."
-                )
         return output_place_names_to_tokens
 
     def add_tokens_to_places(  # Stage 3

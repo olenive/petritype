@@ -105,3 +105,34 @@ def test_distribution_populates_every_destination():
         assert isinstance(_place(graph, name).tokens[0], Span)
     for name in _COUNT_PLACES:
         assert isinstance(_place(graph, name).tokens[0], Count)
+
+
+def test_distributor_single_destination_with_copying():
+    """A distributor that routes to a SINGLE destination must place the token
+    even when allow_token_copying=True.
+
+    Regression: that exact case (len == 1 and allow_token_copying) fell through
+    to "Unexpected branch: no output places found for the result of the
+    transition." Only multi-destination, or single-destination without copying,
+    were handled — so a one-place distributor on a copy-enabled graph raised.
+    """
+    def produce(x: int) -> Count:
+        return Count(label="only", value=x)
+
+    def distributor(result: Count) -> dict:
+        return {"Out": result}  # single destination
+
+    graph = ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("In", int, [7]),
+        ListPlaceNode("Out", Count),
+        ArgumentEdgeToTransition("In", "Produce", "x"),
+        FunctionTransitionNode("Produce", produce, output_distribution_function=distributor),
+        ReturnedEdgeFromTransition("Produce", "Out"),
+    ], allow_token_copying=True)
+
+    graph, fired = asyncio.run(
+        ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+    )
+    assert fired == 1
+    out = _place(graph, "Out").tokens
+    assert len(out) == 1 and out[0].value == 7
