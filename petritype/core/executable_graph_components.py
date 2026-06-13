@@ -144,6 +144,15 @@ class ExecutableGraph(BaseModel):
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
     step_count: int = 0
+    # Name of the most recent transition fired by the last ``execute_graph``
+    # call, or None if that call fired nothing. Reset at the start of every
+    # call, so it always reflects that call (never a stale earlier fire).
+    # Unlike ``transition_history`` this is independent of history-retention
+    # config, giving callers a reliable "what just fired" signal — e.g. for UI
+    # highlighting — without inferring it from token-count diffs (which is
+    # ambiguous for self-loops). Transition names are unique (enforced by
+    # ``check_unique_names``), so a name unambiguously identifies the node.
+    last_fired: Optional[str] = None
     transition_history: Sequence[FunctionTransitionNode] = []
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
@@ -782,6 +791,8 @@ class ExecutableGraphOperations:
         selector = transition_selector or executable_graph.transition_selector or default_selector
 
         transitions_fired = 0
+        # Reset per call so it reflects only this invocation (None if nothing fires).
+        executable_graph.last_fired = None
         ExecutableGraphCheck.ensure_all_token_types_match_place_types(executable_graph)
         place_names_to_nodes: dict[str, ListPlaceNode] = MapPlaceNames.to_list_place_nodes(executable_graph)
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]] = \
@@ -847,6 +858,8 @@ class ExecutableGraphOperations:
             # Authoritative monotonic counter — never trimmed. See class
             # docstring for the idempotency / replay use case.
             executable_graph.step_count += 1
+            # Authoritative "what just fired" — independent of history config.
+            executable_graph.last_fired = transition.name
             # Update transition history.
             if transition_history_length == 1:
                 executable_graph.transition_history = [transition]
