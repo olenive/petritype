@@ -129,6 +129,12 @@ class ExecutableGraph(BaseModel):
             transport, or for replay / fork-from-step features. Independent
             of ``transition_history``, which is capped for memory and is
             therefore unsuitable as an authoritative counter.
+        last_fired: Name of the most recent transition fired by the last
+            ``execute_graph`` call (None if it fired nothing). Reset per call.
+        fired_counts: Cumulative {transition_name: times_fired} since the graph
+            was created. Monotonic and never trimmed (like ``step_count``), so
+            it is the reliable way to ask "has transition X ever fired" — the
+            capped ``transition_history`` cannot answer that.
         transition_history: History of fired transitions
         input_place_history: History of input place states
         output_place_history: History of output place states
@@ -153,6 +159,14 @@ class ExecutableGraph(BaseModel):
     # ambiguous for self-loops). Transition names are unique (enforced by
     # ``check_unique_names``), so a name unambiguously identifies the node.
     last_fired: Optional[str] = None
+    # Cumulative count of how many times each transition has fired since this
+    # graph was created (keyed by transition name). Like ``step_count`` it is
+    # monotonic and never trimmed — independent of ``transition_history``'s
+    # retention cap — so it is the authoritative answer to "has transition X
+    # fired, and how often". Use it (instead of inspecting the capped history)
+    # to drive stage/progress UI that must stay correct after the marking has
+    # moved past a stage.
+    fired_counts: dict[str, int] = {}
     transition_history: Sequence[FunctionTransitionNode] = []
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
@@ -845,6 +859,10 @@ class ExecutableGraphOperations:
             executable_graph.step_count += 1
             # Authoritative "what just fired" — independent of history config.
             executable_graph.last_fired = transition.name
+            # Cumulative per-transition tally — monotonic, never trimmed.
+            executable_graph.fired_counts[transition.name] = (
+                executable_graph.fired_counts.get(transition.name, 0) + 1
+            )
             # Update transition history.
             if transition_history_length == 1:
                 executable_graph.transition_history = [transition]
