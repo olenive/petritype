@@ -5,3 +5,8 @@ typeguard>=4.4.4
 [dev]
 pytest>=9.0.2
 pytest-asyncio>=1.3.0
+
+[examples]
+marimo>=0.23.9
+matplotlib>=3.11.0
+rustworkx>=0.18.0

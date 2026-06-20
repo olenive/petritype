@@ -15,3 +15,23 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
 ]
+examples = [
+    "marimo>=0.23.9",
+    "matplotlib>=3.11.0",
+    "rustworkx>=0.18.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "notebooks: run the marimo example notebooks (slow; needs the 'examples' extra). Deselected by default; run with `pytest -m notebooks`.",
+]
+# Skip the notebook suite on a plain `pytest` run. Override on the command line with
+# `pytest -m notebooks` to run only them.
+addopts = "-m 'not notebooks'"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["petritype*"]

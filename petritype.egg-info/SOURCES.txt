@@ -1,7 +1,6 @@
 LICENSE-MIT
 README.md
 pyproject.toml
-setup.py
 examples/__init__.py
 petritype/__init__.py
 petritype/decorator.py
@@ -24,5 +23,9 @@ petritype/helpers/__init__.py
 petritype/helpers/structures.py
 petritype/helpers/io/__init__.py
 petritype/helpers/io/io_helper.py
+petritype/plotting/rustworkx_to_graphviz.py
+petritype/plotting/simple_graphviz.py
 tests/test_decorator.py
+tests/test_notebooks.py
+tests/test_step_count.py
 tests/test_transition_selection.py

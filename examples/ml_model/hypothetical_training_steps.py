@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -46,27 +47,31 @@ class DeploymentModel:
     pass
 
 
-def train_validation_test_split(data: TrainingData) -> tuple[TrainingData, TrainingData, TestData]:
+def train_validation_test_split(data: AvailableData) -> tuple[TrainingData, EvaluationData, TestData]:
     pass
 
 
-def data_augmentation(data: TrainingData) -> TrainingData:
+def data_augmentation(data: TrainingData) -> AugmentedTrainingData:
     pass
 
 
-def fine_tune(model: VisionModel, data: TrainingData) -> FineTunedVisionModel:
+def fine_tune(model: VisionModel, data: AugmentedTrainingData) -> FineTunedVisionModel:
     pass
 
 
-def evaluate_model(model: FineTunedVisionModel, data: EvaluationData | TestData) -> EvaluationMetrics:
+def evaluate_model(model: FineTunedVisionModel, data: Any) -> EvaluationMetrics:
+    # `data` is any held-out dataset (validation or test).
     pass
 
 
-def select_another_model(metrics: EvaluationMetrics) -> VisionModel:
+def select_another_model(
+    model: FineTunedVisionModel, metrics: EvaluationMetrics
+) -> VisionModel | FineTunedVisionModel:
+    # Either propose a new VisionModel to try, or accept the current FineTunedVisionModel.
     pass
 
 
-def package_model(model: VisionModel) -> DeploymentModel:
+def package_model(model: FineTunedVisionModel) -> DeploymentModel:
     pass
 
 
