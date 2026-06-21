@@ -100,6 +100,75 @@ def _(BaseModel):
 
 
 @app.cell
+def _(Parcel, random, time):
+    # Mutable timing/counter state shared by the transition and activation functions below.
+    # `receive_parcel()` / `can_receive_parcel()` are called by the engine with no arguments,
+    # so they can't take state as a parameter — they read this module-level dict instead.
+    # `make_simulation` resets it at the start of each run. Defining the functions at module
+    # scope (rather than nested in `make_simulation`) keeps their names clean in the rendered
+    # transition labels (e.g. `receive_parcel`, not `make_simulation.<locals>.receive_parcel`).
+    sim_state = {"counter": 0, "last_arrival": 0.0, "last_dispatch": 0.0}
+
+    def receive_parcel() -> Parcel:
+        """Receive a parcel from a delivery truck (timing handled by the guard)."""
+        sim_state["counter"] += 1
+        sim_state["last_arrival"] = time.time()
+        print(f"📦 Receiving parcel #{sim_state['counter']}...")
+        return Parcel(id=sim_state["counter"])
+
+    def can_receive_parcel() -> bool:
+        """Guard: only allow receiving a parcel every 1 second."""
+        return time.time() - sim_state["last_arrival"] >= 1.0
+
+    def sort_parcel(parcel: Parcel) -> Parcel:
+        print(f"  Parcel #{parcel.id} → Sorting...")
+        return parcel
+
+    def stage_parcel(parcel: Parcel) -> Parcel:
+        print(f"  Parcel #{parcel.id} → Staging Area")
+        return parcel
+
+    def dispatch_truck(parcels: list[Parcel]) -> list[Parcel]:
+        """Dispatch a truck; each parcel has a 1-in-10 chance of being left behind."""
+        sim_state["last_dispatch"] = time.time()
+        left_behind, dispatched_ids = [], []
+        for parcel in parcels:
+            if random.randint(1, 10) == 1:
+                left_behind.append(parcel)
+            else:
+                dispatched_ids.append(parcel.id)
+        if dispatched_ids:
+            print(f"🚚 Truck departed with parcels: {dispatched_ids}")
+        if left_behind:
+            print(f"⏳ Left behind for next truck: {[p.id for p in left_behind]}")
+        return left_behind
+
+    def can_dispatch_truck() -> bool:
+        """Guard: only allow truck dispatch every 5 seconds."""
+        return time.time() - sim_state["last_dispatch"] >= 5.0
+
+    def guard_based_selector(graph, enabled):
+        """Select the first enabled transition whose guard (if any) is satisfied."""
+        for transition in enabled:
+            if transition.activation_function is None:
+                return transition
+            if transition.activation_function():
+                return transition
+        return None
+
+    return (
+        can_dispatch_truck,
+        can_receive_parcel,
+        dispatch_truck,
+        guard_based_selector,
+        receive_parcel,
+        sim_state,
+        sort_parcel,
+        stage_parcel,
+    )
+
+
+@app.cell
 def _(
     ArgumentEdgeToTransition,
     ExecutableGraphOperations,
@@ -108,64 +177,23 @@ def _(
     Parcel,
     ReturnedEdgeFromTransition,
     RustworkxGraph,
-    random,
-    time,
+    can_dispatch_truck,
+    can_receive_parcel,
+    dispatch_truck,
+    guard_based_selector,
+    receive_parcel,
+    sim_state,
+    sort_parcel,
+    stage_parcel,
 ):
     def make_simulation():
-        """Build a fresh simulation: graph, rustworkx view, and encapsulated state.
+        """Build a fresh simulation: graph and rustworkx view.
 
-        Timing/counter state lives in a local dict closed over by the transition
-        functions — this avoids module-level globals (which don't play well with
-        marimo's reactive, cell-scoped model).
+        Resets the shared `sim_state` so each run starts from a clean counter/timers. The
+        transition and activation functions are defined at module scope (above) so they show
+        up with clean names in the rendered graph.
         """
-        state = {"counter": 0, "last_arrival": 0.0, "last_dispatch": 0.0}
-
-        def receive_parcel() -> Parcel:
-            """Receive a parcel from a delivery truck (timing handled by the guard)."""
-            state["counter"] += 1
-            state["last_arrival"] = time.time()
-            print(f"📦 Receiving parcel #{state['counter']}...")
-            return Parcel(id=state["counter"])
-
-        def can_receive_parcel() -> bool:
-            """Guard: only allow receiving a parcel every 1 second."""
-            return time.time() - state["last_arrival"] >= 1.0
-
-        def sort_parcel(parcel: Parcel) -> Parcel:
-            print(f"  Parcel #{parcel.id} → Sorting...")
-            return parcel
-
-        def stage_parcel(parcel: Parcel) -> Parcel:
-            print(f"  Parcel #{parcel.id} → Staging Area")
-            return parcel
-
-        def dispatch_truck(parcels: list[Parcel]) -> list[Parcel]:
-            """Dispatch a truck; each parcel has a 1-in-10 chance of being left behind."""
-            state["last_dispatch"] = time.time()
-            left_behind, dispatched_ids = [], []
-            for parcel in parcels:
-                if random.randint(1, 10) == 1:
-                    left_behind.append(parcel)
-                else:
-                    dispatched_ids.append(parcel.id)
-            if dispatched_ids:
-                print(f"🚚 Truck departed with parcels: {dispatched_ids}")
-            if left_behind:
-                print(f"⏳ Left behind for next truck: {[p.id for p in left_behind]}")
-            return left_behind
-
-        def can_dispatch_truck() -> bool:
-            """Guard: only allow truck dispatch every 5 seconds."""
-            return time.time() - state["last_dispatch"] >= 5.0
-
-        def guard_based_selector(graph, enabled):
-            """Select the first enabled transition whose guard (if any) is satisfied."""
-            for transition in enabled:
-                if transition.activation_function is None:
-                    return transition
-                if transition.activation_function():
-                    return transition
-            return None
+        sim_state.update({"counter": 0, "last_arrival": 0.0, "last_dispatch": 0.0})
 
         nodes_and_edges = [
             FunctionTransitionNode(

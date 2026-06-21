@@ -92,7 +92,13 @@ def _():
     def generate_list_of_integers(n: int) -> list[int]:
         return [100 + x for x in range(n)]
 
-    return (generate_list_of_integers,)
+    # A named (rather than lambda) transition function so it shows a clean name in the
+    # rendered graph instead of `build_graph.<locals>.<lambda>`. Left un-annotated to keep
+    # the same construct-time type-checking behaviour as the original lambda.
+    def pass_through_list(lst):
+        return lst
+
+    return generate_list_of_integers, pass_through_list
 
 
 @app.cell
@@ -104,6 +110,7 @@ def _(
     ReturnedEdgeFromTransition,
     RustworkxGraph,
     generate_list_of_integers,
+    pass_through_list,
 ):
     def build_graph():
         """Construct a fresh graph and its rustworkx view."""
@@ -117,7 +124,7 @@ def _(
             ReturnedEdgeFromTransition("Generate List of Integers", "Integer Lists"),
             ListPlaceNode(name="Integer Lists", type=list[int]),
             ArgumentEdgeToTransition("Integer Lists", "Pass Through List", argument="lst"),
-            FunctionTransitionNode(name="Pass Through List", function=lambda lst: lst),
+            FunctionTransitionNode(name="Pass Through List", function=pass_through_list),
             ReturnedEdgeFromTransition("Pass Through List", "Final Output"),
             ListPlaceNode(name="Final Output", type=int),
         ]

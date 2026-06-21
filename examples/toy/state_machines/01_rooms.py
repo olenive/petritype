@@ -98,13 +98,15 @@ def _(
         "Treasure Room": ["Hallway"],
     }
 
+    def leave(character: Physical) -> Physical:
+        # Placeholder transition function: moves are driven by the UI rather than by
+        # executing the net, so this is never called — but defining it at module scope
+        # (rather than nested) keeps its name clean in the rendered transition labels.
+        return character
+
     def build_map_graph(current_room: str):
         """Build the rustworkx view of the room map, with the character token placed in
-        `current_room`. The transition functions are placeholders — moves are driven by the
-        UI rather than by executing the net, so they are never called."""
-
-        def leave(character: Physical) -> Physical:
-            return character
+        `current_room`."""
 
         def tokens_for(room: str):
             return [Physical(name="character")] if room == current_room else []
