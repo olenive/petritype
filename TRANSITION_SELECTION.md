@@ -127,12 +127,14 @@ Parameter selector overrides graph selector if both provided.
 
 ### Default Behavior
 
-If no selector provided, defaults to current behavior: fire last enabled transition (reversed order).
+If no selector is provided, the default fires the **first enabled transition in definition
+order** — so earlier-defined transitions have priority. The `enabled` list passed to a selector
+is also in definition order. (Tokens within a place are consumed FIFO — oldest first.)
 
 ```python
 def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]):
-    """Default: fire last enabled transition."""
-    return enabled[-1] if enabled else None
+    """Default: fire the first enabled transition (definition order)."""
+    return enabled[0] if enabled else None
 ```
 
 ## Example Selectors

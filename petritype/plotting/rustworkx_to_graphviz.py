@@ -8,7 +8,9 @@ from petritype.core.executable_graph_components import ExecutableGraph, Function
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
-from petritype.core.rustworkx_graph import RustworkxArgumentEdgeData, RustworkxGraph, RustworkxReturnedEdgeData
+from petritype.core.rustworkx_graph import (
+    RustworkxArgumentEdgeData, RustworkxGraph, RustworkxReadEdgeData, RustworkxReturnedEdgeData
+)
 from petritype.helpers.structures import SafeMerge
 
 
@@ -154,6 +156,12 @@ class RustworkxToGraphviz:
         magenta_outlined_node_names = set()
         if last_transition:
             magenta_outlined_node_names.add(last_transition.name)
+            # Read places of the last-fired transition light up too — they were read this fire,
+            # the same way consumed input places do. (Reads aren't recorded in history, so we
+            # derive them from the graph's read edges.)
+            for read_edge in (*graph.snapshot_edges, *graph.mutate_edges):
+                if read_edge.transition_node_name == last_transition.name:
+                    magenta_outlined_node_names.add(read_edge.place_node_name)
         if last_input_place:
             magenta_outlined_node_names = magenta_outlined_node_names.union({x.name for x in last_input_place})
         if last_output_place:
@@ -182,7 +190,12 @@ class RustworkxToGraphviz:
                     'color': 'black',  # default outline color
                     'penwidth': '1'
                 }
-                if node.name in magenta_outlined_node_names:
+                if node.name in graph.in_flight:
+                    # Body is executing right now (concurrent mode) — show it "working".
+                    attrs['fillcolor'] = 'gold'
+                    attrs['color'] = 'darkorange'
+                    attrs['penwidth'] = '2'
+                elif node.name in magenta_outlined_node_names:
                     attrs['color'] = 'magenta'
                     attrs['penwidth'] = '3'
                 return attrs
@@ -191,7 +204,7 @@ class RustworkxToGraphviz:
 
         def edge_attr_fn(edge: str) -> dict[str, Union[str, int, float, bool]]:
 
-            def should_be_magenta(edge_data: RustworkxArgumentEdgeData | RustworkxReturnedEdgeData) -> bool:
+            def should_be_magenta(edge_data) -> bool:
                 if isinstance(edge_data, RustworkxArgumentEdgeData):
                     return (
                         edge_data.target_transition_node_name in magenta_outlined_node_names
@@ -202,8 +215,34 @@ class RustworkxToGraphviz:
                         edge_data.source_transition_node_name in magenta_outlined_node_names
                         and edge_data.target_place_node_name in magenta_outlined_node_names
                     )
+                elif isinstance(edge_data, RustworkxReadEdgeData):
+                    return (
+                        edge_data.target_transition_node_name in magenta_outlined_node_names
+                        and edge_data.source_place_node_name in magenta_outlined_node_names
+                    )
                 else:
                     raise ValueError(f"Invalid edge data type: {type(edge_data)}")
+
+            if isinstance(edge, RustworkxReadEdgeData):
+                # Read edges keep their distinct shape but recolour magenta when their transition
+                # fires, like the consuming / producing edges. Resting colour is the same dark grey.
+                colour = 'magenta' if should_be_magenta(edge) else 'dimgray'
+                if edge.mutate:
+                    # MutateEdge: bidirectional, dot ends, slightly thicker — reads AND writes.
+                    return {
+                        'dir': 'both',
+                        'arrowhead': 'dot',
+                        'arrowtail': 'dot',
+                        'color': colour,
+                        'penwidth': '2',
+                    }
+                # SnapshotEdge: a dashed arrow towards the transition — a non-consuming read.
+                return {
+                    'style': 'dashed',
+                    'color': colour,
+                    'arrowhead': 'normal',
+                    'penwidth': '1',
+                }
 
             if should_be_magenta(edge):
                 return {'color': 'magenta', 'penwidth': '2'}

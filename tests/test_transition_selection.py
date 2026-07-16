@@ -111,8 +111,9 @@ class TestExecuteGraphWithSelector:
         assert fired == 1
         assert len(updated_graph.place_named('Input').tokens) == 2
         assert len(updated_graph.place_named('Output').tokens) == 1
-        # Default behavior picks last token: 3 -> 4
-        assert updated_graph.place_named('Output').tokens[0] == 4
+        # Tokens are consumed FIFO (oldest first): 1 -> 2
+        assert updated_graph.place_named('Output').tokens[0] == 2
+        assert updated_graph.place_named('Input').tokens == [2, 3]
 
     @pytest.mark.asyncio
     async def test_custom_selector_via_parameter(self):

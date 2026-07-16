@@ -107,7 +107,7 @@ See [TRANSITION_SELECTION.md](TRANSITION_SELECTION.md) for guard-based, round-ro
 
 ### Visualisation
 
-Built-in Graphviz rendering shows the graph structure, types, and current token state. In Jupyter, you can step through execution with animated visualisation.
+Built-in Graphviz rendering shows the graph structure, types, and current token state — including read arcs (dashed) and, in concurrent runs, transitions lit gold while their bodies run. The example notebooks (marimo) step through and animate execution live.
 
 ```python
 from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
@@ -159,6 +159,22 @@ def summarise(items: list[str]) -> str:
 ArgumentEdgeToTransition('Items', 'Summarise', 'items')
 ```
 
+### Read arcs — non-consuming reads
+
+A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present to enable the transition, but firing never consumes it:
+
+- **`SnapshotEdge`** — the transition receives a deep-copy; the place is untouched.
+- **`MutateEdge`** — the transition receives the live tokens and may modify them in place.
+
+```python
+from petritype.core.executable_graph_components import SnapshotEdge, MutateEdge
+
+SnapshotEdge('Multiplier', 'Scale', 'factor')   # Scale reads Multiplier, never consumes it
+MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in place
+```
+
+Read arcs render dashed, distinct from the solid consuming / producing arrows.
+
 ### Decorator for registration
 
 Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.
@@ -176,6 +192,26 @@ def health_check() -> ExecutableGraph:
 ```
 
 Modes: `manual` (default), `24/7` (continuous), `batch` (run once), `cron` (scheduled).
+
+## Runtime — observable, interactive nets
+
+Beyond running a net to completion, `petritype.runtime` turns a net into a **live object you can watch and poke while it runs** — for monitoring, real-time simulations, or interactive tools. The graph is the single source of truth; a `Runner` (a set of functions, no objects to construct) drives it via a passive `RunContext` the caller owns.
+
+```python
+from petritype.runtime import Runner, RunContext, ExecutionMode, Extend
+
+ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT, observers=(render,))
+await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefinitely(ctx, tick=0.1)
+```
+
+- **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs independent transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes.
+- **Observation** — `observers` are plain callables handed the *live graph* after each state change, so any renderer (a marimo notebook, a web frontend) can redraw at its own pace. In-flight transitions light up gold while their bodies run.
+- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` (transitions). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
+- **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
+- **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
+- **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox.
+
+Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler) — open with `uv run --extra examples marimo edit <notebook>`.
 
 ## When to Use This
 

@@ -8,7 +8,7 @@ from petritype.core.data_structures import (
     TypeRelationship
 )
 from petritype.core.executable_graph_components import (
-    ArgumentEdgeToTransition, ExecutableGraph, ReturnedEdgeFromTransition
+    ArgumentEdgeToTransition, ExecutableGraph, MutateEdge, ReturnedEdgeFromTransition, SnapshotEdge
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
 
@@ -46,6 +46,28 @@ class RustworkxReturnedEdgeData(BaseModel):
             self.source_transition_node_name == other.source_transition_node_name and
             self.target_place_node_name == other.target_place_node_name and
             self.return_index == other.return_index
+        )
+
+
+class RustworkxReadEdgeData(BaseModel):
+    source_place_node_name: PlaceNodeName
+    target_transition_node_name: TransitionNodeName
+    argument: ArgumentName
+    mutate: bool  # True for MutateEdge (read/write), False for SnapshotEdge (read-only copy)
+
+    def __hash__(self):
+        return hash(
+            (self.source_place_node_name, self.target_transition_node_name, self.argument, self.mutate)
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, RustworkxReadEdgeData):
+            return NotImplemented
+        return (
+            self.source_place_node_name == other.source_place_node_name and
+            self.target_transition_node_name == other.target_transition_node_name and
+            self.argument == other.argument and
+            self.mutate == other.mutate
         )
 
 
@@ -112,6 +134,27 @@ class RustworkxGraph:
             ))
         return tuple(out)
 
+    def read_edges_to_transitions(
+        snapshot_edges: Iterable[SnapshotEdge],
+        mutate_edges: Iterable[MutateEdge],
+        place_names_to_indices: dict[PlaceNodeName, NodeIndex],
+        transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
+    ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxReadEdgeData]]:
+        out = []
+        for edges, mutate in ((snapshot_edges, False), (mutate_edges, True)):
+            for edge in edges:
+                out.append((
+                    place_names_to_indices[edge.place_node_name],
+                    transition_names_to_indices[edge.transition_node_name],
+                    RustworkxReadEdgeData(
+                        source_place_node_name=edge.place_node_name,
+                        target_transition_node_name=edge.transition_node_name,
+                        argument=edge.argument,
+                        mutate=mutate,
+                    ),
+                ))
+        return tuple(out)
+
     def from_executable_graph(executable_graph: ExecutableGraph) -> PyDiGraph:
         graph = PyDiGraph()
         place_node_indices = graph.add_nodes_from(executable_graph.places)
@@ -134,6 +177,13 @@ class RustworkxGraph:
             place_names_to_indices=place_names_to_indices,
             transition_names_to_indices=transition_names_to_indices,
         )
+        g_read_edges = RustworkxGraph.read_edges_to_transitions(
+            snapshot_edges=executable_graph.snapshot_edges,
+            mutate_edges=executable_graph.mutate_edges,
+            place_names_to_indices=place_names_to_indices,
+            transition_names_to_indices=transition_names_to_indices,
+        )
         graph.add_edges_from(g_edges_to_transitions)
         graph.add_edges_from(g_edges_from_transitions)
+        graph.add_edges_from(g_read_edges)
         return graph

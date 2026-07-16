@@ -1,8 +1,10 @@
 from copy import deepcopy
 from typing import _GenericAlias, _UnionGenericAlias, TypeAliasType
 from types import GenericAlias
-from typing import Callable, Iterable, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
+from typing import Callable, Iterable, Literal, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, model_validator
+import asyncio
+import functools
 import inspect
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
@@ -99,6 +101,11 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
     output_distribution_function: Optional[Callable[[Any], dict[PlaceNodeName, Any]]] = None
     kwargs: Optional[KwArgs] = None
     activation_function: Optional[Callable] = None
+    # How a *synchronous* body runs: "inline" (default, on the event loop) or "thread"
+    # (offloaded to an executor so a blocking / CPU-bound body doesn't freeze the loop). Async
+    # bodies already yield and ignore this. Process-level parallelism is the function's own
+    # concern (bring your own process pool inside the body) — the engine never pickles a token.
+    execution: Literal["inline", "thread"] = "inline"
 
 
 class ArgumentEdgeToTransition(PositionalArgsBaseModel):
@@ -111,6 +118,24 @@ class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
     transition_node_name: FunctionName
     place_node_name: PlaceNodeName
     return_index: Optional[ReturnIndex] = None
+
+
+class SnapshotEdge(PositionalArgsBaseModel):
+    """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
+    snapshot** of the place's tokens, so reading cannot disturb the place. Enabledness requires
+    the place to be non-empty (presence), but firing does not consume the tokens."""
+    place_node_name: PlaceNodeName
+    transition_node_name: FunctionName
+    argument: ArgumentName
+
+
+class MutateEdge(PositionalArgsBaseModel):
+    """A non-consuming read/write edge (place -> transition). The transition receives the
+    **live** tokens and may modify them in place; they stay in the place (not consumed) but may
+    be changed. Enabledness requires the place to be non-empty (presence)."""
+    place_node_name: PlaceNodeName
+    transition_node_name: FunctionName
+    argument: ArgumentName
 
 
 class ExecutableGraph(BaseModel):
@@ -149,6 +174,10 @@ class ExecutableGraph(BaseModel):
     transitions: Sequence[FunctionTransitionNode]
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
+    # Non-consuming read edges (place -> transition): SnapshotEdge passes a deep copy (place
+    # untouched); MutateEdge passes the live tokens (transition may modify them in place).
+    snapshot_edges: Sequence[SnapshotEdge] = []
+    mutate_edges: Sequence[MutateEdge] = []
     step_count: int = 0
     # Name of the most recent transition fired by the last ``execute_graph``
     # call, or None if that call fired nothing. Reset at the start of every
@@ -167,6 +196,10 @@ class ExecutableGraph(BaseModel):
     # to drive stage/progress UI that must stay correct after the marking has
     # moved past a stage.
     fired_counts: dict[str, int] = {}
+    # Names of transitions whose bodies are currently executing — they consumed their inputs but
+    # have not yet deposited their outputs (only populated in concurrent mode). The renderer
+    # lights these "in flight" transitions distinctly; each is removed as it completes.
+    in_flight: set[str] = set()
     transition_history: Sequence[FunctionTransitionNode] = []
     input_place_history: Sequence[ListPlaceNode] = []
     output_place_history: Sequence[ListPlaceNode] = []
@@ -211,7 +244,13 @@ class ExecutableGraph(BaseModel):
                 raise ValueError(f"Return edge references unknown place: {edge.place_node_name}")
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Return edge references unknown transition: {edge.transition_node_name}")
-        
+
+        for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
+            if edge.place_node_name not in place_names:
+                raise ValueError(f"Read edge references unknown place: {edge.place_node_name}")
+            if edge.transition_node_name not in transition_names:
+                raise ValueError(f"Read edge references unknown transition: {edge.transition_node_name}")
+
         return values
 
     @model_validator(mode="before")
@@ -269,7 +308,23 @@ class ExecutableGraph(BaseModel):
                         f"'{place.name}': place type '{place_type}' does not match return type "
                         f"'{return_type}'."
                     )
-        
+
+        for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
+            place = place_names_to_nodes[edge.place_node_name]
+            transition = transition_names_to_nodes[edge.transition_node_name]
+            place_type = place.type
+            argument_type = get_type_hints(transition.function).get(edge.argument)
+            if place_type is not None and argument_type is not None:
+                if not CompareTypes.between_annotations_where_both_maybe_in_list(
+                    annotation1=place_type,
+                    annotation2=argument_type,
+                ):
+                    raise TypeError(
+                        f"Type mismatch for read edge from place '{place.name}' to transition "
+                        f"'{transition.name}': place type '{place_type}' does not match argument type "
+                        f"'{argument_type}'."
+                    )
+
         return values
 
 
@@ -372,6 +427,15 @@ class MapTransitionNames:
                 raise ValueError(f"Unexpected node type: {type(edge_from)}")
         return outgoing_edges
 
+    def to_read_edges(
+        executable_graph: ExecutableGraph,
+    ) -> dict[str, tuple[Union["SnapshotEdge", "MutateEdge"], ...]]:
+        """Map each transition to its non-consuming read edges (SnapshotEdge + MutateEdge)."""
+        read_edges: dict[str, tuple] = {}
+        for edge in (*executable_graph.snapshot_edges, *executable_graph.mutate_edges):
+            read_edges[edge.transition_node_name] = read_edges.get(edge.transition_node_name, ()) + (edge,)
+        return read_edges
+
 
 class ExecutableGraphCheck:
     """Functions that do not alter the executable graph."""
@@ -380,6 +444,7 @@ class ExecutableGraphCheck:
         transition: FunctionTransitionNode,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
+        transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
     ) -> bool:
         # Transitions with no incoming edges (generators) are always ready to fire
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
@@ -389,27 +454,13 @@ class ExecutableGraphCheck:
             place = place_names_to_nodes[edge.place_node_name]
             if len(place.tokens) == 0:
                 return False
+        # Read edges (snapshot/mutate) require presence too — there must be a token to read —
+        # but firing does not consume them.
+        if transition_names_to_read_edges:
+            for edge in transition_names_to_read_edges.get(transition.name, ()):
+                if len(place_names_to_nodes[edge.place_node_name].tokens) == 0:
+                    return False
         return True
-
-    def next_transition(
-        executable_graph: ExecutableGraph,  # Needed so that we know the transition order.
-        place_names_to_nodes: dict[str, ListPlaceNode],
-        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
-        fire_transitions_last_to_first: bool = True,
-    ) -> Optional[FunctionTransitionNode]:
-        if fire_transitions_last_to_first:
-            transitions = tuple(x for x in reversed(executable_graph.transitions))
-        else:
-            transitions = tuple(x for x in executable_graph.transitions)
-        for transition in transitions:
-            if not ExecutableGraphCheck.sufficient_tokens_are_available(
-                transition=transition,
-                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-                place_names_to_nodes=place_names_to_nodes,
-            ):
-                continue
-            return transition
-        return None
 
     def all_return_indices_are_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         for edge in outgoing_edges:
@@ -506,11 +557,15 @@ class ExecutableGraphOperations:
 
     def construct_graph(
         mixed_nodes_and_edges: Iterable[
-            Union[ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition]
+            Union[
+                ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition,
+                ReturnedEdgeFromTransition, SnapshotEdge, MutateEdge,
+            ]
         ],
         allow_token_copying: bool = False,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
+        snapshot_edges, mutate_edges = [], []
         for node in mixed_nodes_and_edges:
             if isinstance(node, ListPlaceNode):
                 places.append(node)
@@ -520,9 +575,16 @@ class ExecutableGraphOperations:
                 edges_to.append(node)
             elif isinstance(node, ReturnedEdgeFromTransition):
                 edges_from.append(node)
+            elif isinstance(node, SnapshotEdge):
+                snapshot_edges.append(node)
+            elif isinstance(node, MutateEdge):
+                mutate_edges.append(node)
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
-        return ExecutableGraph(places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from, allow_token_copying=allow_token_copying)
+        return ExecutableGraph(
+            places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
+            snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
+        )
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
         """Update the given place by appending the result token to its tokens list."""
@@ -535,6 +597,7 @@ class ExecutableGraphOperations:
         allow_token_copying: bool = False,
         # place_history_length: int = 1,
         token_history_length: int = 0,
+        transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
     ) -> tuple[dict[ArgumentName, any], Sequence[ListPlaceNode]]:
         """Remove input tokens from source places
         
@@ -554,32 +617,43 @@ class ExecutableGraphOperations:
             argument_type = get_type_hints(transition.function).get(edge.argument)
             place_type = place.type
             # Two cases - passing a single token or passing all tokens as a list.
-            print("argument_type:", argument_type   
-                  , "place_type:", place_type
-                  , "place.tokens:", place.tokens
-                  )
             argument_origin = get_origin(argument_type)
-            print("argument_origin is list:", argument_origin is list)
             if argument_origin is list and CompareTypes.between_annotations_where_one_maybe_in_list(
                 annotation_not_in_list=place_type,
                 annotation_maybe_in_list=argument_type,
             ):  # If the argument type is a list and the type inside the list matches the place type,
                 # pass all tokens as a list.
                 tokens = place.tokens
-                print("tokens to pass as list:", tokens)
                 place.tokens = []
                 if allow_token_copying and token_history_length >= 1:
                     tokens_copy = deepcopy(tokens)
                     place_copy.tokens.extend(tokens_copy)
                 input_edge_names_to_tokens[edge.argument] = tokens
-            else:  # Pass in a single token.
-                token = place.tokens.pop()
-                print("token to pass as single:", token)
+            else:  # Pass in a single token (FIFO: consume the oldest token first).
+                token = place.tokens.pop(0)
                 # if place_history_length >= 1:
                 if allow_token_copying and token_history_length >= 1:
                     token_copy = deepcopy(token)
                     place_copy.tokens.append(token_copy)
                 input_edge_names_to_tokens[edge.argument] = token
+
+        # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
+        # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
+        # guaranteed by the enabledness check, so place.tokens is non-empty here.
+        for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
+            place = place_names_to_nodes[edge.place_node_name]
+            argument_type = get_type_hints(transition.function).get(edge.argument)
+            if get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
+                annotation_not_in_list=place.type,
+                annotation_maybe_in_list=argument_type,
+            ):
+                value = place.tokens  # all tokens, as a list
+            else:
+                value = place.tokens[0]  # the single token
+            input_edge_names_to_tokens[edge.argument] = (
+                deepcopy(value) if isinstance(edge, SnapshotEdge) else value
+            )
+
         return input_edge_names_to_tokens, input_places
 
     async def stage_2_call_transition_function(
@@ -588,17 +662,30 @@ class ExecutableGraphOperations:
         transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
         allow_token_copying: bool = False,
+        executor=None,
     ) -> dict[ListPlaceNode, Any]:
         """Call the transition function and match output tokens to destination places.
 
         Return a mapping of output places to the tokens to be added to them.
+
+        A synchronous body marked ``execution="thread"`` is run via ``executor`` (a thread pool;
+        ``None`` uses the default) so it does not block the event loop. Async bodies already
+        yield and run inline regardless.
         """
         if transition.kwargs is not None:
             merged_kwargs = SafeMerge.dictionaries(tokens_kwargs, transition.kwargs)
         else:
             merged_kwargs = tokens_kwargs
         if inspect.iscoroutinefunction(transition.function):
+            # Async bodies already yield; "execution" does not apply.
             result = await transition.function(**merged_kwargs)
+        elif transition.execution == "thread":
+            # Offload a blocking / CPU-bound sync body to a thread so it doesn't freeze the
+            # event loop. ``executor=None`` uses the default ThreadPoolExecutor.
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                executor, functools.partial(transition.function, **merged_kwargs)
+            )
         else:
             result = transition.function(**merged_kwargs)
         output_place_names_to_tokens: dict[PlaceNodeName, Any] = dict()
@@ -748,6 +835,7 @@ class ExecutableGraphOperations:
         place_history_length=1,
         token_history_length=0,
         transition_selector: Optional[Callable[[ExecutableGraph, list[FunctionTransitionNode]], Optional[FunctionTransitionNode]]] = None,
+        executor=None,
     ) -> tuple[ExecutableGraph, int]:
         """Execute the Petri net graph.
 
@@ -781,10 +869,11 @@ class ExecutableGraphOperations:
                 "transitions."
             )
 
-        # Default selector: fire last enabled transition (preserves current behavior)
+        # Default selector: fire the first enabled transition in definition order, so
+        # earlier-defined transitions have priority (definition order = priority).
         def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]) -> Optional[FunctionTransitionNode]:
-            """Default selector that fires the last enabled transition."""
-            return enabled[-1] if enabled else None
+            """Default selector that fires the first enabled transition (definition order)."""
+            return enabled[0] if enabled else None
 
         # Choose selector: provided > graph's > default
         selector = transition_selector or executable_graph.transition_selector or default_selector
@@ -798,6 +887,7 @@ class ExecutableGraphOperations:
             MapTransitionNames.to_incoming_edges(executable_graph)
         transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]] = \
             MapTransitionNames.to_outgoing_edges(executable_graph)
+        transition_names_to_read_edges = MapTransitionNames.to_read_edges(executable_graph)
 
         while True:
             if transitions_fired >= max_transitions:
@@ -805,13 +895,14 @@ class ExecutableGraphOperations:
                     print(f"Performed {transitions_fired} transitions, maximum transitions count reached.")
                 return executable_graph, transitions_fired
 
-            # Get all enabled transitions (those with sufficient tokens)
+            # Get all enabled transitions (those with sufficient tokens), in definition order.
             enabled_transitions = []
-            for transition in reversed(executable_graph.transitions):  # Preserve ordering for default behavior
+            for transition in executable_graph.transitions:
                 if ExecutableGraphCheck.sufficient_tokens_are_available(
                     transition=transition,
                     transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                     place_names_to_nodes=place_names_to_nodes,
+                    transition_names_to_read_edges=transition_names_to_read_edges,
                 ):
                     enabled_transitions.append(transition)
 
@@ -819,7 +910,8 @@ class ExecutableGraphOperations:
             transition = selector(executable_graph, enabled_transitions)
 
             if transition is None:
-                print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
+                if verbose:
+                    print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
                 return executable_graph, transitions_fired
             # input_history, output_history = await ExecutableGraphOperations.old_fire_transition(
             #     transition=transition,
@@ -838,6 +930,7 @@ class ExecutableGraphOperations:
                 allow_token_copying=allow_token_copying,
                 # place_history_length=place_history_length,
                 token_history_length=token_history_length,
+                transition_names_to_read_edges=transition_names_to_read_edges,
             )
             output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
                 transition=transition,
@@ -845,6 +938,7 @@ class ExecutableGraphOperations:
                 transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
                 place_names_to_nodes=place_names_to_nodes,
                 allow_token_copying=allow_token_copying,
+                executor=executor,
             )
             updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
                 output_place_names_to_tokens=output_place_names_to_tokens,
