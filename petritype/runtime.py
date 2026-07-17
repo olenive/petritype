@@ -356,8 +356,9 @@ class Runner:
             for transition in graph.transitions:
                 if transition.name in airborne or transition.name in ctx.disabled:
                     continue  # already running, or toggled off via Disable
-                if ExecutableGraphCheck.sufficient_tokens_are_available(
+                if ExecutableGraphCheck.transition_is_enabled(
                     transition=transition,
+                    executable_graph=graph,
                     transition_names_to_incoming_edges=incoming,
                     place_names_to_nodes=place_nodes,
                     transition_names_to_read_edges=read,
@@ -453,8 +454,9 @@ class Runner:
                 for transition in graph.transitions:
                     if transition.name in airborne or transition.name in ctx.disabled:
                         continue
-                    if ExecutableGraphCheck.sufficient_tokens_are_available(
+                    if ExecutableGraphCheck.transition_is_enabled(
                         transition=transition,
+                        executable_graph=graph,
                         transition_names_to_incoming_edges=incoming,
                         place_names_to_nodes=place_nodes,
                         transition_names_to_read_edges=read,

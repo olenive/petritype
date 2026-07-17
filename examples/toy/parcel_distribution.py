@@ -26,10 +26,9 @@ def _(mo):
         Demonstrates:
         - **Perpetual execution** — `Receive Parcel` has no inputs, so it generates tokens
           from nothing.
-        - **Time-based activation** — guards use wall-clock time (`1s` arrivals, `5s`
-          dispatch), so timing is controlled by activation functions, not by sleeping
-          inside transitions.
-        - **Guard-based selection** — a custom selector that respects activation guards.
+        - **Time-based guards** — `guard`s use wall-clock time (`1s` arrivals, `5s`
+          dispatch), so timing is controlled by enabling conditions the engine checks
+          during enabled-transition discovery, not by sleeping inside transitions.
         - **Probabilistic behaviour** — each parcel has a 1-in-10 chance of being left
           behind.
 
@@ -101,9 +100,9 @@ def _(BaseModel):
 
 @app.cell
 def _(Parcel, random, time):
-    # Mutable timing/counter state shared by the transition and activation functions below.
-    # `receive_parcel()` / `can_receive_parcel()` are called by the engine with no arguments,
-    # so they can't take state as a parameter — they read this module-level dict instead.
+    # Mutable timing/counter state shared by the transition bodies and guards below. The
+    # timers are wall-clock rather than part of the marking, so the guards read this
+    # module-level dict instead of the graph they are handed.
     # `make_simulation` resets it at the start of each run. Defining the functions at module
     # scope (rather than nested in `make_simulation`) keeps their names clean in the rendered
     # transition labels (e.g. `receive_parcel`, not `make_simulation.<locals>.receive_parcel`).
@@ -116,7 +115,7 @@ def _(Parcel, random, time):
         print(f"📦 Receiving parcel #{sim_state['counter']}...")
         return Parcel(id=sim_state["counter"])
 
-    def can_receive_parcel() -> bool:
+    def can_receive_parcel(graph) -> bool:
         """Guard: only allow receiving a parcel every 1 second."""
         return time.time() - sim_state["last_arrival"] >= 1.0
 
@@ -143,24 +142,14 @@ def _(Parcel, random, time):
             print(f"⏳ Left behind for next truck: {[p.id for p in left_behind]}")
         return left_behind
 
-    def can_dispatch_truck() -> bool:
+    def can_dispatch_truck(graph) -> bool:
         """Guard: only allow truck dispatch every 5 seconds."""
         return time.time() - sim_state["last_dispatch"] >= 5.0
-
-    def guard_based_selector(graph, enabled):
-        """Select the first enabled transition whose guard (if any) is satisfied."""
-        for transition in enabled:
-            if transition.activation_function is None:
-                return transition
-            if transition.activation_function():
-                return transition
-        return None
 
     return (
         can_dispatch_truck,
         can_receive_parcel,
         dispatch_truck,
-        guard_based_selector,
         receive_parcel,
         sim_state,
         sort_parcel,
@@ -180,7 +169,6 @@ def _(
     can_dispatch_truck,
     can_receive_parcel,
     dispatch_truck,
-    guard_based_selector,
     receive_parcel,
     sim_state,
     sort_parcel,
@@ -190,8 +178,8 @@ def _(
         """Build a fresh simulation: graph and rustworkx view.
 
         Resets the shared `sim_state` so each run starts from a clean counter/timers. The
-        transition and activation functions are defined at module scope (above) so they show
-        up with clean names in the rendered graph.
+        transition bodies and guards are defined at module scope (above) so they show up
+        with clean names in the rendered graph.
         """
         sim_state.update({"counter": 0, "last_arrival": 0.0, "last_dispatch": 0.0})
 
@@ -199,7 +187,7 @@ def _(
             FunctionTransitionNode(
                 name="Receive Parcel",
                 function=receive_parcel,
-                activation_function=can_receive_parcel,
+                guard=can_receive_parcel,
             ),
             ReturnedEdgeFromTransition("Receive Parcel", "Receiving"),
             ListPlaceNode(name="Receiving", type=Parcel),
@@ -215,12 +203,11 @@ def _(
             FunctionTransitionNode(
                 name="Dispatch Truck",
                 function=dispatch_truck,
-                activation_function=can_dispatch_truck,
+                guard=can_dispatch_truck,
             ),
             ReturnedEdgeFromTransition("Dispatch Truck", "Staging Area"),
         ]
         graph = ExecutableGraphOperations.construct_graph(nodes_and_edges)
-        graph.transition_selector = guard_based_selector
         pydigraph = RustworkxGraph.from_executable_graph(graph)
         return graph, pydigraph
 

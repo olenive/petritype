@@ -1,91 +1,82 @@
-# Transition Selection and Activation Functions
+# Transition Selection: Guards, Priorities, and Selectors
 
-This document describes the new `transition_selector` and `activation_function` features added to Petritype.
+This document describes the three levers that control which transition fires next.
 
 ## Overview
 
-Two new optional fields enable flexible control over which transitions fire:
+Every firing is decided in two steps:
 
-1. **`activation_function`** on `FunctionTransitionNode` - Transition-level function
-2. **`transition_selector`** on `ExecutableGraph` - Graph-level function
+1. **Enablement** — the engine collects the transitions that *may* fire: every input
+   place has tokens **and** the transition's `guard` (if any) passes. This is part of
+   the net's semantics and applies in every execution mode.
+2. **Selection** — one enabled transition is picked to *actually* fire, by the
+   `transition_selector`. The default selector honours each transition's `priority`.
 
-Both fields are completely optional and preserve existing behavior when not provided.
+Three optional fields hook into this:
 
-## activation_function
+| Field | Lives on | Step | Signature | Meaning |
+|---|---|---|---|---|
+| `guard` | `FunctionTransitionNode` | 1 — enablement | `(ExecutableGraph) -> bool` | Engine-enforced enabling condition |
+| `priority` | `FunctionTransitionNode` | 2 — selection | `(ExecutableGraph) -> float` | Hint read by the default selector |
+| `transition_selector` | `ExecutableGraph` | 2 — selection | `(graph, enabled) -> transition \| None` | Full control over what fires |
 
-An optional function attached to individual transitions. The selector can interpret this however it wants.
+All are optional; a net using none of them behaves as before (first enabled
+transition in definition order fires).
 
-### Usage
+## guard
+
+An enabling condition the engine checks alongside token availability, in every
+execution mode — sequential `execute_graph` and both concurrent runner loops. A
+transition whose guard returns `False` is simply not enabled: it never reaches the
+selector, and in Petri net terms this is a transition guard in the coloured-net
+sense.
 
 ```python
-FunctionTransitionNode(
-    name="MyTransition",
-    function=my_function,
-    activation_function=my_activation,  # Optional
-)
+def batch_ready(graph) -> bool:
+    """Only enabled once the pool is full."""
+    return len(graph.place_named("Pool").tokens) >= 10
+
+FunctionTransitionNode("Batch", batch_process, guard=batch_ready)
 ```
 
-### Common Patterns
+Guards receive the live graph, so they can read the whole marking. A common use is
+graceful termination of a cycle that would otherwise churn forever — see
+`examples/toy/match_up_tokens/01_match_lengths.py`, where the guard disables the
+matching transition once no match remains.
 
-The `activation_function` has no prescribed signature or return type. Selectors determine how to interpret it.
+**Keep guards cheap and side-effect-free.** A guard runs on every enabled-discovery
+sweep (every loop iteration, for every transition that has one), so it should be a
+quick predicate over the marking — never a place to do work, mutate state, or block.
+`guard=None` costs nothing: the check is skipped entirely.
 
-**Pattern 1: Guard (returns bool)**
+## priority
+
+A selection hint: the default selector fires the enabled transition with the highest
+priority. Transitions without one score `0.0`, and ties fall back to definition
+order — so a net where nobody sets a priority keeps the first-enabled-in-definition-
+order behaviour.
+
 ```python
-def my_guard():
-    """Returns True if transition can fire."""
-    return time.time() > start_time + 5.0
+def queue_pressure(graph) -> float:
+    """Drain the longest queue first."""
+    return len(graph.place_named("Queue").tokens)
 
-FunctionTransitionNode(
-    name="Delayed",
-    function=process,
-    activation_function=my_guard,
-)
+FunctionTransitionNode("Drain", drain, priority=queue_pressure)
 ```
 
-**Pattern 2: Priority (returns float)**
-```python
-def calculate_priority():
-    """Returns priority score (higher = more important)."""
-    return queue_size * 2.5
+Priorities also receive the live graph, so they can depend on the current marking.
+They are only called on transitions that already passed enablement, once per firing
+decision — cheaper ground than a guard, but the same advice applies: read, don't
+work. A constant priority is just `lambda graph: 5.0`.
 
-FunctionTransitionNode(
-    name="Process",
-    function=process,
-    activation_function=calculate_priority,
-)
-```
-
-**Pattern 3: Context-Aware (takes ExecutableGraph)**
-```python
-def check_pool_size(graph: ExecutableGraph):
-    """Only fire if pool has enough items."""
-    pool = graph.place_named("Pool")
-    return len(pool.tokens) >= 10
-
-FunctionTransitionNode(
-    name="Batch",
-    function=batch_process,
-    activation_function=check_pool_size,
-)
-```
-
-**Pattern 4: Countdown Timer (returns seconds remaining)**
-```python
-def countdown():
-    """Returns seconds until ready (0 = ready now)."""
-    elapsed = time.time() - start_time
-    return max(0, 5.0 - elapsed)
-
-FunctionTransitionNode(
-    name="Timed",
-    function=process,
-    activation_function=countdown,
-)
-```
+Note that priority is *policy*, not semantics: a custom `transition_selector`
+replaces the default and is free to ignore `priority`. In the concurrent runner
+there is no selection step at all — every enabled transition launches — so
+priorities have no effect there (guards still do).
 
 ## transition_selector
 
-An optional function that chooses which transition to fire from the enabled list.
+For full control over selection, replace the selector itself.
 
 ### Signature
 
@@ -98,12 +89,12 @@ def my_selector(
 
     Args:
         graph: Full graph context (places, tokens, history, etc.)
-        enabled_transitions: Transitions with sufficient input tokens
+        enabled_transitions: Transitions that passed enablement (tokens + guard),
+            in definition order
 
     Returns:
         Transition to fire, or None to stop execution
     """
-    # Your selection logic here
     return enabled_transitions[0] if enabled_transitions else None
 ```
 
@@ -127,61 +118,12 @@ Parameter selector overrides graph selector if both provided.
 
 ### Default Behavior
 
-If no selector is provided, the default fires the **first enabled transition in definition
-order** — so earlier-defined transitions have priority. The `enabled` list passed to a selector
-is also in definition order. (Tokens within a place are consumed FIFO — oldest first.)
-
-```python
-def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]):
-    """Default: fire the first enabled transition (definition order)."""
-    return enabled[0] if enabled else None
-```
+If no selector is provided, the default fires the **highest-priority enabled
+transition**, with ties broken by definition order (see `priority` above). Guards
+have already been applied by the time any selector runs — a selector never sees a
+guard-blocked transition. (Tokens within a place are consumed FIFO — oldest first.)
 
 ## Example Selectors
-
-### Guard-Based Selector
-
-Respects `activation_function` as guards (bool):
-
-```python
-def guard_based_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]):
-    """Fire first transition whose guard returns True."""
-    for t in enabled:
-        if t.activation_function is None:
-            return t  # No guard = always ready
-
-        # Try calling with graph, fall back to no args
-        try:
-            result = t.activation_function(graph)
-        except TypeError:
-            result = t.activation_function()
-
-        if result:  # Guard passed
-            return t
-
-    return None  # All guards blocked
-```
-
-### Priority-Based Selector
-
-Interprets `activation_function` as priority scores:
-
-```python
-def priority_based_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]):
-    """Fire highest priority transition."""
-    if not enabled:
-        return None
-
-    def get_priority(t: FunctionTransitionNode) -> float:
-        if not t.activation_function:
-            return 0.0
-        try:
-            return t.activation_function(graph)
-        except TypeError:
-            return t.activation_function()
-
-    return max(enabled, key=get_priority)
-```
 
 ### Random Selector
 
@@ -236,10 +178,12 @@ def bottleneck_aware_selector(graph: ExecutableGraph, enabled: list[FunctionTran
 
 ## Complete Example
 
+Two transitions compete for the same input; the slow one is held back by a guard
+until five seconds have passed. No custom selector needed.
+
 ```python
 import time
 from petritype.core.executable_graph_components import (
-    ExecutableGraph,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
@@ -255,72 +199,70 @@ def slow_process(x: int) -> int:
     time.sleep(1)
     return x * 3
 
-# Activation functions
-fast_start = time.time()
-def fast_ready():
-    """Fast process always ready."""
-    return True
-
-slow_start = time.time()
-def slow_ready():
-    """Slow process needs 5 second delay."""
-    return time.time() - slow_start >= 5.0
-
-# Custom selector
-def guard_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]):
-    """Fire first transition whose guard passes."""
-    for t in enabled:
-        if t.activation_function and not t.activation_function():
-            continue
-        return t
-    return None
+# Guard: Slow is not enabled for the first 5 seconds
+start = time.time()
+def slow_ready(graph) -> bool:
+    return time.time() - start >= 5.0
 
 # Build graph
 graph = ExecutableGraphOperations.construct_graph([
     ListPlaceNode('Input', int, [1, 2, 3, 4, 5]),
 
-    # Fast transition - always ready
+    # Fast transition - always enabled while Input has tokens
     ArgumentEdgeToTransition('Input', 'Fast', 'x'),
-    FunctionTransitionNode(
-        'Fast',
-        fast_process,
-        activation_function=fast_ready,
-    ),
+    FunctionTransitionNode('Fast', fast_process),
     ReturnedEdgeFromTransition('Fast', 'Output'),
 
-    # Slow transition - needs 5 second delay
+    # Slow transition - guard holds it back for 5 seconds
     ArgumentEdgeToTransition('Input', 'Slow', 'x'),
-    FunctionTransitionNode(
-        'Slow',
-        slow_process,
-        activation_function=slow_ready,
-    ),
+    FunctionTransitionNode('Slow', slow_process, guard=slow_ready),
     ReturnedEdgeFromTransition('Slow', 'Output'),
 
     ListPlaceNode('Output', int),
 ])
 
-# Set selector
-graph.transition_selector = guard_selector
-
-# Execute - will fire Fast until 5 seconds pass, then Slow becomes available
+# Execute - fires Fast until 5 seconds pass, then Slow becomes enabled too
 await ExecutableGraphOperations.execute_graph(
     graph,
     max_transitions=10,
 )
 ```
 
+## Deprecated: activation_function
+
+`FunctionTransitionNode.activation_function` predates `guard` and `priority` and
+conflated both roles: it had no prescribed signature or meaning, and — crucially —
+**the engine never consulted it**. It only did anything if a custom selector chose
+to read it, so attaching a "guard" with the default selector silently did nothing.
+
+It is deprecated (constructing a node with it emits a `DeprecationWarning`) and
+will be removed in a future release. Until then it keeps its old behaviour: inert
+to the engine, visible to custom selectors.
+
+Migration:
+
+| Old pattern | Replacement |
+|---|---|
+| `() -> bool` guard + guard-honouring selector | `guard=lambda graph: ...` (no selector needed) |
+| `() -> float` priority + priority selector | `priority=lambda graph: ...` (no selector needed) |
+| Countdown timer (`seconds remaining`) | `guard=lambda graph: time.time() >= deadline` |
+| Anything selector-specific | Keep the custom selector; read your own fields |
+
+Both replacements take the graph as their single argument — no more probing with
+`try: fn(graph) except TypeError: fn()`.
+
 ## Design Philosophy
 
-- **Minimal structure**: No prescribed protocols or base classes
-- **Maximum flexibility**: Users define their own semantics
-- **Composable**: Mix and match patterns
-- **Optional**: Preserves existing behavior when not used
-- **Context-aware**: Selectors receive full graph state
+- **Semantics vs policy**: `guard` is part of the net's meaning (enforced by the
+  engine everywhere); `priority` and selectors are scheduling policy on top.
+- **Minimal structure**: selectors are plain functions; no protocols or base classes.
+- **Optional**: nets using none of the hooks behave exactly as before.
+- **Context-aware**: guards, priorities, and selectors all receive the live graph.
 
 ## Testing
 
-See `tests/test_transition_selection.py` for comprehensive test examples.
+See `tests/test_guards_and_priorities.py` for guard/priority semantics and
+`tests/test_transition_selection.py` for selector behaviour.
 
 ## Future Patterns
 

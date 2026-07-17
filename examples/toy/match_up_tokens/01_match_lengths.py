@@ -34,10 +34,10 @@ def _(mo):
         unmatched tokens are returned to their original places.
 
         To avoid a futile cycle (endlessly extracting and re-depositing the same tokens
-        once no match remains), the transition carries an `activation_function` guard and
-        the graph a selector that honours it: when no string/length match is possible the
-        transition is no longer selected, so the run ends gracefully with the unmatched
-        tokens still visible in their places.
+        once no match remains), the transition carries a `guard` — an enabling condition
+        the engine checks alongside token availability: when no string/length match is
+        possible the transition is no longer enabled, so the run ends gracefully with
+        the unmatched tokens still visible in their places.
 
         The net is fired **live**, one transition at a time:
 
@@ -158,13 +158,6 @@ def _(
     distribute_result_tokens,
     match_one_string_to_one_length,
 ):
-    def fire_first_whose_guard_passes(graph, enabled):
-        """Transition selector that honours activation-function guards."""
-        for transition in enabled:
-            if transition.activation_function is None or transition.activation_function(graph):
-                return transition
-        return None
-
     def build_graph():
         """Construct a fresh graph and its rustworkx view."""
         nodes_and_edges = [
@@ -176,7 +169,7 @@ def _(
                 "Match Lengths",
                 match_one_string_to_one_length,
                 output_distribution_function=distribute_result_tokens,
-                activation_function=a_match_is_possible,
+                guard=a_match_is_possible,
             ),
             ReturnedEdgeFromTransition("Match Lengths", "Some Strings"),
             ReturnedEdgeFromTransition("Match Lengths", "Some Lengths"),
@@ -184,7 +177,6 @@ def _(
             ListPlaceNode("Matched Pair", Optional[tuple[str, int]], []),
         ]
         graph = ExecutableGraphOperations.construct_graph(nodes_and_edges)
-        graph.transition_selector = fire_first_whose_guard_passes
         pydigraph = RustworkxGraph.from_executable_graph(graph)
         return graph, pydigraph
 

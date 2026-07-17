@@ -95,30 +95,35 @@ async def fetch(url: str) -> str:
 FunctionTransitionNode('Fetch', fetch)
 ```
 
-### Transition selectors and activation functions
+### Guards, priorities, and transition selectors
 
-Control which transition fires next with pluggable selectors. Attach activation functions to individual transitions for guards, priorities, or context-aware logic.
+Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
+
+- **`guard`** — an enabling condition the engine enforces in every execution mode: a transition whose guard returns `False` is not enabled, regardless of available tokens. Guards run on every enabled-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
+- **`priority`** — a selection hint: the default selector fires the highest-priority enabled transition. Unset scores `0.0`; ties fall back to definition order.
 
 ```python
-# Activation function: only fire when pool has enough items
-def batch_ready(graph):
+# Guard: BatchProcess is not enabled until the pool is full
+def batch_ready(graph) -> bool:
     return len(graph.place_named('Pool').tokens) >= 10
 
-FunctionTransitionNode(
-    'BatchProcess', batch_process,
-    activation_function=batch_ready,
-)
+# Priority: drain the longest queue first
+def queue_pressure(graph) -> float:
+    return len(graph.place_named('Queue').tokens)
 
-# Selector: fire highest-priority enabled transition
-def priority_selector(graph, enabled):
-    def get_priority(t):
-        return t.activation_function() if t.activation_function else 0.0
-    return max(enabled, key=get_priority) if enabled else None
-
-graph.transition_selector = priority_selector
+FunctionTransitionNode('BatchProcess', batch_process, guard=batch_ready)
+FunctionTransitionNode('Drain', drain, priority=queue_pressure)
 ```
 
-See [TRANSITION_SELECTION.md](TRANSITION_SELECTION.md) for guard-based, round-robin, bottleneck-aware, and other selector patterns.
+For full control over what fires next, replace the selector itself — a function from the enabled transitions to the one to fire:
+
+```python
+graph.transition_selector = my_selector   # (graph, enabled) -> transition or None
+```
+
+The older `activation_function` field is deprecated: the engine never consulted it, so use `guard` or `priority` instead. It remains visible to custom selectors until removed.
+
+See [dev-docs/TRANSITION_SELECTION.md](dev-docs/TRANSITION_SELECTION.md) for round-robin, bottleneck-aware, and other selector patterns.
 
 ### Visualisation
 

@@ -6,6 +6,7 @@ from pydantic import BaseModel, model_validator
 import asyncio
 import functools
 import inspect
+import warnings
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
 from petritype.core.type_comparisons import CompareTypes
@@ -119,24 +120,44 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
         function: The function to execute when this transition fires
         output_distribution_function: Optional function to distribute outputs to places
         kwargs: Optional keyword arguments to pass to the function
-        activation_function: Optional function to determine if/when transition should fire.
-            Can be used by custom transition selectors. No prescribed signature -
-            the selector determines how to interpret the return value.
-            Common patterns:
-            - () -> bool: guard function (True = can fire)
-            - () -> float: priority score or countdown timer
-            - (ExecutableGraph) -> Any: context-aware activation
+        guard: Optional (ExecutableGraph) -> bool enabling condition, enforced by the
+            engine in every execution mode: a transition whose guard returns False is
+            not enabled, regardless of available tokens or selector. The guard runs on
+            every enabled-discovery sweep, so keep it a cheap, side-effect-free
+            predicate over the marking (None costs nothing — the check is skipped).
+        priority: Optional (ExecutableGraph) -> float selection hint. The default
+            selector fires the highest-priority enabled transition; transitions
+            without one score 0.0, and ties fall back to definition order. Only
+            called on enabled transitions at selection time.
+        activation_function: Deprecated — use ``guard`` (engine-enforced enabling) or
+            ``priority`` (selection ranking) instead. The engine never consults this
+            field; it is only visible to custom transition selectors, and it will be
+            removed in a future release.
     """
     name: str
     function: Callable
     output_distribution_function: Optional[Callable[[Any], dict[PlaceNodeName, Any]]] = None
     kwargs: Optional[KwArgs] = None
+    guard: Optional[Callable] = None
+    priority: Optional[Callable] = None
     activation_function: Optional[Callable] = None
     # How a *synchronous* body runs: "inline" (default, on the event loop) or "thread"
     # (offloaded to an executor so a blocking / CPU-bound body doesn't freeze the loop). Async
     # bodies already yield and ignore this. Process-level parallelism is the function's own
     # concern (bring your own process pool inside the body) — the engine never pickles a token.
     execution: Literal["inline", "thread"] = "inline"
+
+    @model_validator(mode="after")
+    def _warn_if_activation_function(self) -> "FunctionTransitionNode":
+        if self.activation_function is not None:
+            warnings.warn(
+                "activation_function is deprecated: use `guard` for an engine-enforced "
+                "enabling condition or `priority` for selection ranking. The engine ignores "
+                "activation_function; it is only visible to custom transition selectors.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self
 
 
 class ArgumentEdgeToTransition(PositionalArgsBaseModel):
@@ -549,6 +570,29 @@ class ExecutableGraphCheck:
                 if len(place_names_to_nodes[edge.place_node_name].tokens) == 0:
                     return False
         return True
+
+    def transition_is_enabled(
+        transition: FunctionTransitionNode,
+        executable_graph: ExecutableGraph,
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[str, ListPlaceNode],
+        transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
+    ) -> bool:
+        """Full enablement: sufficient tokens plus the transition's guard, if any.
+
+        Every enabled-discovery sweep (sequential execution and both concurrent runner
+        loops) must go through this, so a guard means the same thing in every execution
+        mode. Guards run on every sweep — they should be cheap, side-effect-free
+        predicates over the marking.
+        """
+        if not ExecutableGraphCheck.sufficient_tokens_are_available(
+            transition=transition,
+            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+            place_names_to_nodes=place_names_to_nodes,
+            transition_names_to_read_edges=transition_names_to_read_edges,
+        ):
+            return False
+        return transition.guard is None or bool(transition.guard(executable_graph))
 
     def all_return_indices_are_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         for edge in outgoing_edges:
@@ -1058,11 +1102,14 @@ class ExecutableGraphOperations:
                 "transitions."
             )
 
-        # Default selector: fire the first enabled transition in definition order, so
-        # earlier-defined transitions have priority (definition order = priority).
+        # Default selector: highest `priority` wins; transitions without one score 0.0.
+        # `max` keeps the first maximum, so ties — including nets where nobody sets a
+        # priority — fall back to definition order.
         def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]) -> Optional[FunctionTransitionNode]:
-            """Default selector that fires the first enabled transition (definition order)."""
-            return enabled[0] if enabled else None
+            """Default selector: highest-priority enabled transition, definition order on ties."""
+            if not enabled:
+                return None
+            return max(enabled, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
 
         # Choose selector: provided > graph's > default
         selector = transition_selector or executable_graph.transition_selector or default_selector
@@ -1085,11 +1132,13 @@ class ExecutableGraphOperations:
                     print(f"Performed {transitions_fired} transitions, maximum transitions count reached.")
                 return executable_graph, transitions_fired
 
-            # Get all enabled transitions (those with sufficient tokens), in definition order.
+            # Get all enabled transitions (sufficient tokens and a passing guard), in
+            # definition order.
             enabled_transitions = []
             for transition in executable_graph.transitions:
-                if ExecutableGraphCheck.sufficient_tokens_are_available(
+                if ExecutableGraphCheck.transition_is_enabled(
                     transition=transition,
+                    executable_graph=executable_graph,
                     transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                     place_names_to_nodes=place_names_to_nodes,
                     transition_names_to_read_edges=transition_names_to_read_edges,
