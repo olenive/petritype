@@ -1,6 +1,6 @@
 from copy import deepcopy
-from typing import _GenericAlias, _UnionGenericAlias, TypeAliasType
-from types import GenericAlias, UnionType
+from typing import TypeAliasType
+from types import UnionType
 from typing import Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, model_validator
 import asyncio
@@ -77,16 +77,20 @@ class ListPlaceNode(PositionalArgsBaseModel):
         type_of_value = self.type
         
         if type_of_value is not None:
+            # A valid place type is a plain class, any subscripted generic or union (both the
+            # typing.List[int] and builtin list[int] spellings, and both the Union[int, str] and
+            # int | str spellings, all of which have a non-None origin), or a PEP 695 alias (a
+            # bare alias has no origin, so it needs its own check). get_origin replaces earlier
+            # isinstance checks against typing's private _GenericAlias / _UnionGenericAlias, which
+            # are deprecated and removed in Python 3.17.
             if not (
-                isinstance(type_of_value, type)  # Changed Type to type (builtin)
-                or isinstance(type_of_value, _UnionGenericAlias)
-                or isinstance(type_of_value, _GenericAlias)
-                or isinstance(type_of_value, GenericAlias)
+                isinstance(type_of_value, type)
+                or get_origin(type_of_value) is not None
                 or isinstance(type_of_value, TypeAliasType)
             ):
                 raise ValueError(
-                    f"Expected type to be a Type, _UnionGenericAlias, or _GenericAlias but got: {type_of_value} "
-                    f"(type: {type(type_of_value)})"
+                    f"Expected type to be a class, a subscripted generic/union, or a type alias "
+                    f"but got: {type_of_value} (type: {type(type_of_value)})"
                 )
         else:
             raise NotImplementedError(
