@@ -154,19 +154,16 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         """Fire one transition on the live graph.
 
         Records a snapshot only if a transition actually fired. Returns the number of
-        transitions fired — 0 means nothing was enabled (or the firing raised), which is
-        the signal to stop auto-stepping.
+        transitions fired — 0 means nothing was enabled, which is the signal to stop
+        auto-stepping.
         """
         graph = session["graph"]
         pydigraph = session["pydigraph"]
-        try:
-            _, fired = await ExecutableGraphOperations.execute_graph(
-                executable_graph=graph,
-                max_transitions=1,
-                verbose=False,
-            )
-        except Exception:
-            return 0
+        _, fired = await ExecutableGraphOperations.execute_graph(
+            executable_graph=graph,
+            max_transitions=1,
+            verbose=False,
+        )
         if not fired:
             return 0
         index = len(session["history"])

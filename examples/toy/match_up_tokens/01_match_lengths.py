@@ -33,9 +33,11 @@ def _(mo):
         `output_distribution_function` specifies how to handle the returned tokens — here
         unmatched tokens are returned to their original places.
 
-        > **TODO:** find a more elegant way to avoid futile cycles, rather than just raising
-        > an error. When no further match is possible the transition raises `RuntimeError`,
-        > which simply ends the run (auto-stepping stops).
+        To avoid a futile cycle (endlessly extracting and re-depositing the same tokens
+        once no match remains), the transition carries an `activation_function` guard and
+        the graph a selector that honours it: when no string/length match is possible the
+        transition is no longer selected, so the run ends gracefully with the unmatched
+        tokens still visible in their places.
 
         The net is fired **live**, one transition at a time:
 
@@ -120,6 +122,12 @@ def _(Optional, Union):
                     return strings, lengths, (s, length)
         raise RuntimeError("No more matches found.")
 
+    def a_match_is_possible(graph):
+        """Guard for Match Lengths: True while some string/length pair can still match."""
+        strings = graph.place_named("Some Strings").tokens
+        lengths = graph.place_named("Some Lengths").tokens
+        return any(len(s) == length for s in strings for length in lengths)
+
     def distribute_result_tokens(
         result: tuple[list[str], list[int], Optional[tuple[str, int]]],
     ) -> dict[str, Union[list[str], list[int], tuple[str, int]]]:
@@ -134,7 +142,7 @@ def _(Optional, Union):
             "Matched Pair": matched_pair,
         }
 
-    return distribute_result_tokens, match_one_string_to_one_length
+    return a_match_is_possible, distribute_result_tokens, match_one_string_to_one_length
 
 
 @app.cell
@@ -146,9 +154,17 @@ def _(
     Optional,
     ReturnedEdgeFromTransition,
     RustworkxGraph,
+    a_match_is_possible,
     distribute_result_tokens,
     match_one_string_to_one_length,
 ):
+    def fire_first_whose_guard_passes(graph, enabled):
+        """Transition selector that honours activation-function guards."""
+        for transition in enabled:
+            if transition.activation_function is None or transition.activation_function(graph):
+                return transition
+        return None
+
     def build_graph():
         """Construct a fresh graph and its rustworkx view."""
         nodes_and_edges = [
@@ -160,6 +176,7 @@ def _(
                 "Match Lengths",
                 match_one_string_to_one_length,
                 output_distribution_function=distribute_result_tokens,
+                activation_function=a_match_is_possible,
             ),
             ReturnedEdgeFromTransition("Match Lengths", "Some Strings"),
             ReturnedEdgeFromTransition("Match Lengths", "Some Lengths"),
@@ -167,6 +184,7 @@ def _(
             ListPlaceNode("Matched Pair", Optional[tuple[str, int]], []),
         ]
         graph = ExecutableGraphOperations.construct_graph(nodes_and_edges)
+        graph.transition_selector = fire_first_whose_guard_passes
         pydigraph = RustworkxGraph.from_executable_graph(graph)
         return graph, pydigraph
 
@@ -179,19 +197,16 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         """Fire one transition on the live graph.
 
         Records a snapshot only if a transition actually fired. Returns the number of
-        transitions fired — 0 means nothing was enabled (or the firing raised), which is
-        the signal to stop auto-stepping.
+        transitions fired — 0 means nothing was enabled, which is the signal to stop
+        auto-stepping.
         """
         graph = session["graph"]
         pydigraph = session["pydigraph"]
-        try:
-            _, fired = await ExecutableGraphOperations.execute_graph(
-                executable_graph=graph,
-                max_transitions=1,
-                verbose=False,
-            )
-        except Exception:
-            return 0
+        _, fired = await ExecutableGraphOperations.execute_graph(
+            executable_graph=graph,
+            max_transitions=1,
+            verbose=False,
+        )
         if not fired:
             return 0
         index = len(session["history"])

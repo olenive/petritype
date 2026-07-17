@@ -11,8 +11,10 @@ Two tiers, both gated behind the ``notebooks`` marker (deselected by default —
 
 * **Execution** (the finite live-firing notebooks): pull the notebook's own ``build_graph`` /
   ``fire_one`` / ``session`` out of ``app.run()`` and drive the real graph from its initial
-  state to completion, asserting that at least one transition fires, the run terminates, and a
-  valid PNG plot is recorded for the initial state and for every fired step.
+  state to completion, asserting it fires exactly its expected number of transitions and that
+  a valid PNG plot is recorded for the initial state and for every fired step. The counts are
+  exact because a deadlock is indistinguishable from normal completion from outside (both are
+  just "nothing enabled"), so "it terminated" alone would let a net that stalls halfway pass.
 """
 
 from __future__ import annotations
@@ -49,17 +51,30 @@ def _marimo_notebooks() -> list[Path]:
     return notebooks
 
 
-# Finite notebooks built on the live-firing template (Step / Repeat Step / ...). These run a
-# graph from an initial state to a terminal state, so they can be driven to completion.
+# Finite notebooks built on the live-firing template (Step / Repeat Step / ...), each paired
+# with the exact number of transitions it fires from its initial marking to its terminal
+# state. The counts are deterministic (fixed initial tokens, sequential firing), so a
+# mismatch means the example's behaviour changed: fewer steps and it stalled early, more and
+# it gained a cycle — either way, worth a look before updating the number.
 # (parcel_distribution is perpetual and rooms is user-driven, so they are smoke-tested only.)
 _FIRING_NOTEBOOKS = [
-    EXAMPLES_DIR / "toy" / "distribution_function" / "01_coloured_balls.py",
-    EXAMPLES_DIR / "toy" / "match_up_tokens" / "01_match_lengths.py",
-    EXAMPLES_DIR / "toy" / "match_up_tokens" / "02_move_unmatched.py",
-    EXAMPLES_DIR / "toy" / "one_to_many" / "01_distribute_by_types.py",
-    EXAMPLES_DIR / "toy" / "one_to_many" / "01_fill_place.py",
-    EXAMPLES_DIR / "special_cases" / "returning_empty_list.py",
+    (EXAMPLES_DIR / "toy" / "distribution_function" / "01_coloured_balls.py", 9),
+    (EXAMPLES_DIR / "toy" / "match_up_tokens" / "01_match_lengths.py", 3),
+    (EXAMPLES_DIR / "toy" / "match_up_tokens" / "02_move_unmatched.py", 4),
+    (EXAMPLES_DIR / "toy" / "one_to_many" / "01_distribute_by_types.py", 6),
+    (EXAMPLES_DIR / "toy" / "one_to_many" / "01_fill_place.py", 1),
+    (EXAMPLES_DIR / "special_cases" / "returning_empty_list.py", 8),
 ]
+
+# Where the ending is the point of the example, pin the terminal marking as well: the right
+# number of steps could still leave tokens in the wrong places.
+_EXPECTED_TERMINAL_MARKINGS = {
+    "returning_empty_list.py": {
+        "Input Number": [],
+        "Integer Lists": [],
+        "Final Output": [100, 100, 101, 100, 101, 102],
+    },
+}
 
 
 def _notebook_id(path: Path) -> str:
@@ -95,8 +110,12 @@ def test_notebook_runs_and_renders(notebook: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.notebooks
-@pytest.mark.parametrize("notebook", _FIRING_NOTEBOOKS, ids=_notebook_id)
-def test_notebook_fires_to_completion(notebook: Path) -> None:
+@pytest.mark.parametrize(
+    ("notebook", "expected_steps"),
+    _FIRING_NOTEBOOKS,
+    ids=[_notebook_id(notebook) for notebook, _ in _FIRING_NOTEBOOKS],
+)
+def test_notebook_fires_to_completion(notebook: Path, expected_steps: int) -> None:
     """Drive the notebook's own graph from its first state to its last, checking plots."""
     module = _load_notebook(notebook)
     _outputs, defs = module.app.run()
@@ -122,7 +141,16 @@ def test_notebook_fires_to_completion(notebook: Path) -> None:
     else:
         pytest.fail(f"{notebook.name}: did not reach a terminal state within 1000 steps")
 
-    assert steps >= 1, f"{notebook.name}: no transitions fired"
+    assert steps == expected_steps, (
+        f"{notebook.name}: fired {steps} transitions before the terminal state, "
+        f"expected exactly {expected_steps}"
+    )
+    expected_marking = _EXPECTED_TERMINAL_MARKINGS.get(notebook.name)
+    if expected_marking is not None:
+        marking = {place.name: place.tokens for place in session["graph"].places}
+        assert marking == expected_marking, (
+            f"{notebook.name}: terminal marking diverged from the pinned expectation"
+        )
     # One plot recorded per successfully fired step.
     assert len(session["history"]) == frames_before + steps, (
         f"{notebook.name}: expected {steps} new frames, got {len(session['history']) - frames_before}"
