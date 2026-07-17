@@ -67,6 +67,21 @@ ListPlaceNode('Labels', str, ['cat', 'dog'])     # only accepts str tokens
 
 Type matching also governs output routing: when a transition has multiple output places, the result is sent to the place whose type matches.
 
+### Failure semantics
+
+If a transition body raises, the firing fails with `TransitionFailedError`. The tokens it consumed are **not** put back: the body may have mutated them before failing, and a place should never silently hold corrupted tokens — a visible loss beats invisible corruption. The consumed tokens ride along on the error:
+
+```python
+try:
+    await ExecutableGraphOperations.execute_graph(graph)
+except TransitionFailedError as e:
+    e.transition_name   # 'Charge Card'
+    e.consumed          # {'order': <the consumed token>}
+    e.__cause__         # the original exception
+```
+
+*Expected* failures are the body's job: catch them and return an error token, and type-based routing (e.g. `-> Receipt | FailedOrder`) delivers it to an error-handling place. If your tokens are immutable or bodies don't mutate them before failing, `restore_tokens_on_failure=True` (on `construct_graph` or per `execute_graph` call) opts into putting consumed tokens back.
+
 ### Async execution
 
 Transition functions can be `async`. The execution loop handles both sync and async functions transparently.

@@ -272,9 +272,11 @@ def _(
         ListPlaceNode(name="Available Data", type=AvailableData),
         ArgumentEdgeToTransition("Available Data", "Train/Validation/Test Split", "data"),
         FunctionTransitionNode(name="Train/Validation/Test Split", function=train_validation_test_split),
-        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Training Data"),
-        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Validation Data"),
-        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Test Data"),
+        # The function returns tuple[TrainingData, EvaluationData, TestData]; each
+        # indexed edge routes the tuple element at its return_index.
+        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Training Data", 0),
+        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Validation Data", 1),
+        ReturnedEdgeFromTransition("Train/Validation/Test Split", "Test Data", 2),
         ListPlaceNode(name="Training Data", type=TrainingData),
         ListPlaceNode(name="Validation Data", type=EvaluationData),
         ListPlaceNode(name="Test Data", type=TestData),

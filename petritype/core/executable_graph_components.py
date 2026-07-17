@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import _GenericAlias, _UnionGenericAlias, TypeAliasType
-from types import GenericAlias
-from typing import Callable, Iterable, Literal, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
+from types import GenericAlias, UnionType
+from typing import Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, model_validator
 import asyncio
 import functools
@@ -13,6 +13,37 @@ from petritype.helpers.structures import SafeMerge
 
 
 type TransitionName = str
+
+
+class TransitionFailedError(RuntimeError):
+    """A transition body (or its output routing) raised after its input tokens
+    had been consumed.
+
+    Attributes:
+        transition_name: Name of the transition whose firing failed.
+        consumed: The consumed tokens, keyed by argument name. Recover them
+            from here — by default they are NOT put back into their places,
+            because the body may have mutated them before failing and a place
+            should never silently hold corrupted tokens.
+        restored: True if restore_tokens_on_failure was enabled and the tokens
+            were put back (best effort) into their source places.
+
+    The original exception is chained as __cause__.
+    """
+
+    def __init__(self, transition_name: str, consumed: dict, restored: bool = False):
+        self.transition_name = transition_name
+        self.consumed = consumed
+        self.restored = restored
+        tokens_note = (
+            "consumed tokens were restored to their places (best effort)"
+            if restored
+            else "consumed tokens were NOT restored; recover them from this error's .consumed"
+        )
+        super().__init__(
+            f"Firing of transition '{transition_name}' failed; {tokens_note}. "
+            f"Consumed arguments: {sorted(consumed)}."
+        )
 
 
 class PositionalArgsBaseModel(BaseModel):
@@ -206,6 +237,13 @@ class ExecutableGraph(BaseModel):
     token_history: Sequence[Any] = []
     transition_selector: Optional[Callable] = None
     allow_token_copying: bool = False
+    # When a firing fails after its input tokens were consumed, put them back
+    # (best effort) before raising. Off by default: the body may have mutated
+    # the tokens before failing, and silently restoring possibly-corrupt tokens
+    # to a place is worse than a visible loss. Enable only when tokens are
+    # immutable or bodies do not mutate them before they can fail. Either way
+    # the raised TransitionFailedError carries the consumed tokens.
+    restore_tokens_on_failure: bool = False
 
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
@@ -276,9 +314,9 @@ class ExecutableGraph(BaseModel):
             if place_type is not None and argument_type is not None:
                 if not CompareTypes.between_annotations_where_both_maybe_in_list(
                     annotation1=place_type,  # The place.type contains the inner type event if the place
-                    # is a ListPlaceNode that holds a list of tokens.
+                    # is a ListPlaceNode that holds a list of tokens.
                     annotation2=argument_type,  # This is to allow the case of passing in all the tokens
-                    # at once as a list.
+                    # at once as a list.
                 ):
                     raise TypeError(
                         f"Type mismatch for argument edge from place '{place.name}' to transition "
@@ -295,19 +333,69 @@ class ExecutableGraph(BaseModel):
             transition = transition_names_to_nodes[edge.transition_node_name]
             if not isinstance(transition, FunctionTransitionNode):
                 raise NotImplementedError("Currently only FunctionTransitionNode is supported.")
-            place_type = get_type_hints(place).get('type')
+            if transition.output_distribution_function is not None:
+                # A distribution function reshapes the result, so the return
+                # annotation does not describe individual tokens; those are
+                # validated against their destination places at fire time.
+                continue
+            place_type = place.type
             return_type = get_type_hints(transition.function).get('return')
+            if edge.return_index is not None and return_type is not None:
+                # Indexed edge: the token flowing along it is the return tuple's
+                # element at return_index, not the whole return value.
+                if get_origin(return_type) is not tuple:
+                    raise TypeError(
+                        f"Return edge from transition '{transition.name}' to place '{place.name}' has "
+                        f"return_index={edge.return_index} but the return annotation '{return_type}' "
+                        f"is not a tuple."
+                    )
+                tuple_args = get_args(return_type)
+                if len(tuple_args) == 2 and tuple_args[1] is Ellipsis:
+                    return_type = tuple_args[0]  # tuple[X, ...]: every element is X
+                elif edge.return_index < len(tuple_args):
+                    return_type = tuple_args[edge.return_index]
+                else:
+                    raise TypeError(
+                        f"Return edge from transition '{transition.name}' to place '{place.name}' has "
+                        f"return_index={edge.return_index} but the return annotation '{return_type}' "
+                        f"only has {len(tuple_args)} elements."
+                    )
+            # A union return annotation routes by type at fire time, so the edge
+            # is valid if any non-None arm can land in this place (None results
+            # are dropped, never deposited).
+            if get_origin(return_type) in (Union, UnionType):
+                candidate_types = [t for t in get_args(return_type) if t is not type(None)]
+            elif return_type is type(None):
+                candidate_types = []
+            else:
+                candidate_types = [return_type]
+            if not candidate_types:
+                continue
             if place_type is not None and return_type is not None:
-                if not CompareTypes.between_annotations_where_one_maybe_in_list(
-                    annotation_not_in_list=place_type,  # The place type contains the inner type even if the place
-                    # is a ListPlaceNode that holds a list of tokens.
-                    annotation_maybe_in_list=return_type,  # All the tokens could be returned at once as a list.
+                if not any(
+                    CompareTypes.between_annotations_where_both_maybe_in_list(
+                        annotation1=place_type,  # May itself be a list type — places can hold list tokens.
+                        annotation2=candidate,  # All the tokens could be returned at once as a list.
+                    )
+                    for candidate in candidate_types
                 ):
                     raise TypeError(
                         f"Type mismatch for return edge from transition '{transition.name}' to place "
                         f"'{place.name}': place type '{place_type}' does not match return type "
                         f"'{return_type}'."
                     )
+
+        # Indexed and non-indexed return edges cannot be mixed on one transition:
+        # the fire path either splits a tuple by index or routes the whole result.
+        return_edges_by_transition: dict[str, list] = {}
+        for edge in return_edges:
+            return_edges_by_transition.setdefault(edge.transition_node_name, []).append(edge)
+        for transition_name, edges in return_edges_by_transition.items():
+            if ExecutableGraphCheck.return_indices_are_a_mix_of_none_and_non_none(tuple(edges)):
+                raise ValueError(
+                    f"Return edges of transition '{transition_name}' mix indexed and non-indexed "
+                    f"return_index values; use integers on all of them or on none."
+                )
 
         for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
             place = place_names_to_nodes[edge.place_node_name]
@@ -474,68 +562,82 @@ class ExecutableGraphCheck:
                 return False
         return True
 
+    def value_disposition_for_place(value: Any, place: ListPlaceNode) -> Literal["token", "batch", "nothing"]:
+        """The single point of truth for what a value means at a destination place.
+
+        The interpretation depends on the (value, place-type) pair:
+        - "token": the value is one token. Always the case when the place's own
+          type is a list type (there the list *is* the token — an empty list is
+          a real token), and for any non-list value.
+        - "batch": a list value at a scalar-typed place is a batch of tokens,
+          deposited element-wise.
+        - "nothing": an empty batch; nothing is deposited.
+
+        Routing (value_and_places_types_match), validation
+        (ensure_token_type_matches_place_type), stage-2 output arbitration
+        (only non-"nothing" destinations count toward ambiguity) and the
+        stage-3 deposit (add_tokens_to_places) all derive their behaviour
+        from this classification — change it here and nowhere else.
+        """
+        place_type_is_a_list_type = place.type is list or get_origin(place.type) is list
+        if isinstance(value, list) and not place_type_is_a_list_type:
+            return "batch" if value else "nothing"
+        return "token"
+
+    def value_can_be_deposited(value: Any, place: ListPlaceNode) -> bool:
+        """Whether the value, interpreted per its disposition, type-checks at the place."""
+        disposition = ExecutableGraphCheck.value_disposition_for_place(value, place)
+        if disposition == "nothing":
+            return True
+        if disposition == "batch":
+            return all(CompareTypes.between_value_and_type(item, place.type) for item in value)
+        return CompareTypes.between_value_and_type(value, place.type)
+
     def ensure_token_type_matches_place_type(token: any, place: ListPlaceNode):
-        # Handle the case where we have ListPlaceNode being given a list of tokens of the matching inner type.
-        if isinstance(place, ListPlaceNode) and isinstance(token, list):
-            inner_type = place.type
+        disposition = ExecutableGraphCheck.value_disposition_for_place(token, place)
+        if disposition == "batch":
             for item in token:
-                if not CompareTypes.between_value_and_type(item, inner_type):
+                if not CompareTypes.between_value_and_type(item, place.type):
                     raise TypeError(
-                        f"Expected token item to be of type {inner_type} in {place.name}, got {type(item)}."
+                        f"Expected token item to be of type {place.type} in {place.name}, got {type(item)}."
                         f"\nToken item: {item}"
                     )
-            return
-        if not CompareTypes.between_value_and_type(token, place.type):
-            raise TypeError(
-                f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
-                f"\nToken: {token}"
-            )
+        elif disposition == "token":
+            if not CompareTypes.between_value_and_type(token, place.type):
+                raise TypeError(
+                    f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
+                    f"\nToken: {token}"
+                )
+        # "nothing" (an empty batch) is always acceptable — it deposits no tokens.
 
     def ensure_all_token_types_match_place_types(executable_graph: ExecutableGraph):
-        places = (x for x in executable_graph if isinstance(x, ListPlaceNode))
-        for place in places:
+        for place in executable_graph.places:
             for token in place.tokens:
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, place)
 
-    def return_indices_ara_a_mix_of_none_and_non_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
+    def return_indices_are_a_mix_of_none_and_non_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         return (
             not ExecutableGraphCheck.all_return_indices_are_none(outgoing_edges)
             and not ExecutableGraphCheck.all_return_indices_are_integers(outgoing_edges)
         )
 
-    def value_and_places_types_match(value: Any, places: Iterable[ListPlaceNode]) -> Iterable[ListPlaceNode]:
-        """Find places whose types match the value.
-        
-        Issues with handling empty lists:
-        At run time we can not distinguish the intended type of an empty list's contents.
-        Theoretically the intended token type may even be actual empty lists.
-        One approach is to somehow require disambiguation at graph construction time.
-        However this may be inconvenient and verbose for most use cases.
+    def value_and_places_types_match(value: Any, places: Iterable[ListPlaceNode]) -> tuple[ListPlaceNode, ...]:
+        """Find places where the value could be deposited.
 
-        Proposed solution: Rely on multiple matches and assume the user knows what they are doing (could be confusing).
-        Handles:
-        - Direct type matches: value type matches place type
-        - List values: Check if list elements match place type
+        A place matches iff the value type-checks under its disposition there
+        (see value_disposition_for_place): whole-token at list-typed places,
+        element-wise batch at scalar-typed places. At run time we can not
+        distinguish the intended type of an empty list's contents, so an empty
+        list — an empty batch, or an empty token at a list-typed place —
+        matches every place. Stage 2 arbitrates multiple matches: only
+        destinations where the deposit is observable (disposition other than
+        "nothing") count toward ambiguity, and genuine ambiguity requires
+        allow_token_copying.
         """
-        matching_by_list_contents = []
-        matching_by_direct_type = []
-        # If value is a list with elements, check if elements match place types
-        if isinstance(value, list) and len(value) > 0:
-            # Check each element in the list against place types
-            for place in places:
-                # All elements must match the place type
-                if all(CompareTypes.between_value_and_type(item, place.type) for item in value):
-                    matching_by_list_contents.append(place)
-        elif isinstance(value, list) and len(value) == 0:
-            # For empty lists, we can't determine the intended type of contents.
-            # So an empty list can actually match any ListPlaceNode regardless of its inner type.
-            return tuple(places)
-        
-        # For non-list values or empty lists, use direct type matching
-        for place in places:
-            if CompareTypes.between_value_and_type(value, place.type):
-                matching_by_direct_type.append(place)
-        return tuple(matching_by_direct_type + matching_by_list_contents)
+        return tuple(
+            place for place in places
+            if ExecutableGraphCheck.value_can_be_deposited(value, place)
+        )
 
 
 class ExecutableGraphOperations:
@@ -563,6 +665,7 @@ class ExecutableGraphOperations:
             ]
         ],
         allow_token_copying: bool = False,
+        restore_tokens_on_failure: bool = False,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -584,6 +687,7 @@ class ExecutableGraphOperations:
         return ExecutableGraph(
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
+            restore_tokens_on_failure=restore_tokens_on_failure,
         )
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
@@ -602,8 +706,9 @@ class ExecutableGraphOperations:
         """Remove input tokens from source places
         
         Return input tokens matched to function arguments and the input places without the removed tokens.
+
+        A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
         """
-        # TODO Do we need a way to put the tokens back in case a transition fails?
         # Transitions with no incoming edges (generators) have no tokens to extract
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
             transition.name, tuple()
@@ -656,6 +761,71 @@ class ExecutableGraphOperations:
 
         return input_edge_names_to_tokens, input_places
 
+    def restore_argument_tokens_to_places(
+        transition: FunctionTransitionNode,
+        input_edge_names_to_tokens: dict[ArgumentName, any],
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[str, ListPlaceNode],
+    ) -> None:
+        """Put the tokens consumed by stage 1 back into their source places.
+
+        Used when restore_tokens_on_failure is enabled and a firing fails
+        after extraction. Single tokens go back to the front of their place
+        (they were consumed FIFO from the front) and whole-list extractions
+        are prepended, so the pre-firing order is restored. This is
+        conservation, not rollback: a body that mutated a token before
+        failing leaves it mutated, and external side effects and in-place
+        mutation via MutateEdge are not undone — which is why this is opt-in.
+        """
+        incoming_edges = transition_names_to_incoming_edges.get(transition.name, tuple())
+        for edge in incoming_edges:
+            if edge.argument not in input_edge_names_to_tokens:
+                continue
+            place = place_names_to_nodes[edge.place_node_name]
+            argument_type = get_type_hints(transition.function).get(edge.argument)
+            # Mirror the two extraction cases of stage 1.
+            if get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
+                annotation_not_in_list=place.type,
+                annotation_maybe_in_list=argument_type,
+            ):  # All tokens were extracted as a list.
+                place.tokens[:0] = input_edge_names_to_tokens[edge.argument]
+            else:  # A single token was popped from the front.
+                place.tokens.insert(0, input_edge_names_to_tokens[edge.argument])
+
+    def handle_failed_firing(
+        transition: FunctionTransitionNode,
+        exception: Exception,
+        input_edge_names_to_tokens: dict[ArgumentName, any],
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[str, ListPlaceNode],
+        restore_tokens_on_failure: bool,
+    ) -> NoReturn:
+        """Raise TransitionFailedError for a firing that failed after stage 1.
+
+        The error carries the tokens consumed from input places (read-edge
+        arguments are not consumed, so they are excluded). By default the
+        tokens are NOT put back: the body may have mutated them before
+        failing, and silently restoring possibly-corrupt tokens to a place is
+        worse than a visible loss. With restore_tokens_on_failure=True they
+        are restored first (best effort).
+        """
+        incoming_edges = transition_names_to_incoming_edges.get(transition.name, tuple())
+        consumed = {
+            edge.argument: input_edge_names_to_tokens[edge.argument]
+            for edge in incoming_edges
+            if edge.argument in input_edge_names_to_tokens
+        }
+        restored = False
+        if restore_tokens_on_failure:
+            ExecutableGraphOperations.restore_argument_tokens_to_places(
+                transition=transition,
+                input_edge_names_to_tokens=input_edge_names_to_tokens,
+                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                place_names_to_nodes=place_names_to_nodes,
+            )
+            restored = True
+        raise TransitionFailedError(transition.name, consumed, restored) from exception
+
     async def stage_2_call_transition_function(
         transition: FunctionTransitionNode,
         tokens_kwargs: dict[ArgumentName, any],
@@ -690,7 +860,27 @@ class ExecutableGraphOperations:
             result = transition.function(**merged_kwargs)
         output_place_names_to_tokens: dict[PlaceNodeName, Any] = dict()
         outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
-        if transition.output_distribution_function is None:
+        if (
+            transition.output_distribution_function is None
+            and outgoing_edges
+            and ExecutableGraphCheck.all_return_indices_are_integers(outgoing_edges)
+        ):
+            # Indexed routing: the result is a tuple and element i flows along
+            # the edge with return_index == i.
+            if not isinstance(result, tuple):
+                raise TypeError(
+                    f"Transition \"{transition.name}\" has indexed return edges but returned "
+                    f"{type(result)} instead of a tuple."
+                )
+            for edge in outgoing_edges:
+                if not 0 <= edge.return_index < len(result):
+                    raise ValueError(
+                        f"Return edge to place \"{edge.place_node_name}\" expects element "
+                        f"{edge.return_index} of transition \"{transition.name}\"'s result, "
+                        f"which has only {len(result)} elements."
+                    )
+                output_place_names_to_tokens[edge.place_node_name] = result[edge.return_index]
+        elif transition.output_distribution_function is None:
             # Use place types to determine where tokens should go.
             potential_output_places: Iterable[ListPlaceNode] = tuple(
                 place_names_to_nodes[edge.place_node_name] for edge in outgoing_edges
@@ -698,32 +888,40 @@ class ExecutableGraphOperations:
             matching_places: Iterable[ListPlaceNode] = ExecutableGraphCheck.value_and_places_types_match(
                 result, potential_output_places,
             )
-            if len(matching_places) > 1 and not allow_token_copying:
-                # Multiple matching places but token copying is not allowed.
+            # An empty list type-matches every place but observably deposits
+            # only at list-typed ones, so ambiguity is judged over the places
+            # where depositing the value actually does something. For any
+            # other value every match is observable and this filter is a
+            # no-op.
+            observable_places = tuple(
+                place for place in matching_places
+                if ExecutableGraphCheck.value_disposition_for_place(result, place) != "nothing"
+            )
+            if len(observable_places) > 1 and not allow_token_copying:
+                # Multiple observable destinations but token copying is not allowed.
                 raise ValueError(
                     "There are multiple matching destination place nodes but token copying is not allowed. "
                     "Expected only a single output place. To allow the same token to be copied to multiple places, "
                     "set the `allow_token_copying` parameter to True."
                 )
-            elif len(matching_places) > 1 and allow_token_copying:
-                # There are multiple matching places and the token can be copied to each of them.
+            elif len(observable_places) > 1:
+                # The token can be copied to each observable destination.
                 # Note: actual copying will be handled by add_tokens_to_places
-                for place in matching_places:
+                for place in observable_places:
                     output_place_names_to_tokens[place.name] = result
-            elif len(matching_places) == 1:
-                # There is a single matching place.
-                matching_place = matching_places[0]
-                output_place_names_to_tokens[matching_place.name] = result
-            else:
+            elif len(observable_places) == 1:
+                # There is a single observable destination.
+                output_place_names_to_tokens[observable_places[0].name] = result
+            elif not matching_places:
                 # No matching places found.
-                if len(matching_places) == 0:
-                    raise ValueError(
-                        f"No matching places found for result of transition \"{transition.name}\". "
-                        f"Expected a place of type {type(result)}."
-                    )
-                else:
-                    raise ValueError("Unexpected branch...")
-        else:  # TODO: create and test separate functions for these two branches.
+                raise ValueError(
+                    f"No output place of transition \"{transition.name}\" matches its result "
+                    f"of type {type(result)}."
+                )
+            # else: the value matched only as a no-op (an empty batch with
+            # only scalar-typed candidates) — the firing succeeds and
+            # deposits nothing.
+        else:  # TODO: create and test separate functions for these two branches.
             # Use the given output distribution function to determine where the tokens should go.
             if not ExecutableGraphCheck.all_return_indices_are_none(outgoing_edges):
                 raise ValueError(
@@ -795,32 +993,15 @@ class ExecutableGraphOperations:
             else:
                 token_or_list_to_add = token
 
-            # If token is a list and place type is not a list, extend with list elements. Otherwise, append the token.
-            place_type_origin = get_origin(place.type)
-            if (
-                isinstance(token_or_list_to_add, list)
-                and len(token_or_list_to_add) > 0
-                and place_type_origin is not list
-            ):
-                if check_types:  # Check that the place type matches the type of every token in the list.
-                    for single_token in token_or_list_to_add:
-                        CompareTypes.between_value_and_type(single_token, place.type)
+            # Deposit per the value's disposition at this place — batch values
+            # extend element-wise, single tokens (including a whole list at a
+            # list-typed place) append, an empty batch deposits nothing.
+            if check_types:
+                ExecutableGraphCheck.ensure_token_type_matches_place_type(token_or_list_to_add, place)
+            disposition = ExecutableGraphCheck.value_disposition_for_place(token_or_list_to_add, place)
+            if disposition == "batch":
                 place.tokens.extend(token_or_list_to_add)
-            elif ( # If the token is an empty list and place type is a list, add the empty list as a token.
-                isinstance(token_or_list_to_add, list)
-                and len(token_or_list_to_add) == 0
-                and (place_type_origin is list or place.type is list)
-            ):
-                place.tokens.append([])
-            elif ( # If token is an empty list and place type is not a list, do nothing.
-                isinstance(token_or_list_to_add, list)
-                and len(token_or_list_to_add) == 0
-                and place_type_origin is not list
-            ):
-                pass
-            else:
-                if check_types:
-                    CompareTypes.between_value_and_type(token_or_list_to_add, place.type)
+            elif disposition == "token":
                 place.tokens.append(token_or_list_to_add)
             updated_places[place_name] = place
         return updated_places
@@ -830,6 +1011,7 @@ class ExecutableGraphOperations:
         executable_graph: ExecutableGraph,
         max_transitions: Optional[int] = 1,
         allow_token_copying: Optional[bool] = None,
+        restore_tokens_on_failure: Optional[bool] = None,
         verbose=False,
         transition_history_length=1,
         place_history_length=1,
@@ -847,6 +1029,10 @@ class ExecutableGraphOperations:
             executable_graph: The graph to execute
             max_transitions: Maximum number of transitions to fire
             allow_token_copying: Whether to allow copying tokens. If None, uses the graph's setting.
+            restore_tokens_on_failure: Whether a failed firing puts its consumed tokens
+                back (best effort) before TransitionFailedError is raised. If None, uses
+                the graph's setting (default False — see the field's comment on
+                ExecutableGraph for why restoring is opt-in).
             verbose: Whether to print verbose output
             transition_history_length: Length of transition history to maintain
             place_history_length: Length of place history to maintain
@@ -861,6 +1047,9 @@ class ExecutableGraphOperations:
 
         if allow_token_copying is None:
             allow_token_copying = executable_graph.allow_token_copying
+
+        if restore_tokens_on_failure is None:
+            restore_tokens_on_failure = executable_graph.restore_tokens_on_failure
 
         if token_history_length > 0 and not allow_token_copying:
             raise ValueError(
@@ -890,7 +1079,8 @@ class ExecutableGraphOperations:
         transition_names_to_read_edges = MapTransitionNames.to_read_edges(executable_graph)
 
         while True:
-            if transitions_fired >= max_transitions:
+            # max_transitions=None means run until no transition is enabled.
+            if max_transitions is not None and transitions_fired >= max_transitions:
                 if verbose:
                     print(f"Performed {transitions_fired} transitions, maximum transitions count reached.")
                 return executable_graph, transitions_fired
@@ -932,14 +1122,26 @@ class ExecutableGraphOperations:
                 token_history_length=token_history_length,
                 transition_names_to_read_edges=transition_names_to_read_edges,
             )
-            output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
-                transition=transition,
-                tokens_kwargs=input_args_to_tokens,
-                transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
-                place_names_to_nodes=place_names_to_nodes,
-                allow_token_copying=allow_token_copying,
-                executor=executor,
-            )
+            try:
+                output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
+                    transition=transition,
+                    tokens_kwargs=input_args_to_tokens,
+                    transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
+                    place_names_to_nodes=place_names_to_nodes,
+                    allow_token_copying=allow_token_copying,
+                    executor=executor,
+                )
+            except Exception as exception:
+                # Raises TransitionFailedError carrying the consumed tokens;
+                # restores them first when restore_tokens_on_failure is set.
+                ExecutableGraphOperations.handle_failed_firing(
+                    transition=transition,
+                    exception=exception,
+                    input_edge_names_to_tokens=input_args_to_tokens,
+                    transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                    place_names_to_nodes=place_names_to_nodes,
+                    restore_tokens_on_failure=restore_tokens_on_failure,
+                )
             updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
                 output_place_names_to_tokens=output_place_names_to_tokens,
                 place_names_to_nodes=place_names_to_nodes,

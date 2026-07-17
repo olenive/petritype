@@ -346,6 +346,8 @@ class Runner:
 
         await _notify(ctx)  # initial marking
         in_flight: dict[asyncio.Future, str] = {}
+        # What each task consumed, so a failed firing can put its tokens back.
+        flight_state: dict[asyncio.Future, tuple] = {}
         while True:
             if Runner.drain_inbox(ctx):
                 await _notify(ctx)
@@ -378,6 +380,7 @@ class Runner:
                         )
                     )
                     in_flight[task] = transition.name
+                    flight_state[task] = (transition, args)
                     airborne.add(transition.name)
 
             if set(in_flight.values()) != graph.in_flight:
@@ -390,8 +393,23 @@ class Runner:
             done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 name = in_flight.pop(task)
+                fired_transition, consumed = flight_state.pop(task)
+                try:
+                    outputs = task.result()
+                except Exception as exception:
+                    graph.in_flight = set(in_flight.values())
+                    # Raises TransitionFailedError carrying the consumed tokens;
+                    # restores them first when graph.restore_tokens_on_failure is set.
+                    ExecutableGraphOperations.handle_failed_firing(
+                        transition=fired_transition,
+                        exception=exception,
+                        input_edge_names_to_tokens=consumed,
+                        transition_names_to_incoming_edges=incoming,
+                        place_names_to_nodes=place_nodes,
+                        restore_tokens_on_failure=graph.restore_tokens_on_failure,
+                    )
                 ExecutableGraphOperations.add_tokens_to_places(
-                    output_place_names_to_tokens=task.result(),
+                    output_place_names_to_tokens=outputs,
                     place_names_to_nodes=place_nodes,
                 )
                 graph.step_count += 1
@@ -425,6 +443,8 @@ class Runner:
 
         await _notify(ctx)
         in_flight: dict[asyncio.Future, str] = {}
+        # What each task consumed, so a failed firing can put its tokens back.
+        flight_state: dict[asyncio.Future, tuple] = {}
         try:
             while not (ctx.stop is not None and ctx.stop.is_set()):
                 changed = bool(Runner.drain_inbox(ctx))
@@ -455,13 +475,29 @@ class Runner:
                             )
                         )
                         in_flight[task] = transition.name
+                        flight_state[task] = (transition, args)
                         airborne.add(transition.name)
                         changed = True
 
                 for task in [t for t in in_flight if t.done()]:
                     name = in_flight.pop(task)
+                    fired_transition, consumed = flight_state.pop(task)
+                    try:
+                        outputs = task.result()
+                    except Exception as exception:
+                        # Raises TransitionFailedError carrying the consumed
+                        # tokens; restores them first when
+                        # graph.restore_tokens_on_failure is set.
+                        ExecutableGraphOperations.handle_failed_firing(
+                            transition=fired_transition,
+                            exception=exception,
+                            input_edge_names_to_tokens=consumed,
+                            transition_names_to_incoming_edges=incoming,
+                            place_names_to_nodes=place_nodes,
+                            restore_tokens_on_failure=graph.restore_tokens_on_failure,
+                        )
                     ExecutableGraphOperations.add_tokens_to_places(
-                        output_place_names_to_tokens=task.result(),
+                        output_place_names_to_tokens=outputs,
                         place_names_to_nodes=place_nodes,
                     )
                     graph.step_count += 1
