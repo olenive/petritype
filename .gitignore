@@ -12,6 +12,7 @@ build
 # Misc
 TRASH
 commit-notes.txt
+dev-docs
 
 # Data
 data/

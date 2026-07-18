@@ -26,6 +26,13 @@ Each test encodes intended behavior that the engine at the time violated:
    element type is itself a list (e.g. list[int]) rejected its own valid
    tokens. add_tokens_to_places already guarded this with get_origin; the
    validation path did not.
+8. The pre-flight sweep classified a token *already resting* in a place with
+   the deposit-side disposition rule, so a list mistakenly sitting in a scalar
+   place (e.g. [1, 2] in an int place) was read as a batch and validated
+   element-wise instead of being flagged as a mistyped whole token. A resident
+   value is by definition one token; the sweep must agree with the place's own
+   construction validator (check_type_matches_tokens), which already checks
+   each token whole.
 """
 
 import pytest
@@ -345,3 +352,57 @@ class TestListTypedPlaceValidation:
         assert updated_graph.place_named('Final Output').tokens == [
             100, 100, 101, 100, 101, 102,
         ]
+
+
+class TestResidentTokenIsNeverABatch:
+    """Issue 8: the sweep is lenient about a list resting in a scalar place.
+
+    value_disposition_for_place is the deposit-side rule — at a *destination*,
+    a list arriving at a scalar place is a batch to unpack. The pre-flight
+    sweep reuses it to validate tokens already in place, but a resident value
+    is by definition exactly one token, so 'batch' is a category error there.
+
+    A list can only come to rest in a scalar place through post-construction
+    mutation: the place's own construction validator (check_type_matches_tokens)
+    checks each token whole and already rejects it. These tests pin that the
+    sweep agrees with the construction validator rather than the deposit rule.
+    """
+
+    def test_construction_validator_rejects_list_in_scalar_place(self):
+        # Baseline: the direct path is already closed at place construction ...
+        with pytest.raises(TypeError):
+            ListPlaceNode('Scalar', int, [[1, 2]])
+
+    def test_graph_construction_revalidates_and_rejects(self):
+        # ... and again when a place is wrapped into an ExecutableGraph.
+        place = ListPlaceNode('Scalar', int)
+        place.tokens.append([1, 2])  # slips past the place's own validator
+        with pytest.raises(TypeError):
+            ExecutableGraphOperations.construct_graph([place])
+
+    def test_sweep_flags_list_mutated_into_built_graph(self):
+        # The reachable path: mutate a place already living in a built graph, so
+        # the pre-flight sweep at execute_graph time is the check that must fire.
+        graph = ExecutableGraphOperations.construct_graph([ListPlaceNode('Scalar', int)])
+        graph.place_named('Scalar').tokens.append([1, 2])
+        with pytest.raises(TypeError):
+            ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)
+
+    def test_resident_check_treats_list_as_one_whole_token(self):
+        # The unit under the sweep: a list resident in a scalar place is one
+        # (mistyped) token, not a batch to validate element-wise.
+        place = ListPlaceNode('Scalar', int)
+        with pytest.raises(TypeError):
+            ExecutableGraphCheck.ensure_resident_token_type_matches_place_type([1, 2], place)
+
+    def test_scalar_place_still_accepts_its_own_scalar_tokens(self):
+        # The fix must not reject legitimately-typed resident tokens.
+        place = ListPlaceNode('Scalar', int, [1, 2, 3])
+        graph = ExecutableGraphOperations.construct_graph([place])
+        ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)
+
+    def test_list_typed_place_still_accepts_its_own_list_tokens(self):
+        # A list resting in a list-typed place is a valid whole token, unaffected.
+        place = ListPlaceNode('Lists', list[int], [[1, 2], []])
+        graph = ExecutableGraphOperations.construct_graph([place])
+        ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)

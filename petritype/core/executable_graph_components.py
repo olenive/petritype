@@ -621,11 +621,16 @@ class ExecutableGraphCheck:
           deposited element-wise.
         - "nothing": an empty batch; nothing is deposited.
 
-        Routing (value_and_places_types_match), validation
+        Routing (value_and_places_types_match), deposit-time validation
         (ensure_token_type_matches_place_type), stage-2 output arbitration
         (only non-"nothing" destinations count toward ambiguity) and the
         stage-3 deposit (add_tokens_to_places) all derive their behaviour
         from this classification — change it here and nowhere else.
+
+        Deliberately NOT a client: the pre-flight sweep over tokens already
+        resting in places (ensure_resident_token_type_matches_place_type). A
+        resident value is always exactly one token, never a batch, so it is
+        validated whole regardless of this rule.
         """
         place_type_is_a_list_type = place.type is list or get_origin(place.type) is list
         if isinstance(value, list) and not place_type_is_a_list_type:
@@ -658,10 +663,26 @@ class ExecutableGraphCheck:
                 )
         # "nothing" (an empty batch) is always acceptable — it deposits no tokens.
 
+    def ensure_resident_token_type_matches_place_type(token: any, place: ListPlaceNode):
+        """Validate a token *already resting* in a place — always as one whole token.
+
+        Deliberately does NOT go through value_disposition_for_place. That rule is
+        about deposits: a list arriving at a scalar place is a batch to unpack. But a
+        value already in a place is by definition exactly one token, so 'batch' is a
+        category error here. This mirrors ListPlaceNode.check_type_matches_tokens, the
+        place's own construction validator, so the pre-flight sweep and construction
+        agree; only post-construction mutation can produce a token they must reject.
+        """
+        if not CompareTypes.between_value_and_type(token, place.type):
+            raise TypeError(
+                f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
+                f"\nToken: {token}"
+            )
+
     def ensure_all_token_types_match_place_types(executable_graph: ExecutableGraph):
         for place in executable_graph.places:
             for token in place.tokens:
-                ExecutableGraphCheck.ensure_token_type_matches_place_type(token, place)
+                ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
 
     def return_indices_are_a_mix_of_none_and_non_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         return (
