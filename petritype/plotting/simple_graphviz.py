@@ -78,7 +78,7 @@ class SimpleGraphvizVisualization:
         for i in range(max_iterations):
             _, transitions_fired = await ExecutableGraphOperations.execute_graph(
                 executable_graph=executable_graph,
-                max_transitions=max_transitions_per_step,
+                stop_after_n_firings=max_transitions_per_step,
                 verbose=verbose,
             )
             

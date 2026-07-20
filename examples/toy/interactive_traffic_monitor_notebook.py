@@ -138,7 +138,7 @@ async def _(
     refresher.value  # depend on the tick so this re-runs each interval
     if playing.value:
         with contextlib.redirect_stdout(io.StringIO()):  # mute engine debug prints
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=2)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2)
         set_tick(lambda v: v + 1)
     return
 
@@ -147,7 +147,7 @@ async def _(
 async def _(ExecutableGraphOperations, contextlib, graph, io, set_tick, step):
     if step.value:
         with contextlib.redirect_stdout(io.StringIO()):
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=3)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
         set_tick(lambda v: v + 1)
     return
 

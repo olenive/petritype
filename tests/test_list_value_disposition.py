@@ -321,14 +321,14 @@ class TestStage2EmptyListArbitration:
     @pytest.mark.asyncio
     async def test_single_scalar_output_deposits_nothing(self):
         graph = _graph_returning_empty(emit_empty_int_list, [('Out', int)])
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('Out').tokens == []
 
     @pytest.mark.asyncio
     async def test_all_scalar_outputs_deposit_nothing(self):
         graph = _graph_returning_empty(emit_empty, [('Ints', int), ('Strs', str)])
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('Ints').tokens == []
         assert graph.place_named('Strs').tokens == []
@@ -338,7 +338,7 @@ class TestStage2EmptyListArbitration:
         graph = _graph_returning_empty(
             emit_empty_int_list, [('Scalars', int), ('Lists', list[int])]
         )
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('Scalars').tokens == []
         assert graph.place_named('Lists').tokens == [[]]
@@ -349,7 +349,7 @@ class TestStage2EmptyListArbitration:
             emit_empty_int_or_str_list, [('IntLists', list[int]), ('StrLists', list[str])]
         )
         with pytest.raises(TransitionFailedError) as excinfo:
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert isinstance(excinfo.value.__cause__, ValueError)
         assert "multiple matching" in str(excinfo.value.__cause__)
 
@@ -362,7 +362,7 @@ class TestStage2EmptyListArbitration:
             [('Ints', int), ('IntLists', list[int]), ('StrLists', list[str])],
         )
         with pytest.raises(TransitionFailedError) as excinfo:
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert isinstance(excinfo.value.__cause__, ValueError)
 
     @pytest.mark.asyncio
@@ -372,7 +372,7 @@ class TestStage2EmptyListArbitration:
             [('IntLists', list[int]), ('StrLists', list[str])],
             allow_token_copying=True,
         )
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('IntLists').tokens == [[]]
         assert graph.place_named('StrLists').tokens == [[]]

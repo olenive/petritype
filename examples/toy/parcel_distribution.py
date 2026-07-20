@@ -253,7 +253,7 @@ async def _(
         for _i in range(n_steps.value):
             _, _fired = await ExecutableGraphOperations.execute_graph(
                 executable_graph=_graph,
-                max_transitions=1,
+                stop_after_n_firings=1,
                 verbose=False,
             )
             _node_attr_fn, _edge_attr_fn = RustworkxToGraphviz.activation_coloured_attr_functions(_graph)

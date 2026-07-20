@@ -15,6 +15,10 @@ from petritype.helpers.structures import SafeMerge
 
 type TransitionName = str
 
+# Distinguishes "argument not passed" from an explicit None (which means unlimited)
+# while `max_transitions` remains a deprecated alias of `stop_after_n_firings`.
+_UNSET: Any = object()
+
 
 class TransitionFailedError(RuntimeError):
     """A transition body (or its output routing) raised after its input tokens
@@ -210,8 +214,13 @@ class ExecutableGraph(BaseModel):
             transport, or for replay / fork-from-step features. Independent
             of ``transition_history``, which is capped for memory and is
             therefore unsuitable as an authoritative counter.
-        last_fired: Name of the most recent transition fired by the last
-            ``execute_graph`` call (None if it fired nothing). Reset per call.
+        last_fired: Name of the most recently fired transition, or None if the
+            last firing attempt fired nothing. ``execute_graph`` resets it per
+            call; the sequential Runner resets it per attempt (same contract).
+            The concurrent Runner loops also set it as they deposit results,
+            where it names only *one* completion of each batch — observers
+            that must see every firing should diff ``fired_counts`` instead
+            (see ``petritype.runtime.fired_since``).
         fired_counts: Cumulative {transition_name: times_fired} since the graph
             was created. Monotonic and never trimmed (like ``step_count``), so
             it is the reliable way to ask "has transition X ever fired" — the
@@ -235,14 +244,20 @@ class ExecutableGraph(BaseModel):
     snapshot_edges: Sequence[SnapshotEdge] = []
     mutate_edges: Sequence[MutateEdge] = []
     step_count: int = 0
-    # Name of the most recent transition fired by the last ``execute_graph``
-    # call, or None if that call fired nothing. Reset at the start of every
-    # call, so it always reflects that call (never a stale earlier fire).
+    # Name of the most recent transition fired by the last firing attempt (an
+    # ``execute_graph`` call, or one sequential-Runner attempt), or None if it
+    # fired nothing. Reset at the start of every attempt, so it always reflects
+    # that attempt (never a stale earlier fire).
     # Unlike ``transition_history`` this is independent of history-retention
     # config, giving callers a reliable "what just fired" signal — e.g. for UI
     # highlighting — without inferring it from token-count diffs (which is
     # ambiguous for self-loops). Transition names are unique (enforced by
     # ``check_unique_names``), so a name unambiguously identifies the node.
+    # The concurrent Runner deposit loops also set this (outside
+    # ``execute_graph``); a batch of completions leaves only one name here, so
+    # it is a convenience signal — diffing ``fired_counts`` via
+    # ``petritype.runtime.fired_since`` is the lossless "what fired since I
+    # last looked" API.
     last_fired: Optional[str] = None
     # Cumulative count of how many times each transition has fired since this
     # graph was created (keyed by transition name). Like ``step_count`` it is
@@ -708,6 +723,94 @@ class ExecutableGraphCheck:
             if ExecutableGraphCheck.value_can_be_deposited(value, place)
         )
 
+    def assert_acyclic(executable_graph: ExecutableGraph) -> None:
+        """Raise ValueError if the net's token flow contains a cycle, naming its path
+        (``P1 → T1 → P2 → T2 → P1``).
+
+        Token flow is the directed bipartite graph of ``argument_edges``
+        (place → transition) and ``return_edges`` (transition → place). Read edges
+        are excluded: a snapshot moves no tokens, so a cycle through one cannot
+        feed itself; mutate edges are excluded on the same conservative grounds
+        (they modify tokens in place but move none).
+
+        Passing proves **no token cycles** — not termination. A transition with no
+        ``ArgumentEdgeToTransition`` input (a source — possibly fed only by read
+        edges, which consume nothing) can fire forever in a perfectly acyclic net.
+        The static termination condition is acyclic *and* every transition
+        consumes: pair this with ``assert_no_source_transitions``. Nets that
+        legitimately run forever should be bounded at run time instead
+        (``RunContext.error_after_n_firings``).
+        """
+        # Nodes are namespaced (kind, name): unique-name enforcement is per kind,
+        # so a place and a transition may legally share a name.
+        adjacency: dict[tuple, list[tuple]] = {}
+        for edge in executable_graph.argument_edges:
+            adjacency.setdefault(("place", edge.place_node_name), []).append(
+                ("transition", edge.transition_node_name)
+            )
+        for edge in executable_graph.return_edges:
+            adjacency.setdefault(("transition", edge.transition_node_name), []).append(
+                ("place", edge.place_node_name)
+            )
+
+        # Iterative DFS — a long pipeline must not hit the recursion limit.
+        state: dict[tuple, str] = {}  # "visiting" (on the current path) or "done"
+        for start in list(adjacency):
+            if start in state:
+                continue
+            state[start] = "visiting"
+            path = [start]
+            stack = [iter(adjacency.get(start, ()))]
+            while stack:
+                successor = next(stack[-1], None)
+                if successor is None:
+                    state[path.pop()] = "done"
+                    stack.pop()
+                elif state.get(successor) == "visiting":
+                    cycle = path[path.index(successor):] + [successor]
+                    raise ValueError(
+                        "Token flow contains a cycle: "
+                        + " → ".join(name for _, name in cycle)
+                    )
+                elif successor not in state:
+                    state[successor] = "visiting"
+                    path.append(successor)
+                    stack.append(iter(adjacency.get(successor, ())))
+
+    def assert_no_source_transitions(executable_graph: ExecutableGraph) -> None:
+        """Raise ValueError if any transition has no ``ArgumentEdgeToTransition``
+        input, naming the offenders. Such a *source* transition consumes nothing
+        when it fires (read edges don't count — snapshots and mutates leave the
+        place untouched), so it can fire forever and even an acyclic net
+        containing one never quiesces. Together with ``assert_acyclic`` this is a
+        static termination proof: tokens only flow forward, and every firing
+        consumes at least one.
+
+        Deliberate sources (generators, external-input transitions) are
+        legitimate — don't assert this on such nets; bound them at run time with
+        ``RunContext.error_after_n_firings`` or drive them via
+        ``run_indefinitely``.
+        """
+        consuming = {edge.transition_node_name for edge in executable_graph.argument_edges}
+        sources = [t.name for t in executable_graph.transitions if t.name not in consuming]
+        if sources:
+            raise ValueError(
+                "Source transitions (no ArgumentEdgeToTransition input — firing "
+                f"consumes nothing, so the net cannot quiesce): {', '.join(sources)}"
+            )
+
+
+# Default selector: highest `priority` wins; transitions without one score 0.0.
+# `max` keeps the first maximum, so ties — including nets where nobody sets a
+# priority — fall back to definition order.
+def default_transition_selector(
+    graph: ExecutableGraph, enabled: list[FunctionTransitionNode]
+) -> Optional[FunctionTransitionNode]:
+    """Default selector: highest-priority enabled transition, definition order on ties."""
+    if not enabled:
+        return None
+    return max(enabled, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
+
 
 class ExecutableGraphOperations:
     """Functions that alter the executable graph.
@@ -735,6 +838,7 @@ class ExecutableGraphOperations:
         ],
         allow_token_copying: bool = False,
         restore_tokens_on_failure: bool = False,
+        expect_acyclic: bool = False,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -753,11 +857,16 @@ class ExecutableGraphOperations:
                 mutate_edges.append(node)
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
-        return ExecutableGraph(
+        graph = ExecutableGraph(
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure,
         )
+        # Declares "this net is a DAG" at build time; an accidental cycle then
+        # fails here with its path named instead of hanging at run time.
+        if expect_acyclic:
+            ExecutableGraphCheck.assert_acyclic(graph)
+        return graph
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
         """Update the given place by appending the result token to its tokens list."""
@@ -1075,10 +1184,132 @@ class ExecutableGraphOperations:
             updated_places[place_name] = place
         return updated_places
 
+    async def fire_one_transition(
+        executable_graph: ExecutableGraph,
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        transition_names_to_outgoing_edges: dict[str, tuple[ReturnedEdgeFromTransition, ...]],
+        transition_names_to_read_edges: dict[str, tuple],
+        transition_selector: Optional[Callable[[ExecutableGraph, list[FunctionTransitionNode]], Optional[FunctionTransitionNode]]] = None,
+        allow_token_copying: Optional[bool] = None,
+        restore_tokens_on_failure: Optional[bool] = None,
+        executor=None,
+        transition_history_length=1,
+        place_history_length=1,
+        token_history_length=0,
+    ) -> Optional[TransitionName]:
+        """Fire at most one enabled transition, using prebuilt adjacency maps.
+
+        The single-firing primitive that ``execute_graph`` and the Runner's
+        sequential loops compose. The caller owns the per-run setup: building the
+        four maps (``MapPlaceNames`` / ``MapTransitionNames``) and validating the
+        marking (``ensure_all_token_types_match_place_types``) at whatever cadence
+        it wants — so driving an N-firing net pays for that setup once, not once
+        per firing. ``last_fired`` is *not* reset here; resetting it per call is
+        ``execute_graph``'s contract.
+
+        Selector resolution matches ``execute_graph``: provided > graph's >
+        default (highest priority, definition order on ties). ``None`` for
+        ``allow_token_copying`` / ``restore_tokens_on_failure`` means use the
+        graph's setting.
+
+        Returns the fired transition's name, or None if no transition was enabled
+        (or the selector declined every enabled one).
+        """
+        if allow_token_copying is None:
+            allow_token_copying = executable_graph.allow_token_copying
+        if restore_tokens_on_failure is None:
+            restore_tokens_on_failure = executable_graph.restore_tokens_on_failure
+        selector = (
+            transition_selector
+            or executable_graph.transition_selector
+            or default_transition_selector
+        )
+
+        # Get all enabled transitions (sufficient tokens and a passing guard), in
+        # definition order.
+        enabled_transitions = []
+        for transition in executable_graph.transitions:
+            if ExecutableGraphCheck.transition_is_enabled(
+                transition=transition,
+                executable_graph=executable_graph,
+                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                place_names_to_nodes=place_names_to_nodes,
+                transition_names_to_read_edges=transition_names_to_read_edges,
+            ):
+                enabled_transitions.append(transition)
+
+        # Let selector choose which transition to fire
+        transition = selector(executable_graph, enabled_transitions)
+        if transition is None:
+            return None
+
+        input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
+            transition=transition,
+            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+            place_names_to_nodes=place_names_to_nodes,
+            allow_token_copying=allow_token_copying,
+            token_history_length=token_history_length,
+            transition_names_to_read_edges=transition_names_to_read_edges,
+        )
+        try:
+            output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
+                transition=transition,
+                tokens_kwargs=input_args_to_tokens,
+                transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
+                place_names_to_nodes=place_names_to_nodes,
+                allow_token_copying=allow_token_copying,
+                executor=executor,
+            )
+        except Exception as exception:
+            # Raises TransitionFailedError carrying the consumed tokens;
+            # restores them first when restore_tokens_on_failure is set.
+            ExecutableGraphOperations.handle_failed_firing(
+                transition=transition,
+                exception=exception,
+                input_edge_names_to_tokens=input_args_to_tokens,
+                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                place_names_to_nodes=place_names_to_nodes,
+                restore_tokens_on_failure=restore_tokens_on_failure,
+            )
+        updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
+            output_place_names_to_tokens=output_place_names_to_tokens,
+            place_names_to_nodes=place_names_to_nodes,
+            allow_token_copying=allow_token_copying,
+        )
+        output_places: Sequence[ListPlaceNode] = list(updated_places_dict.values())
+
+        # Authoritative monotonic counter — never trimmed. See class
+        # docstring for the idempotency / replay use case.
+        executable_graph.step_count += 1
+        # Authoritative "what just fired" — independent of history config.
+        executable_graph.last_fired = transition.name
+        # Cumulative per-transition tally — monotonic, never trimmed.
+        executable_graph.fired_counts[transition.name] = (
+            executable_graph.fired_counts.get(transition.name, 0) + 1
+        )
+        # Update transition history.
+        if transition_history_length == 1:
+            executable_graph.transition_history = [transition]
+        elif transition_history_length > 1:
+            executable_graph.transition_history.append(transition)
+            if len(executable_graph.transition_history) > transition_history_length:
+                executable_graph.transition_history.pop(0)
+        # Update place history.
+        if place_history_length == 1:
+            executable_graph.input_place_history = [input_places]
+            executable_graph.output_place_history = [output_places]
+        elif place_history_length > 1:
+            executable_graph.input_place_history.append(input_places)
+            executable_graph.output_place_history.append(output_places)
+            if len(executable_graph.input_place_history) > place_history_length:
+                executable_graph.input_place_history.pop(0)
+                executable_graph.output_place_history.pop(0)
+        return transition.name
 
     async def execute_graph(
         executable_graph: ExecutableGraph,
-        max_transitions: Optional[int] = 1,
+        stop_after_n_firings: Optional[int] = _UNSET,
         allow_token_copying: Optional[bool] = None,
         restore_tokens_on_failure: Optional[bool] = None,
         verbose=False,
@@ -1087,6 +1318,7 @@ class ExecutableGraphOperations:
         token_history_length=0,
         transition_selector: Optional[Callable[[ExecutableGraph, list[FunctionTransitionNode]], Optional[FunctionTransitionNode]]] = None,
         executor=None,
+        max_transitions: Optional[int] = _UNSET,
     ) -> tuple[ExecutableGraph, int]:
         """Execute the Petri net graph.
 
@@ -1096,7 +1328,14 @@ class ExecutableGraphOperations:
 
         Args:
             executable_graph: The graph to execute
-            max_transitions: Maximum number of transitions to fire
+            stop_after_n_firings: Stop — without error — after this many firings
+                (default 1); None means run until no transition is enabled.
+                Disambiguation idiom: a return with fired < stop_after_n_firings
+                proves the net quiesced; fired == stop_after_n_firings means it
+                may have been cut off mid-pipeline. Resolve by calling again (0
+                further firings = it was quiescence), or drive the net through
+                ``Runner.run``, whose ``RunSummary.quiesced`` states it
+                explicitly.
             allow_token_copying: Whether to allow copying tokens. If None, uses the graph's setting.
             restore_tokens_on_failure: Whether a failed firing puts its consumed tokens
                 back (best effort) before TransitionFailedError is raised. If None, uses
@@ -1109,10 +1348,26 @@ class ExecutableGraphOperations:
             transition_selector: Optional function to select which transition to fire.
                 Signature: (graph, enabled_transitions) -> transition_to_fire
                 If None, uses graph.transition_selector or default behavior.
+            max_transitions: Deprecated alias of ``stop_after_n_firings`` (kept for
+                legacy callers; passing it warns).
 
         Returns:
             Tuple of (updated_graph, transitions_fired_count)
         """
+        if max_transitions is not _UNSET:
+            if stop_after_n_firings is not _UNSET:
+                raise TypeError(
+                    "pass stop_after_n_firings only — max_transitions is its deprecated alias"
+                )
+            warnings.warn(
+                "max_transitions is deprecated: use stop_after_n_firings (same meaning — "
+                "stop without error after this many firings; None = run to quiescence).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            stop_after_n_firings = max_transitions
+        elif stop_after_n_firings is _UNSET:
+            stop_after_n_firings = 1
 
         if allow_token_copying is None:
             allow_token_copying = executable_graph.allow_token_copying
@@ -1127,18 +1382,6 @@ class ExecutableGraphOperations:
                 "transitions."
             )
 
-        # Default selector: highest `priority` wins; transitions without one score 0.0.
-        # `max` keeps the first maximum, so ties — including nets where nobody sets a
-        # priority — fall back to definition order.
-        def default_selector(graph: ExecutableGraph, enabled: list[FunctionTransitionNode]) -> Optional[FunctionTransitionNode]:
-            """Default selector: highest-priority enabled transition, definition order on ties."""
-            if not enabled:
-                return None
-            return max(enabled, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
-
-        # Choose selector: provided > graph's > default
-        selector = transition_selector or executable_graph.transition_selector or default_selector
-
         transitions_fired = 0
         # Reset per call so it reflects only this invocation (None if nothing fires).
         executable_graph.last_fired = None
@@ -1151,102 +1394,28 @@ class ExecutableGraphOperations:
         transition_names_to_read_edges = MapTransitionNames.to_read_edges(executable_graph)
 
         while True:
-            # max_transitions=None means run until no transition is enabled.
-            if max_transitions is not None and transitions_fired >= max_transitions:
+            # stop_after_n_firings=None means run until no transition is enabled.
+            if stop_after_n_firings is not None and transitions_fired >= stop_after_n_firings:
                 if verbose:
-                    print(f"Performed {transitions_fired} transitions, maximum transitions count reached.")
+                    print(f"Performed {transitions_fired} transitions, stop_after_n_firings reached.")
                 return executable_graph, transitions_fired
 
-            # Get all enabled transitions (sufficient tokens and a passing guard), in
-            # definition order.
-            enabled_transitions = []
-            for transition in executable_graph.transitions:
-                if ExecutableGraphCheck.transition_is_enabled(
-                    transition=transition,
-                    executable_graph=executable_graph,
-                    transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-                    place_names_to_nodes=place_names_to_nodes,
-                    transition_names_to_read_edges=transition_names_to_read_edges,
-                ):
-                    enabled_transitions.append(transition)
-
-            # Let selector choose which transition to fire
-            transition = selector(executable_graph, enabled_transitions)
-
-            if transition is None:
+            fired_name = await ExecutableGraphOperations.fire_one_transition(
+                executable_graph=executable_graph,
+                place_names_to_nodes=place_names_to_nodes,
+                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
+                transition_names_to_read_edges=transition_names_to_read_edges,
+                transition_selector=transition_selector,
+                allow_token_copying=allow_token_copying,
+                restore_tokens_on_failure=restore_tokens_on_failure,
+                executor=executor,
+                transition_history_length=transition_history_length,
+                place_history_length=place_history_length,
+                token_history_length=token_history_length,
+            )
+            if fired_name is None:
                 if verbose:
                     print(f"Performed {transitions_fired} transitions, no more valid transitions remaining.")
                 return executable_graph, transitions_fired
-            # input_history, output_history = await ExecutableGraphOperations.old_fire_transition(
-            #     transition=transition,
-            #     transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-            #     transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
-            #     place_names_to_nodes=place_names_to_nodes,
-            #     allow_token_copying=allow_token_copying,
-            #     place_history_length=place_history_length,
-            #     token_history_length=token_history_length,
-            # )
-            #
-            input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
-                transition=transition,
-                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-                place_names_to_nodes=place_names_to_nodes,
-                allow_token_copying=allow_token_copying,
-                # place_history_length=place_history_length,
-                token_history_length=token_history_length,
-                transition_names_to_read_edges=transition_names_to_read_edges,
-            )
-            try:
-                output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
-                    transition=transition,
-                    tokens_kwargs=input_args_to_tokens,
-                    transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
-                    place_names_to_nodes=place_names_to_nodes,
-                    allow_token_copying=allow_token_copying,
-                    executor=executor,
-                )
-            except Exception as exception:
-                # Raises TransitionFailedError carrying the consumed tokens;
-                # restores them first when restore_tokens_on_failure is set.
-                ExecutableGraphOperations.handle_failed_firing(
-                    transition=transition,
-                    exception=exception,
-                    input_edge_names_to_tokens=input_args_to_tokens,
-                    transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-                    place_names_to_nodes=place_names_to_nodes,
-                    restore_tokens_on_failure=restore_tokens_on_failure,
-                )
-            updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
-                output_place_names_to_tokens=output_place_names_to_tokens,
-                place_names_to_nodes=place_names_to_nodes,
-                allow_token_copying=allow_token_copying,
-            )
-            output_places: Sequence[ListPlaceNode] = list(updated_places_dict.values())
-
             transitions_fired += 1
-            # Authoritative monotonic counter — never trimmed. See class
-            # docstring for the idempotency / replay use case.
-            executable_graph.step_count += 1
-            # Authoritative "what just fired" — independent of history config.
-            executable_graph.last_fired = transition.name
-            # Cumulative per-transition tally — monotonic, never trimmed.
-            executable_graph.fired_counts[transition.name] = (
-                executable_graph.fired_counts.get(transition.name, 0) + 1
-            )
-            # Update transition history.
-            if transition_history_length == 1:
-                executable_graph.transition_history = [transition]
-            elif transition_history_length > 1:
-                executable_graph.transition_history.append(transition)
-                if len(executable_graph.transition_history) > transition_history_length:
-                    executable_graph.transition_history.pop(0)
-            # Update place history.
-            if place_history_length == 1:
-                executable_graph.input_place_history = [input_places]
-                executable_graph.output_place_history = [output_places]
-            elif place_history_length > 1:
-                executable_graph.input_place_history.append(input_places)
-                executable_graph.output_place_history.append(output_places)
-                if len(executable_graph.input_place_history) > place_history_length:
-                    executable_graph.input_place_history.pop(0)
-                    executable_graph.output_place_history.pop(0)

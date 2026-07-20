@@ -15,11 +15,15 @@ def _():
 def _(mo):
     mo.md(
         r"""
-        # Special case — returning an empty list
+        # A hypothetical web-scraping pipeline
 
-        Illustrates the case of sending an empty list to a `ListPlaceNode` destination.
-        The input `0` produces an empty list, which is routed to the output place without
-        creating any tokens there.
+        A small, self-contained data-processing pipeline used in the documentation. It
+        represents a hypothetical web scrape over dummy data, and shows how a token can
+        **branch by type**: a transition returns one of several types, and the engine
+        routes each result to the place whose type it matches.
+
+        **Flow:** Input Parameters → *Scrape* → Response → *Classify* →
+        {Successes, Uncertain}; Uncertain → *Special Cases* → {Successes, Failures}.
 
         The net is fired **live**, one transition at a time:
 
@@ -36,7 +40,9 @@ def _(mo):
 def _():
     import io
     import time
+    from typing import Union
 
+    from pydantic import BaseModel
     from rustworkx.visualization import graphviz_draw
 
     from petritype.core.executable_graph_components import (
@@ -52,6 +58,7 @@ def _():
 
     return (
         ArgumentEdgeToTransition,
+        BaseModel,
         ExecutableGraphOperations,
         FunctionTransitionNode,
         ListPlaceNode,
@@ -59,9 +66,89 @@ def _():
         RustworkxGraph,
         RustworkxToGraphviz,
         SimpleGraphvizVisualization,
+        Union,
         graphviz_draw,
         io,
         time,
+    )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## Domain types and the (simulated) scraping functions""")
+    return
+
+
+@app.cell
+def _(BaseModel, Union):
+    class ScrapeParameters(BaseModel):
+        url: str
+
+        def __str__(self):
+            return f"[{self.url}]"
+
+    class ScrapedData(BaseModel):
+        parameters: ScrapeParameters
+        data: str
+
+        def __str__(self):
+            return f"[{self.parameters.url}]"
+
+    class SuccessfulScrape(BaseModel):
+        parameters: ScrapeParameters
+        result: ScrapedData
+
+        def __str__(self):
+            return f"[{self.parameters.url}]"
+
+    class UncertainScrapeResult(BaseModel):
+        parameters: ScrapeParameters
+        result: ScrapedData
+
+        def __str__(self):
+            return f"[{self.parameters.url}]"
+
+    class FailedScrape(BaseModel):
+        parameters: ScrapeParameters
+        result: ScrapedData
+        error: str
+
+        def __str__(self):
+            return f"[{self.parameters.url}]"
+
+    def simulated_scrape_attempt(parameters: ScrapeParameters) -> ScrapedData:
+        if parameters.url.startswith("wrong/page"):
+            return ScrapedData(parameters=parameters, data="Encountered a wrong error")
+        elif parameters.url.startswith("difficult/page"):
+            return ScrapedData(parameters=parameters, data="Maybe difficult valid data")
+        else:
+            return ScrapedData(parameters=parameters, data="Valid data")
+
+    def classify_scrape_data(
+        data: ScrapedData,
+    ) -> Union[SuccessfulScrape, UncertainScrapeResult]:
+        if ("difficult" in data.data.lower()) or ("wrong" in data.data.lower()):
+            return UncertainScrapeResult(parameters=data.parameters, result=data)
+        return SuccessfulScrape(parameters=data.parameters, result=data)
+
+    def handle_special_cases(
+        data: UncertainScrapeResult,
+    ) -> Union[SuccessfulScrape, FailedScrape]:
+        if "maybe" in data.result.data.lower():
+            return SuccessfulScrape(parameters=data.parameters, result=data.result)
+        return FailedScrape(
+            parameters=data.parameters, result=data.result, error="Definite error encountered"
+        )
+
+    return (
+        FailedScrape,
+        ScrapeParameters,
+        ScrapedData,
+        SuccessfulScrape,
+        UncertainScrapeResult,
+        classify_scrape_data,
+        handle_special_cases,
+        simulated_scrape_attempt,
     )
 
 
@@ -88,45 +175,53 @@ def _(io, mo):
 
 
 @app.cell
-def _():
-    def generate_list_of_integers(n: int) -> list[int]:
-        return [100 + x for x in range(n)]
-
-    # A named (rather than lambda) transition function so it shows a clean name in the
-    # rendered graph instead of `build_graph.<locals>.<lambda>`. Left un-annotated to keep
-    # the same construct-time type-checking behaviour as the original lambda.
-    def pass_through_list(lst):
-        return lst
-
-    return generate_list_of_integers, pass_through_list
-
-
-@app.cell
 def _(
     ArgumentEdgeToTransition,
     ExecutableGraphOperations,
+    FailedScrape,
     FunctionTransitionNode,
     ListPlaceNode,
     ReturnedEdgeFromTransition,
     RustworkxGraph,
-    generate_list_of_integers,
-    pass_through_list,
+    ScrapeParameters,
+    ScrapedData,
+    SuccessfulScrape,
+    UncertainScrapeResult,
+    classify_scrape_data,
+    handle_special_cases,
+    simulated_scrape_attempt,
 ):
     def build_graph():
-        """Construct a fresh graph and its rustworkx view."""
+        """Construct a fresh scraping graph and its rustworkx view.
+
+        Four URLs are seeded: two clean ("valid/..."), one that scrapes an error
+        ("wrong/..."), and one that is ambiguous ("difficult/..."). Classify routes the
+        clean ones straight to Successes and the other two to Uncertain; Special Cases
+        then rescues the ambiguous one and fails the erroneous one.
+        """
+        initial_parameters = [
+            ScrapeParameters(url="valid/page_01"),
+            ScrapeParameters(url="wrong/page_01"),
+            ScrapeParameters(url="difficult/page_01"),
+            ScrapeParameters(url="valid/page_02"),
+        ]
         nodes_and_edges = [
-            ListPlaceNode(name="Input Number", type=int, tokens=[1, 2, 0, 3]),
-            ArgumentEdgeToTransition("Input Number", "Generate List of Integers", "n"),
-            FunctionTransitionNode(
-                name="Generate List of Integers",
-                function=generate_list_of_integers,
-            ),
-            ReturnedEdgeFromTransition("Generate List of Integers", "Integer Lists"),
-            ListPlaceNode(name="Integer Lists", type=list[int]),
-            ArgumentEdgeToTransition("Integer Lists", "Pass Through List", argument="lst"),
-            FunctionTransitionNode(name="Pass Through List", function=pass_through_list),
-            ReturnedEdgeFromTransition("Pass Through List", "Final Output"),
-            ListPlaceNode(name="Final Output", type=int),
+            ListPlaceNode("Input Parameters", ScrapeParameters, initial_parameters),
+            ListPlaceNode("Response", ScrapedData),
+            ListPlaceNode("Uncertain", UncertainScrapeResult),
+            ListPlaceNode("Failures", FailedScrape),
+            ListPlaceNode("Successes", SuccessfulScrape),
+            FunctionTransitionNode("Scrape", function=simulated_scrape_attempt),
+            FunctionTransitionNode("Classify", function=classify_scrape_data),
+            FunctionTransitionNode("Special Cases", function=handle_special_cases),
+            ArgumentEdgeToTransition("Input Parameters", "Scrape", "parameters"),
+            ReturnedEdgeFromTransition("Scrape", "Response"),
+            ArgumentEdgeToTransition("Response", "Classify", "data"),
+            ReturnedEdgeFromTransition("Classify", "Uncertain"),
+            ReturnedEdgeFromTransition("Classify", "Successes"),
+            ArgumentEdgeToTransition("Uncertain", "Special Cases", "data"),
+            ReturnedEdgeFromTransition("Special Cases", "Successes"),
+            ReturnedEdgeFromTransition("Special Cases", "Failures"),
         ]
         graph = ExecutableGraphOperations.construct_graph(nodes_and_edges)
         pydigraph = RustworkxGraph.from_executable_graph(graph)

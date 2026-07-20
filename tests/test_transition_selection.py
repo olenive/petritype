@@ -105,7 +105,7 @@ class TestExecuteGraphWithSelector:
         # Execute with default selector
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
         )
 
         assert fired == 1
@@ -136,7 +136,7 @@ class TestExecuteGraphWithSelector:
         # Execute with custom selector
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=first_enabled_selector,
         )
 
@@ -165,7 +165,7 @@ class TestExecuteGraphWithSelector:
         # Execute - should fire 0 transitions
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=10,
+            stop_after_n_firings=10,
         )
 
         assert fired == 0
@@ -196,7 +196,7 @@ class TestExecuteGraphWithSelector:
         # Parameter should override graph selector
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=param_selector,
         )
 
@@ -243,7 +243,7 @@ class TestSelectorWithActivationFunction:
         # Should fire 0 transitions because guard blocks
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=guard_aware_selector,
         )
 
@@ -299,7 +299,7 @@ class TestSelectorWithActivationFunction:
         # Should fire Dec (higher priority)
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=priority_selector,
         )
 
@@ -346,7 +346,7 @@ class TestSelectorWithActivationFunction:
         # Should not fire (only 1 item in pool, needs 2)
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=guard_selector,
         )
 
@@ -360,7 +360,7 @@ class TestSelectorWithActivationFunction:
         # Now should fire (2 items in pool)
         updated_graph2, fired2 = await ExecutableGraphOperations.execute_graph(
             updated_graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             transition_selector=guard_selector,
         )
 

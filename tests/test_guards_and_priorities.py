@@ -65,7 +65,7 @@ class TestGuard:
     @pytest.mark.asyncio
     async def test_failing_guard_disables_the_transition(self):
         graph = _relay_graph(guard=lambda graph: False)
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=None)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None)
         assert fired == 0
         assert graph.place_named('In').tokens == [1, 2, 3]
         assert graph.place_named('Out').tokens == []
@@ -75,7 +75,7 @@ class TestGuard:
         # Enabled only while more than one token remains: the run ends with the
         # last token still in place, not when the tokens run out.
         graph = _relay_graph(guard=lambda graph: len(graph.place_named('In').tokens) > 1)
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=None)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None)
         assert fired == 2
         assert len(graph.place_named('In').tokens) == 1
         assert len(graph.place_named('Out').tokens) == 2
@@ -97,7 +97,7 @@ class TestPriority:
     @pytest.mark.asyncio
     async def test_higher_priority_fires_before_definition_order(self):
         graph = _two_lane_graph(second_kwargs={'priority': lambda graph: 1.0})
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('B Out').tokens == [2]
         assert graph.place_named('A Out').tokens == []
@@ -105,7 +105,7 @@ class TestPriority:
     @pytest.mark.asyncio
     async def test_without_priorities_definition_order_wins(self):
         graph = _two_lane_graph()
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.place_named('A Out').tokens == [2]
         assert graph.place_named('B Out').tokens == []
@@ -120,7 +120,7 @@ class TestPriority:
             second_kwargs={'priority': lambda graph: float(len(graph.place_named('B').tokens))},
             b_tokens=(1, 2),
         )
-        graph, fired = await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert len(graph.place_named('B Out').tokens) == 1
         assert graph.place_named('A Out').tokens == []

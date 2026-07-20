@@ -52,7 +52,7 @@ def test_last_fired_defaults_to_none():
 def test_last_fired_records_the_fired_transition():
     graph = _chain_graph([1])
     graph, fired = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
     )
     assert fired == 1
     assert graph.last_fired == "Inc"
@@ -63,7 +63,7 @@ def test_last_fired_is_set_for_self_loops():
     attributed correctly."""
     graph = _self_loop_graph()
     graph, _ = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
     )
     assert graph.last_fired == "SelfLoop"
     assert graph.place_named("Loop").tokens == [1]
@@ -71,10 +71,10 @@ def test_last_fired_is_set_for_self_loops():
 
 def test_last_fired_resets_to_none_when_a_call_fires_nothing():
     graph = _chain_graph([1])
-    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, max_transitions=1))
+    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
     assert graph.last_fired == "Inc"
     # Input is now empty → next call fires nothing → last_fired reflects THIS call.
-    graph, fired = asyncio.run(ExecutableGraphOperations.execute_graph(graph, max_transitions=1))
+    graph, fired = asyncio.run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
     assert fired == 0
     assert graph.last_fired is None
 
@@ -82,7 +82,7 @@ def test_last_fired_resets_to_none_when_a_call_fires_nothing():
 def test_last_fired_holds_the_most_recent_of_a_multi_fire_call():
     graph = _chain_graph([1, 2, 3])
     graph, fired = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=3)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
     )
     assert fired == 3
     assert graph.last_fired == "Inc"  # same transition fired thrice
@@ -101,11 +101,11 @@ def test_fired_counts_accumulates_across_calls():
     graph = _chain_graph([1, 2, 3])
     # Default history length is 1, so transition_history can hold only the last
     # fire — fired_counts must still report the true total.
-    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, max_transitions=2))
+    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2))
     assert graph.fired_counts == {"Inc": 2}
     assert len(graph.transition_history) == 1  # capped — can't be the counter
 
-    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, max_transitions=1))
+    graph, _ = asyncio.run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
     assert graph.fired_counts == {"Inc": 3}  # cumulative, not reset per call
 
 
@@ -123,7 +123,7 @@ def test_fired_counts_keys_each_distinct_transition():
         ListPlaceNode("Out", int),
     ])
     graph, fired = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=10)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=10)
     )
     assert fired == 2
     assert graph.fired_counts == {"First": 1, "Second": 1}
@@ -133,7 +133,7 @@ def test_fired_counts_are_independent_per_graph_instance():
     """Guards against a shared mutable default leaking counts across graphs."""
     g1 = _chain_graph([1])
     g2 = _chain_graph([1])
-    g1, _ = asyncio.run(ExecutableGraphOperations.execute_graph(g1, max_transitions=1))
+    g1, _ = asyncio.run(ExecutableGraphOperations.execute_graph(g1, stop_after_n_firings=1))
     assert g1.fired_counts == {"Inc": 1}
     assert g2.fired_counts == {}  # untouched
 

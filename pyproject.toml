@@ -22,6 +22,9 @@ examples = [
 ]
 
 [tool.pytest.ini_options]
+# The single test suite lives in tests/. Pinned so collection can't silently pick up
+# a stray top-level test/ directory again (the old suite was reconciled into tests/).
+testpaths = ["tests"]
 markers = [
     "notebooks: run the marimo example notebooks (slow; needs the 'examples' extra). Deselected by default; run with `pytest -m notebooks`.",
 ]

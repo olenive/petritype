@@ -59,16 +59,16 @@ class TestStepCountIncrement:
     def test_one_fire_increments_by_one(self):
         graph = _make_increment_graph([1])
         updated, fired = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         )
         assert fired == 1
         assert updated.step_count == 1
 
     def test_n_fires_increments_by_n(self):
-        """``max_transitions=3`` with 3 input tokens → 3 fires → step_count == 3."""
+        """``stop_after_n_firings=3`` with 3 input tokens → 3 fires → step_count == 3."""
         graph = _make_increment_graph([1, 2, 3])
         updated, fired = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=3)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
         )
         assert fired == 3
         assert updated.step_count == 3
@@ -79,11 +79,11 @@ class TestStepCountIncrement:
         a stable sequence number across requests."""
         graph = _make_increment_graph([1, 2, 3, 4])
         graph, _ = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         )
         assert graph.step_count == 1
         graph, _ = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=2)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2)
         )
         assert graph.step_count == 3
 
@@ -96,7 +96,7 @@ class TestStepCountUnchangedOnNoFire:
         should return without firing and without bumping the counter."""
         graph = _make_increment_graph([])
         updated, fired = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=5)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=5)
         )
         assert fired == 0
         assert updated.step_count == 0
@@ -106,7 +106,7 @@ class TestStepCountUnchangedOnNoFire:
         step_count tracks actual fires, not the request."""
         graph = _make_increment_graph([1, 2, 3])
         updated, fired = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=10)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=10)
         )
         assert fired == 3
         assert updated.step_count == 3
@@ -123,7 +123,7 @@ class TestStepCountIndependentOfHistory:
         graph = _make_increment_graph([1, 2, 3, 4, 5])
         updated, fired = asyncio.run(
             ExecutableGraphOperations.execute_graph(
-                graph, max_transitions=5, transition_history_length=1,
+                graph, stop_after_n_firings=5, transition_history_length=1,
             )
         )
         assert fired == 5
@@ -143,7 +143,7 @@ class TestStepCountSerializable:
     def test_round_trip_through_json(self):
         graph = _make_increment_graph([1, 2])
         graph, _ = asyncio.run(
-            ExecutableGraphOperations.execute_graph(graph, max_transitions=2)
+            ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2)
         )
         assert graph.step_count == 2
         # Use mode="python" because places contain non-JSON values; we're

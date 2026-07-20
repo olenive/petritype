@@ -17,7 +17,7 @@ Each test encodes intended behavior that the engine at the time violated:
    the consumed tokens. They are deliberately NOT put back by default (the
    body may have mutated them before failing); restore_tokens_on_failure=True
    opts into best-effort restoration.
-5. execute_graph(max_transitions=None) crashed on `>=` against None instead
+5. execute_graph(stop_after_n_firings=None) crashed on `>=` against None instead
    of running until no transition is enabled.
 6. return_index was assigned by the construction helpers but ignored by the
    fire path; indexed return edges now split a tuple result by position.
@@ -102,7 +102,7 @@ class TestTokenSweepValidation:
     async def test_execute_graph_rejects_mistyped_token_up_front(self):
         graph = self._graph_with_mistyped_token()
         with pytest.raises(TypeError):
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
 
 
 class TestOutputTypeEnforcement:
@@ -184,7 +184,7 @@ class TestFailedFiringSemantics:
     async def test_failure_raises_error_carrying_consumed_tokens(self):
         graph = self._exploding_graph()
         with pytest.raises(TransitionFailedError) as excinfo:
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert excinfo.value.transition_name == 'Explode'
         assert excinfo.value.consumed == {'x': 42}
         assert excinfo.value.restored is False
@@ -196,7 +196,7 @@ class TestFailedFiringSemantics:
     async def test_restore_flag_on_graph_puts_tokens_back(self):
         graph = self._exploding_graph(restore_tokens_on_failure=True)
         with pytest.raises(TransitionFailedError) as excinfo:
-            await ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+            await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert excinfo.value.restored is True
         assert graph.place_named('Input').tokens == [42]
 
@@ -206,7 +206,7 @@ class TestFailedFiringSemantics:
         with pytest.raises(TransitionFailedError):
             await ExecutableGraphOperations.execute_graph(
                 graph,
-                max_transitions=1,
+                stop_after_n_firings=1,
                 restore_tokens_on_failure=True,
             )
         assert graph.place_named('Input').tokens == [42]
@@ -238,7 +238,7 @@ class TestReturnIndexRouting:
         ])
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
         )
         assert fired == 1
         assert updated_graph.place_named('Ints').tokens == [1]
@@ -246,10 +246,10 @@ class TestReturnIndexRouting:
 
 
 class TestUnboundedExecution:
-    """Issue 5: max_transitions=None means run until nothing is enabled."""
+    """Issue 5: stop_after_n_firings=None means run until nothing is enabled."""
 
     @pytest.mark.asyncio
-    async def test_max_transitions_none_runs_to_completion(self):
+    async def test_stop_after_n_firings_none_runs_to_completion(self):
         graph = ExecutableGraphOperations.construct_graph([
             ListPlaceNode('Input', int, [1, 2, 3]),
             ArgumentEdgeToTransition('Input', 'Inc', 'x'),
@@ -259,7 +259,7 @@ class TestUnboundedExecution:
         ])
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=None,
+            stop_after_n_firings=None,
         )
         assert fired == 3
         assert updated_graph.place_named('Input').tokens == []
@@ -319,8 +319,8 @@ class TestListTypedPlaceValidation:
         """The bug's visible symptom, as the notebooks hit it.
 
         The up-front sweep runs once per execute_graph call, so a single
-        max_transitions=None call never revalidates the tokens it writes and
-        sails through. Stepping — repeated max_transitions=1 calls, which is
+        stop_after_n_firings=None call never revalidates the tokens it writes and
+        sails through. Stepping — repeated stop_after_n_firings=1 calls, which is
         what the notebooks' fire_one does — re-sweeps every call and dies on
         the token the previous step legitimately wrote.
         """
@@ -329,7 +329,7 @@ class TestListTypedPlaceValidation:
         for _ in range(20):
             _updated, fired = await ExecutableGraphOperations.execute_graph(
                 graph,
-                max_transitions=1,
+                stop_after_n_firings=1,
             )
             if not fired:
                 break
@@ -341,7 +341,7 @@ class TestListTypedPlaceValidation:
         graph = self._list_of_lists_graph()
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
-            max_transitions=None,
+            stop_after_n_firings=None,
         )
         # 4 Generate firings + 4 Pass Through firings.
         assert fired == 8

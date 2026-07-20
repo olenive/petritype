@@ -146,7 +146,7 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         pydigraph = session["pydigraph"]
         _, fired = await ExecutableGraphOperations.execute_graph(
             executable_graph=graph,
-            max_transitions=1,
+            stop_after_n_firings=1,
             verbose=False,
         )
         if not fired:

@@ -163,6 +163,10 @@ lossless-recording observer. The real distinction is who drives firing:
 Where lossless completeness is genuinely needed (audit / replay of an autonomous net), it
 is the **engine's own cheap in-loop log** (`step_count` / `fired_counts` /
 `transition_history`), not a buffering observer. Observers view; the engine records.
+`runtime.fired_since(previous, current)` is the bridge between the two: an observer
+snapshots `fired_counts` and diffs at its next wake-up, recovering every firing as
+per-transition counts even though the notifications themselves coalesce. (`last_fired`
+stays a UI convenience — it names only one completion per concurrent deposit batch.)
 
 ## Execution responsiveness — two independent axes
 

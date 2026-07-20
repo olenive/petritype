@@ -91,7 +91,10 @@ class TestExecutableGraphCheck:
             ListPlaceNode(name='place_4', type=str),
         ]
         result = ExecutableGraphCheck.value_and_places_types_match([42, 43], places)
-        assert list(result) == [places[1], places[0], places[2]]
+        # Matches are returned in place-declaration order (order is not significant to
+        # routing, which deposits into a name-keyed dict): the two int places take the
+        # list as a batch, the list[int] place takes it as one whole token.
+        assert list(result) == [places[0], places[1], places[2]]
 
     @pytest.mark.parametrize(
         "value, expected_indices",
@@ -340,31 +343,32 @@ class TestExecutableGraphOperations:
         assert len(result) == len(expected_results)
 
     @pytest.mark.parametrize(
-        "list_value, place_type",
+        "list_value, place_type, expected_tokens",
         [
-            ([42, 43], int),  # Simple int list
-            (['a', 'b', 'c'], str),  # String list
-            ([1.5, 2.5, 3.5], float),  # Float list
-            ([1, 2, 3, 4, 5], int),  # Longer list
-            ([[1, 2], [3, 4]], list),  # Nested lists
-            ([{'x': 1}, {'y': 2}], dict),  # List of dicts
+            ([42, 43], int, [42, 43]),  # Int list batched into a scalar place
+            (['a', 'b', 'c'], str, ['a', 'b', 'c']),  # String list batched
+            ([1.5, 2.5, 3.5], float, [1.5, 2.5, 3.5]),  # Float list batched
+            ([1, 2, 3, 4, 5], int, [1, 2, 3, 4, 5]),  # Longer batch
+            # A list arriving at a list-typed place is one whole token, not a batch.
+            ([[1, 2], [3, 4]], list, [[[1, 2], [3, 4]]]),  # Nested lists -> single token
+            ([{'x': 1}, {'y': 2}], dict, [{'x': 1}, {'y': 2}]),  # Dicts batched into a dict place
         ]
     )
     def test_add_tokens_to_places_list_tokens_to_multiple_places_with_copying(
-        self, list_value, place_type
+        self, list_value, place_type, expected_tokens
     ):
         """Test adding lists to multiple places with copying enabled."""
         place1 = ListPlaceNode(name='place1', type=place_type, tokens=[])
         place2 = ListPlaceNode(name='place2', type=place_type, tokens=[])
         place_names_to_nodes = {'place1': place1, 'place2': place2}
         tokens_to_add = {'place1': list_value, 'place2': list_value}
-        
+
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, place_names_to_nodes, allow_token_copying=True
         )
-        
-        assert place1.tokens == list_value
-        assert place2.tokens == list_value
+
+        assert place1.tokens == expected_tokens
+        assert place2.tokens == expected_tokens
         # Verify they are different list objects
         assert place1.tokens is not place2.tokens
         assert len(result) == 2

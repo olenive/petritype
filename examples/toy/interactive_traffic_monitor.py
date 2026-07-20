@@ -112,7 +112,7 @@ async def main() -> None:
     graph = build_interactive_monitor()
 
     # 1. Runs autonomously: sample -> classify, repeatedly.
-    await ExecutableGraphOperations.execute_graph(graph, max_transitions=6)
+    await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=6)
 
     # 2. The user "throws a switch" -- inject an arbitrary high level. In the
     #    Petri app this append is the runtime inject handler; here the driver
@@ -121,7 +121,7 @@ async def main() -> None:
 
     # 3. Next fires: the injection is handled FIRST (priority selector), then
     #    classified -- so the override takes effect immediately, no preemption.
-    await ExecutableGraphOperations.execute_graph(graph, max_transitions=2)
+    await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2)
 
     print("\nLog:")
     for entry in graph.place_named("Log").tokens:

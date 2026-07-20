@@ -58,6 +58,10 @@ def _marimo_notebooks() -> list[Path]:
 # it gained a cycle — either way, worth a look before updating the number.
 # (parcel_distribution is perpetual and rooms is user-driven, so they are smoke-tested only.)
 _FIRING_NOTEBOOKS = [
+    (EXAMPLES_DIR / "caching" / "execution_subgraph.py", 3),
+    (EXAMPLES_DIR / "caching" / "relationship_and_execution_graphs.py", 18),
+    (EXAMPLES_DIR / "illustrations" / "hypothetical_web_scrape.py", 10),
+    (EXAMPLES_DIR / "time_series_stats" / "stats_executable_graph.py", 5),
     (EXAMPLES_DIR / "toy" / "distribution_function" / "01_coloured_balls.py", 9),
     (EXAMPLES_DIR / "toy" / "match_up_tokens" / "01_match_lengths.py", 3),
     (EXAMPLES_DIR / "toy" / "match_up_tokens" / "02_move_unmatched.py", 4),
@@ -69,6 +73,11 @@ _FIRING_NOTEBOOKS = [
 # Where the ending is the point of the example, pin the terminal marking as well: the right
 # number of steps could still leave tokens in the wrong places.
 _EXPECTED_TERMINAL_MARKINGS = {
+    # Each key resolves once: c_0 from the warm cache (hit), a_0 and e_0 from the DB (miss).
+    "execution_subgraph.py": {
+        "KeyInput": [],
+        "FinalOutput": [("a_0", "A_10"), ("c_0", "C_1"), ("e_0", "E_13")],
+    },
     "returning_empty_list.py": {
         "Input Number": [],
         "Integer Lists": [],
@@ -83,6 +92,12 @@ def _notebook_id(path: Path) -> str:
 
 def _load_notebook(path: Path):
     """Import a notebook by file path (names start with digits, so not importable by name)."""
+    # Marimo puts a notebook's own directory on sys.path at runtime, so notebooks import
+    # sibling domain modules by bare name (e.g. `from hypothetical_caching import ...`).
+    # app.run() here doesn't replicate that, so mirror it for the sibling import to resolve.
+    parent = str(path.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
     spec = importlib.util.spec_from_file_location(f"_nb_{abs(hash(str(path)))}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

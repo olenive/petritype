@@ -65,7 +65,7 @@ graph = ExecutableGraphOperations.construct_graph([
 
 # 3. Execute
 graph, fired = asyncio.run(
-    ExecutableGraphOperations.execute_graph(graph, max_transitions=3)
+    ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
 )
 
 print(graph.place_named('Output').tokens)  # [6, 4, 2]
@@ -86,6 +86,21 @@ ListPlaceNode('Labels', str, ['cat', 'dog'])     # only accepts str tokens
 
 Type matching also governs output routing: when a transition has multiple output places, the result is sent to the place whose type matches.
 
+### Failure semantics
+
+If a transition body raises, the firing fails with `TransitionFailedError`. The tokens it consumed are **not** put back: the body may have mutated them before failing, and a place should never silently hold corrupted tokens — a visible loss beats invisible corruption. The consumed tokens ride along on the error:
+
+```python
+try:
+    await ExecutableGraphOperations.execute_graph(graph)
+except TransitionFailedError as e:
+    e.transition_name   # 'Charge Card'
+    e.consumed          # {'order': <the consumed token>}
+    e.__cause__         # the original exception
+```
+
+*Expected* failures are the body's job: catch them and return an error token, and type-based routing (e.g. `-> Receipt | FailedOrder`) delivers it to an error-handling place. If your tokens are immutable or bodies don't mutate them before failing, `restore_tokens_on_failure=True` (on `construct_graph` or per `execute_graph` call) opts into putting consumed tokens back.
+
 ### Async execution
 
 Transition functions can be `async`. The execution loop handles both sync and async functions transparently.
@@ -99,34 +114,39 @@ async def fetch(url: str) -> str:
 FunctionTransitionNode('Fetch', fetch)
 ```
 
-### Transition selectors and activation functions
+### Guards, priorities, and transition selectors
 
-Control which transition fires next with pluggable selectors. Attach activation functions to individual transitions for guards, priorities, or context-aware logic.
+Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
+
+- **`guard`** — an enabling condition the engine enforces in every execution mode: a transition whose guard returns `False` is not enabled, regardless of available tokens. Guards run on every enabled-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
+- **`priority`** — a selection hint: the default selector fires the highest-priority enabled transition. Unset scores `0.0`; ties fall back to definition order.
 
 ```python
-# Activation function: only fire when pool has enough items
-def batch_ready(graph):
+# Guard: BatchProcess is not enabled until the pool is full
+def batch_ready(graph) -> bool:
     return len(graph.place_named('Pool').tokens) >= 10
 
-FunctionTransitionNode(
-    'BatchProcess', batch_process,
-    activation_function=batch_ready,
-)
+# Priority: drain the longest queue first
+def queue_pressure(graph) -> float:
+    return len(graph.place_named('Queue').tokens)
 
-# Selector: fire highest-priority enabled transition
-def priority_selector(graph, enabled):
-    def get_priority(t):
-        return t.activation_function() if t.activation_function else 0.0
-    return max(enabled, key=get_priority) if enabled else None
-
-graph.transition_selector = priority_selector
+FunctionTransitionNode('BatchProcess', batch_process, guard=batch_ready)
+FunctionTransitionNode('Drain', drain, priority=queue_pressure)
 ```
 
-See [TRANSITION_SELECTION.md](TRANSITION_SELECTION.md) for guard-based, round-robin, bottleneck-aware, and other selector patterns.
+For full control over what fires next, replace the selector itself — a function from the enabled transitions to the one to fire:
+
+```python
+graph.transition_selector = my_selector   # (graph, enabled) -> transition or None
+```
+
+The older `activation_function` field is deprecated: the engine never consulted it, so use `guard` or `priority` instead. It remains visible to custom selectors until removed.
+
+See [dev-docs/TRANSITION_SELECTION.md](dev-docs/TRANSITION_SELECTION.md) for round-robin, bottleneck-aware, and other selector patterns.
 
 ### Visualisation
 
-Built-in Graphviz rendering shows the graph structure, types, and current token state. In Jupyter, you can step through execution with animated visualisation.
+Built-in Graphviz rendering shows the graph structure, types, and current token state — including read arcs (dashed) and, in concurrent runs, in-flight transitions highlighted while their bodies run. The example notebooks (marimo) step through and animate execution live.
 
 ```python
 from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
@@ -178,6 +198,22 @@ def summarise(items: list[str]) -> str:
 ArgumentEdgeToTransition('Items', 'Summarise', 'items')
 ```
 
+### Read arcs — non-consuming reads
+
+A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present to enable the transition, but firing never consumes it:
+
+- **`SnapshotEdge`** — the transition receives a deep-copy; the place is untouched.
+- **`MutateEdge`** — the transition receives the live tokens and may modify them in place.
+
+```python
+from petritype.core.executable_graph_components import SnapshotEdge, MutateEdge
+
+SnapshotEdge('Multiplier', 'Scale', 'factor')   # Scale reads Multiplier, never consumes it
+MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in place
+```
+
+Read arcs render dashed, distinct from the solid consuming / producing arrows.
+
 ### Decorator for registration
 
 Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.
@@ -195,6 +231,27 @@ def health_check() -> ExecutableGraph:
 ```
 
 Modes: `manual` (default), `24/7` (continuous), `batch` (run once), `cron` (scheduled).
+
+## Runtime — observable, interactive nets
+
+Beyond running a net to completion, `petritype.runtime` turns a net into a **live object you can watch and poke while it runs** — for monitoring, real-time simulations, or interactive tools. The graph is the single source of truth; a `Runner` (a set of functions, no objects to construct) drives it via a passive `RunContext` the caller owns.
+
+```python
+from petritype.runtime import Runner, RunContext, ExecutionMode, Extend
+
+ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT, observers=(render,))
+await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefinitely(ctx, tick=0.1)
+```
+
+- **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs independent transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes.
+- **Observation** — `observers` are plain callables handed the *live graph* after each state change, so any renderer (a marimo notebook, a web frontend) can redraw at its own pace. In-flight transitions are exposed via `graph.in_flight`, so a renderer could for example highlight them by changing their colour while their bodies run. To know *what fired since you last looked*, snapshot `graph.fired_counts` and diff it at the next notification with `fired_since(previous, current)` — lossless in every mode, unlike `graph.last_fired`, which names only one completion per concurrent batch.
+- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` (transitions). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
+- **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
+- **Limits** — `Runner.run(ctx, stop_after_n_firings=N)` paces: it always returns a `RunSummary` whose `quiesced` flag tells "stopped by the limit, call again to continue" from "nothing left to fire". `RunContext.error_after_n_firings` is a run-wide fuse for nets that should quiesce quickly: `TooManyFiringsError` is raised *before* the net fires past it (a net that fires exactly n and quiesces is fine).
+- **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
+- **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox.
+
+Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler) — open with `uv run --extra examples marimo edit <notebook>`.
 
 ## When to Use This
 

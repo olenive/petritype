@@ -91,7 +91,7 @@ def test_distribution_populates_every_destination():
     though the same object reference was routed to two of them."""
     graph = _build_fanout_graph()
     graph, fired = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
     )
     assert fired == 1
     assert _place(graph, "SpanSource").tokens == []
@@ -131,7 +131,7 @@ def test_distributor_single_destination_with_copying():
     ], allow_token_copying=True)
 
     graph, fired = asyncio.run(
-        ExecutableGraphOperations.execute_graph(graph, max_transitions=1)
+        ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
     )
     assert fired == 1
     out = _place(graph, "Out").tokens
