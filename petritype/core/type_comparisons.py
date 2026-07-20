@@ -1,6 +1,5 @@
 from typing import Any, Type, Union, get_origin, get_args, TypeAliasType
 from types import UnionType
-from typeguard import check_type, TypeCheckError
 
 
 class CompareTypes:

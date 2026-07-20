@@ -13,9 +13,10 @@ Layers built so far:
 - **Real-time (#6):** `run_indefinitely` drives the net on an internal clock until `stop` is
   set, draining input each tick and surviving idle ticks (it never stops just because nothing
   is enabled).
-
-Still to attach (see `PROPOSED_DESIGN_GOALS.md`): offloaded transition bodies
-(`execution = inline | thread`, #8) and read arcs (#10).
+- **Offloaded bodies (#8):** a synchronous transition marked `execution="thread"` runs on a
+  thread-pool executor instead of the event loop, so blocking user code can't stall the runner.
+- **Read arcs (#10):** a transition can read a place's tokens as an argument without consuming
+  them (`transition_names_to_read_edges`).
 
 Design notes realised here:
 - **Functional, no `__init__`:** `Runner` is a namespace class of functions (matching
