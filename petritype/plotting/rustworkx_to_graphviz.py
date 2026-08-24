@@ -8,7 +8,7 @@ from petritype.core.executable_graph_components import ExecutableGraph, Function
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
-from petritype.core.rustworkx_graph import (
+from petritype.plotting.rustworkx_graph import (
     RustworkxArgumentEdgeData, RustworkxGraph, RustworkxReadEdgeData, RustworkxReturnedEdgeData
 )
 from petritype.helpers.structures import SafeMerge

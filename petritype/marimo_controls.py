@@ -5,10 +5,16 @@ it into a single reactive ``mo.ui.dictionary`` of widgets, lays them out, and dr
 controls into the runtime's inbox via :func:`petritype.runtime.apply_control`. The widgets only
 ever *produce commands* — they never touch the graph.
 
-Marimo-specific — import only where marimo is available (the ``examples`` extra).
+Marimo-specific — import only where marimo is available (the ``marimo`` extra).
 """
 
-import marimo as mo
+try:
+    import marimo as mo
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on install extras
+    raise ModuleNotFoundError(
+        "petritype.marimo_controls requires marimo. "
+        "Install it with: pip install 'petritype[marimo]'"
+    ) from exc
 
 from petritype.runtime import ControlSpec, RunContext, apply_control
 

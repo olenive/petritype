@@ -13,30 +13,37 @@ Petritype is an experimental tool inspired by Petri nets, designed for prototypi
 - **Core Logic**: Located in `petritype/core/`, including modules like:
   - `ast_extraction.py`: Handles abstract syntax tree operations.
   - `data_structures.py`: Defines key data structures.
-  - `type_relationship_graph_components.py`: Manages type relationships.
+  - `executable_graph_components.py`: The engine — graph construction, firing, validation.
+  - `runtime.py` (top level): Runner / RunContext for observable, interactive nets.
 - **Helpers**: Utility functions in `petritype/helpers/`.
-- **Visualization**: Graph rendering tools in `petritype/core/visualization/`.
-- **Examples**: Demonstrations in `examples/`.
-- **Tests**: Unit tests in `test/`.
+- **Visualization**: Graph rendering in `petritype/plotting/` (needs the `viz` extra).
+- **Examples**: marimo notebooks in `examples/`.
+- **Tests**: Unit tests in `tests/`.
 
 ## Developer Workflows
 
 ### Building the Project
-- Use `setup.py` for packaging and installation.
-- Install dependencies from `requirements.txt`:
+- Packaging uses the `uv_build` backend; there is no `setup.py` or `requirements.txt`.
+- Sync dependencies (extras: `dev`, `viz`, `marimo`, `examples`):
   ```bash
-  pip install -r requirements.txt
+  uv sync --extra dev --extra examples
+  ```
+- Build distributions:
+  ```bash
+  uv build
   ```
 
 ### Running Tests
-- Tests are organized by module in the `test/` directory.
-- Run all tests:
+- Tests live in `tests/`. Run them from the repository root: some fixtures
+  resolve paths relative to the process working directory.
+- Run the unit suite:
   ```bash
-  pytest
+  uv run --extra dev pytest
   ```
-- Run specific tests, e.g., for `data_structures.py`:
+- The marimo notebook suite is deselected by default and needs the `examples`
+  extra plus the Graphviz `dot` binary:
   ```bash
-  pytest test/core/test_data_structures.py
+  uv run --extra dev --extra examples pytest -m notebooks
   ```
 
 ### Debugging
@@ -50,7 +57,7 @@ Petritype is an experimental tool inspired by Petri nets, designed for prototypi
 - **Edge Direction**: While edges are directed, transitions can affect both input and output places.
 
 ## Integration Points
-- **Visualization**: Use `rustworkx_to_graphviz.py` for rendering graphs.
+- **Visualization**: Use `petritype/plotting/rustworkx_to_graphviz.py` for rendering graphs.
 - **External Dependencies**: Key libraries include `rustworkx` for graph operations and `graphviz` for visualization.
 
 ## Examples

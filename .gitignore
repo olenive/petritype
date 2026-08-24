@@ -5,6 +5,8 @@ __pycache__
 .ipynb_checkpoints/
 __marimo__/
 build
+dist
+*.egg-info
 
 # Editor
 .vscode

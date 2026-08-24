@@ -50,7 +50,7 @@ def _():
         ListPlaceNode,
         ReturnedEdgeFromTransition,
     )
-    from petritype.core.rustworkx_graph import RustworkxGraph
+    from petritype.plotting.rustworkx_graph import RustworkxGraph
     from petritype.marimo_controls import build_controls, controls_row, drain_controls
     from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
     from petritype.runtime import ControlSpec, Disable, Enable, Extend, RunContext, Runner, SetTokens

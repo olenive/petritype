@@ -46,7 +46,7 @@ def _():
         ListPlaceNode,
         ReturnedEdgeFromTransition,
     )
-    from petritype.core.rustworkx_graph import RustworkxGraph
+    from petritype.plotting.rustworkx_graph import RustworkxGraph
     from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
 
     return (

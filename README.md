@@ -6,7 +6,7 @@ Petritype turns [Petri nets](https://en.wikipedia.org/wiki/Petri_net) into a pra
 
 *Early stage — contributions and feedback welcome.*
 
-<p align="center"><img src="images/docs/illustrations/readme_example/animation.gif" alt="Pipeline animation" width="380"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/olenive/petritype/main/images/docs/illustrations/readme_example/animation.gif" alt="Pipeline animation" width="380"></p>
 
 ## Core Idea
 
@@ -49,7 +49,7 @@ graph, fired = asyncio.run(
     ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
 )
 
-print(graph.place_named('Output').tokens)  # [6, 4, 2]
+print(graph.place_named('Output').tokens)  # [2, 4, 6]
 ```
 
 `construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find enabled transitions, select one, fire it, repeat.
@@ -127,9 +127,12 @@ graph.transition_selector = my_selector   # (graph, enabled) -> transition or No
 
 The older `activation_function` field is deprecated: the engine never consulted it, so use `guard` or `priority` instead. It remains visible to custom selectors until removed.
 
-See [dev-docs/TRANSITION_SELECTION.md](dev-docs/TRANSITION_SELECTION.md) for round-robin, bottleneck-aware, and other selector patterns.
+A selector is just a callable over the enabled transitions, so round-robin, bottleneck-aware and other policies are a few lines each.
 
 ### Visualisation
+
+> Needs the `viz` extra: `pip install 'petritype[viz]'`, plus the Graphviz `dot`
+> binary on your PATH (`brew install graphviz` / `apt install graphviz`).
 
 Built-in Graphviz rendering shows the graph structure, types, and current token state — including read arcs (dashed) and, in concurrent runs, in-flight transitions highlighted while their bodies run. The example notebooks (marimo) step through and animate execution live.
 
@@ -139,7 +142,7 @@ from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
 # Static graph image
 SimpleGraphvizVisualization.graph(graph)
 
-# Step-by-step animation in Jupyter
+# Step-by-step animation in a notebook
 async for step in SimpleGraphvizVisualization.animate_execution_generator(graph):
     display(step)
 ```
@@ -234,7 +237,7 @@ await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefin
 - **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
 - **Limits** — `Runner.run(ctx, stop_after_n_firings=N)` paces: it always returns a `RunSummary` whose `quiesced` flag tells "stopped by the limit, call again to continue" from "nothing left to fire". `RunContext.error_after_n_firings` is a run-wide fuse for nets that should quiesce quickly: `TooManyFiringsError` is raised *before* the net fires past it (a net that fires exactly n and quiesces is fine).
 - **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
-- **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox.
+- **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox (needs the `marimo` extra: `pip install 'petritype[marimo]'`).
 
 Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler) — open with `uv run --extra examples marimo edit <notebook>`.
 
@@ -264,23 +267,36 @@ What makes Petri nets powerful is that they can model concurrency, synchronisati
 
 Petritype builds on this foundation by making places typed (so tokens must match a declared Python type) and making transitions executable (so they call real functions). The result is a system where the Petri net is not just a model of your process — it *is* your process.
 
-<!-- ## Installation
-
+## Installation
 
 ```bash
 pip install petritype
-``` 
+```
 
-Install with uv
+Or with [uv](https://docs.astral.sh/uv/):
 
--->
+```bash
+uv add petritype
+```
 
-Requires Python 3.14+.
+Requires Python 3.12+. The base install is deliberately light — `pydantic` only.
+Optional features live behind extras:
 
-<!-- ## Examples
+| Extra | Provides | Install |
+| --- | --- | --- |
+| `viz` | Graphviz rendering (`petritype.plotting`) | `pip install 'petritype[viz]'` |
+| `marimo` | Interactive notebook controls (`petritype.marimo_controls`) | `pip install 'petritype[marimo]'` |
+| `examples` | Everything needed to run the example notebooks | `pip install 'petritype[examples]'` |
 
-See the [`examples/`](examples/) directory:
+The `viz` extra also needs the Graphviz `dot` binary on your PATH
+(`brew install graphviz` / `apt install graphviz`).
+
+## Examples
+
+See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) directory:
 
 - **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
 - **ML Training** — multi-step model training pipeline with evaluation and retraining loops
-- **Time Series** — statistical processing of time series data -->
+- **Time Series** — statistical processing of time series data
+
+Open one with `uv run --extra examples marimo edit <notebook>`.

@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustworkx.visualization.graphviz_draw shells out to `dot`; the notebook
+      # tests assert on the PNG bytes it produces, so the binary is required.
+      - name: Install Graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync
+        run: uv sync --python ${{ matrix.python }} --extra dev --extra examples
+
+      # Run from the repo root: tests/helpers/io resolves fixture paths
+      # relative to the process cwd, not to __file__.
+      - name: Unit tests
+        run: uv run --python ${{ matrix.python }} pytest -q
+
+      - name: Notebook tests
+        run: uv run --python ${{ matrix.python }} pytest -m notebooks -q
+
+  package:
+    name: build + install check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Build
+        run: uv build --out-dir dist
+
+      - name: Validate metadata
+        run: uvx twine check --strict dist/*
+
+      # A base install must work with pydantic alone. This is the regression
+      # guard for dependency drift: if a core module grows an import that is
+      # only declared in an extra, this fails here rather than for a user.
+      - name: Base install imports (no extras)
+        run: |
+          uv venv /tmp/base --python 3.12
+          uv pip install --python /tmp/base/bin/python dist/*.whl
+          cd /tmp   # never import from the repo root, or the source tree shadows the install
+          /tmp/base/bin/python - <<'PY'
+          import importlib
+          for mod in [
+              "petritype",
+              "petritype.runtime",
+              "petritype.decorator",
+              "petritype.core.executable_graph_components",
+              "petritype.core.data_structures",
+              "petritype.core.type_comparisons",
+              "petritype.core.ast_extraction",
+              "petritype.core.parse_modules",
+              "petritype.core.relationship_graph_components",
+              "petritype.core.descriptions",
+              "petritype.helpers.structures",
+              "petritype.helpers.io.io_helper",
+          ]:
+              importlib.import_module(mod)
+          from petritype import petri_net  # public API re-export
+          print("base install OK")
+          PY
+
+      - name: viz extra imports
+        run: |
+          uv venv /tmp/viz --python 3.12
+          WHEEL="$(ls "$PWD"/dist/*.whl)"
+          uv pip install --python /tmp/viz/bin/python "petritype[viz] @ file://${WHEEL}"
+          cd /tmp
+          /tmp/viz/bin/python -c "
+          import petritype.plotting.rustworkx_graph
+          import petritype.plotting.rustworkx_to_graphviz
+          import petritype.plotting.simple_graphviz
+          print('viz extra OK')
+          "
+
+      - name: Quickstart runs
+        run: |
+          cd /tmp
+          /tmp/base/bin/python - <<'PY'
+          import asyncio
+          from petritype.core.executable_graph_components import (
+              ExecutableGraphOperations, FunctionTransitionNode, ListPlaceNode,
+              ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
+          )
+          def double(x: int) -> int:
+              return x * 2
+          graph = ExecutableGraphOperations.construct_graph([
+              ListPlaceNode('Input', int, [1, 2, 3]),
+              ArgumentEdgeToTransition('Input', 'Double', 'x'),
+              FunctionTransitionNode('Double', double),
+              ReturnedEdgeFromTransition('Double', 'Output'),
+              ListPlaceNode('Output', int),
+          ])
+          graph, fired = asyncio.run(
+              ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
+          )
+          tokens = graph.place_named('Output').tokens
+          assert sorted(tokens) == [2, 4, 6], tokens
+          print("quickstart OK:", tokens)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

@@ -1,13 +1,34 @@
 [project]
 name = "petritype"
 version = "0.1.0"
-description = "Add your description here"
+description = "Typed, executable, visual Petri nets in Python."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE-MIT"]
+authors = [{ name = "Oleg Lenive", email = "oleg@manifold-exp.com" }]
+keywords = [
+    "petri-net",
+    "workflow",
+    "pipeline",
+    "dataflow",
+    "concurrency",
+    "type-checking",
+    "visualisation",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
-    "imageio>=2.37.2",
     "pydantic>=2.12.5",
-    "typeguard>=4.4.4",
 ]
 
 [project.optional-dependencies]
@@ -15,11 +36,25 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
 ]
-examples = [
-    "marimo>=0.23.9",
+# Graph rendering: petritype.plotting.*. Also needs the Graphviz `dot` binary
+# on PATH (e.g. `brew install graphviz` / `apt install graphviz`).
+viz = [
     "matplotlib>=3.11.0",
     "rustworkx>=0.18.0",
 ]
+# Interactive notebook controls: petritype.marimo_controls.
+marimo = [
+    "marimo>=0.23.9",
+]
+examples = [
+    "petritype[viz]",
+    "petritype[marimo]",
+]
+
+[project.urls]
+Homepage = "https://github.com/olenive/petritype"
+Repository = "https://github.com/olenive/petritype"
+Issues = "https://github.com/olenive/petritype/issues"
 
 [tool.pytest.ini_options]
 # The single test suite lives in tests/. Pinned so collection can't silently pick up
@@ -33,8 +68,10 @@ markers = [
 addopts = "-m 'not notebooks'"
 
 [build-system]
-requires = ["setuptools>=80"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-include = ["petritype*"]
+[tool.uv.build-backend]
+# Flat layout: the package sits at the repo root, not under src/.
+module-root = ""
+module-name = "petritype"

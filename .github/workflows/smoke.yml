@@ -1,0 +1,131 @@
+name: PyPI smoke test
+
+# Installs petritype the way a user would -- from PyPI, with no repo
+# checkout -- and exercises it. Runs after a release, weekly, and on demand.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Tag or version to require (e.g. v0.1.0). Empty means latest."
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag or version to require (e.g. v0.1.0). Empty means latest."
+        type: string
+        required: false
+        default: ""
+  schedule:
+    # Mondays 06:00 UTC. Catches a dependency release that breaks us.
+    - cron: "0 6 * * 1"
+
+jobs:
+  install:
+    name: pip install petritype (py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Deliberately no actions/checkout: this must prove the published
+      # artifact stands alone, with no source tree to fall back on.
+      - name: Install from PyPI
+        shell: bash
+        run: |
+          SPEC="petritype"
+          RAW="${{ inputs.version }}"
+          if [ -n "$RAW" ]; then SPEC="petritype==${RAW#v}"; fi
+          # A freshly published release takes a moment to reach the CDN.
+          for i in 1 2 3 4 5 6; do
+            if pip install "$SPEC"; then break; fi
+            echo "not installable yet, retrying in 20s ($i/6)"
+            sleep 20
+          done
+          pip show petritype
+
+      - name: Base install imports
+        shell: bash
+        run: |
+          python -c "
+          from petritype import petri_net
+          import petritype.runtime
+          import petritype.core.executable_graph_components
+          import petritype.core.type_comparisons
+          print('imports OK')
+          "
+
+      - name: Quickstart produces the documented result
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          from petritype.core.executable_graph_components import (
+              ExecutableGraphOperations, FunctionTransitionNode, ListPlaceNode,
+              ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
+          )
+
+          def double(x: int) -> int:
+              return x * 2
+
+          graph = ExecutableGraphOperations.construct_graph([
+              ListPlaceNode('Input', int, [1, 2, 3]),
+              ArgumentEdgeToTransition('Input', 'Double', 'x'),
+              FunctionTransitionNode('Double', double),
+              ReturnedEdgeFromTransition('Double', 'Output'),
+              ListPlaceNode('Output', int),
+          ])
+          graph, fired = asyncio.run(
+              ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
+          )
+          tokens = graph.place_named('Output').tokens
+          assert sorted(tokens) == [2, 4, 6], f"unexpected tokens: {tokens}"
+          assert fired == 3, f"expected 3 firings, got {fired}"
+          print("quickstart OK:", tokens)
+          PY
+
+  install-viz:
+    name: pip install petritype[viz]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: Install from PyPI
+        shell: bash
+        run: |
+          SPEC="petritype[viz]"
+          RAW="${{ inputs.version }}"
+          if [ -n "$RAW" ]; then SPEC="petritype[viz]==${RAW#v}"; fi
+          for i in 1 2 3 4 5 6; do
+            if pip install "$SPEC"; then break; fi
+            echo "not installable yet, retrying in 20s ($i/6)"
+            sleep 20
+          done
+
+      - name: Rendering imports and draws
+        shell: bash
+        run: |
+          python -c "
+          import petritype.plotting.simple_graphviz
+          import petritype.plotting.rustworkx_to_graphviz
+          import petritype.plotting.rustworkx_graph
+          from rustworkx import PyDiGraph
+          from rustworkx.visualization import graphviz_draw
+          g = PyDiGraph(); a = g.add_node('a'); b = g.add_node('b'); g.add_edge(a, b, None)
+          img = graphviz_draw(g, node_attr_fn=lambda n: {'label': str(n)})
+          assert img is not None
+          print('viz extra OK, dot reachable')
+          "

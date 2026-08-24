@@ -21,7 +21,7 @@ from petritype.core.executable_graph_components import (
     ListPlaceNode,
     ReturnedEdgeFromTransition,
 )
-from petritype.core.rustworkx_graph import RustworkxGraph
+from petritype.plotting.rustworkx_graph import RustworkxGraph
 
 STEP_SECONDS = 0.4
 

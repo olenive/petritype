@@ -49,7 +49,7 @@ def _():
         ReturnedEdgeFromTransition,
         SnapshotEdge,
     )
-    from petritype.core.rustworkx_graph import RustworkxGraph
+    from petritype.plotting.rustworkx_graph import RustworkxGraph
     from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
     from petritype.runtime import Extend, RunContext, Runner, SetTokens
 
