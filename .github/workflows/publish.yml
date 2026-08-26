@@ -76,11 +76,13 @@ jobs:
       # friends) must still be resolved from PyPI proper.
       - name: Install and import
         run: |
+          SPEC="petritype"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then SPEC="petritype==${GITHUB_REF_NAME#v}"; fi
           for i in 1 2 3 4 5 6; do
             if pip install \
                  --index-url https://test.pypi.org/simple/ \
                  --extra-index-url https://pypi.org/simple/ \
-                 "petritype==${GITHUB_REF_NAME#v}"; then
+                 "$SPEC"; then
               break
             fi
             echo "not visible yet, retrying in 20s ($i/6)"
@@ -96,6 +98,9 @@ jobs:
   pypi:
     name: publish to PyPI
     needs: verify-testpypi
+    # Tag-only. A manual workflow_dispatch stops after the TestPyPI rehearsal
+    # above, so it can be used as a dry run without touching PyPI.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
