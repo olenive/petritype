@@ -1,8 +1,8 @@
 name: Publish
 
-# Tag-driven release. PyPI version numbers are immutable and cannot be
-# reused, so this goes to TestPyPI first, installs from there, and only
-# then uploads to PyPI.
+# Tag-driven release. PyPI version numbers are immutable and cannot be reused,
+# so this rehearses on TestPyPI first, verifies the artifact this run built is
+# installable from there, and only then uploads to PyPI.
 #
 # Setup required once, by the repo owner, before this can work:
 #   1. https://pypi.org/manage/account/publishing/      -> add a trusted publisher
@@ -11,6 +11,11 @@ name: Publish
 #      environment: pypi  (and testpypi respectively)
 #   3. Create the two GitHub environments under Settings -> Environments.
 # No API tokens are needed; auth is OIDC.
+#
+# Dry runs: a manual workflow_dispatch NEVER reaches PyPI, whatever ref is
+# selected. The gate is on the event, not the ref, because the Actions ref
+# picker also lists tags -- a ref-only gate would let a dispatch on a tag
+# publish for real.
 
 on:
   push:
@@ -25,6 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-suffix: publish
 
       - name: Tag matches project version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -44,6 +50,7 @@ jobs:
         with:
           name: dist
           path: dist/
+          retention-days: 7
 
   testpypi:
     name: publish to TestPyPI
@@ -57,14 +64,20 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # Pinned to a commit (v1.14.2). This action holds id-token: write, so a
+      # mutable branch ref would let the credential-exchange code change with
+      # no diff here. Dependabot keeps the pin current.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           repository-url: https://test.pypi.org/legacy/
-          # A re-run of the same version should not hard-fail the release.
+          # TestPyPI filenames are immutable, so a re-run (or an earlier dry
+          # run that burned this version) must not hard-fail. Safe only
+          # because the verify job below checks provenance rather than
+          # trusting that this upload actually happened.
           skip-existing: true
 
   verify-testpypi:
-    name: install from TestPyPI
+    name: verify artifact on TestPyPI
     needs: testpypi
     runs-on: ubuntu-latest
     steps:
@@ -72,22 +85,60 @@ jobs:
         with:
           python-version: "3.12"
 
-      # TestPyPI does not mirror the real index, so dependencies (pydantic and
-      # friends) must still be resolved from PyPI proper.
-      - name: Install and import
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Fetch the wheel back from TestPyPI and check it is byte-identical to
+      # the one this run built. That is what makes two failure modes
+      # impossible rather than merely unlikely:
+      #   - resolving petritype from real PyPI (pip treats --index-url and
+      #     --extra-index-url as equal priority, so once petritype exists on
+      #     PyPI an index-based install could silently verify the wrong file);
+      #   - validating a stale artifact that an earlier dry run left on
+      #     TestPyPI under this version number, which skip-existing above
+      #     would have quietly declined to overwrite.
+      - name: Fetch this build back from TestPyPI and compare
         run: |
-          SPEC="petritype"
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then SPEC="petritype==${GITHUB_REF_NAME#v}"; fi
+          set -euo pipefail
+          WHEEL="$(ls dist/*.whl)"
+          VER="$(basename "$WHEEL" | cut -d- -f2)"
+          echo "verifying petritype==$VER"
+
+          ok=""
           for i in 1 2 3 4 5 6; do
-            if pip install \
+            if pip download --no-deps \
                  --index-url https://test.pypi.org/simple/ \
-                 --extra-index-url https://pypi.org/simple/ \
-                 "$SPEC"; then
-              break
+                 --dest fetched "petritype==${VER}"; then
+              ok=1; break
             fi
-            echo "not visible yet, retrying in 20s ($i/6)"
+            echo "not visible on TestPyPI yet, retrying in 20s ($i/6)"
             sleep 20
           done
+          # A bare retry loop exits 0 when every attempt failed (its status is
+          # the last `sleep`), so failure has to be raised explicitly.
+          if [ -z "$ok" ]; then
+            echo "::error::petritype==$VER not installable from TestPyPI after 6 attempts"
+            exit 1
+          fi
+
+          FETCHED="$(ls fetched/*.whl)"
+          if ! cmp -s "$WHEEL" "$FETCHED"; then
+            echo "::error::TestPyPI wheel differs from the one built in this run."
+            echo "built:   $(sha256sum "$WHEEL")"
+            echo "fetched: $(sha256sum "$FETCHED")"
+            echo "A previous run almost certainly uploaded this version already."
+            exit 1
+          fi
+          echo "artifact matches this run's build"
+
+      # Dependencies come from real PyPI; the petritype file itself is the one
+      # just fetched from TestPyPI.
+      - name: Install the fetched artifact and import it
+        run: |
+          set -euo pipefail
+          pip install fetched/*.whl
           cd /tmp
           python -c "
           from petritype import petri_net
@@ -98,9 +149,9 @@ jobs:
   pypi:
     name: publish to PyPI
     needs: verify-testpypi
-    # Tag-only. A manual workflow_dispatch stops after the TestPyPI rehearsal
-    # above, so it can be used as a dry run without touching PyPI.
-    if: github.ref_type == 'tag'
+    # Event-gated, not ref-gated: workflow_dispatch can be run against a tag,
+    # so `ref_type == 'tag'` would not keep a dry run away from the real index.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -110,7 +161,15 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          # twine uploads the wheel and sdist as separate requests, so a
+          # transient failure between them can leave the release half-uploaded.
+          # PyPI rejects any re-upload of an existing filename, which would
+          # wedge every re-run and stop `smoke` from ever running for this tag.
+          # Re-running reuses the same dist artifact, so anything skipped here
+          # is byte-identical to what is already published.
+          skip-existing: true
 
   smoke:
     name: post-publish smoke test

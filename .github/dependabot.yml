@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keeps action pins current -- in particular the commit-pinned
+  # pypa/gh-action-pypi-publish in publish.yml, which holds id-token: write.
+  # A pinned SHA is only a safety gain if something bumps it.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
