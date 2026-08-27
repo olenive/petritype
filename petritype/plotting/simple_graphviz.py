@@ -3,8 +3,16 @@ Simple Graphviz Visualization used in examples.
 """
 
 import time
-import matplotlib.pyplot as plt
-from rustworkx.visualization import graphviz_draw
+
+from petritype._optional import require
+
+require("rustworkx", "viz")
+require("matplotlib", "viz")
+
+# Guarded imports: these must follow require() so an absent extra is reported
+# with the install hint rather than a bare ModuleNotFoundError.
+import matplotlib.pyplot as plt  # noqa: E402
+from rustworkx.visualization import graphviz_draw  # noqa: E402
 
 from petritype.core.executable_graph_components import (
     ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition,

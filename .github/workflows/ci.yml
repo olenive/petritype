@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # Markdown is deliberately NOT ignored: the unit suite checks README.md
+    # against examples/quickstart.py, so a docs-only edit can break a test.
+    paths-ignore: ["images/**"]
   pull_request:
+    paths-ignore: ["images/**"]
   workflow_dispatch:
 
 concurrency:

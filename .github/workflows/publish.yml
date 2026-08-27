@@ -43,6 +43,24 @@ jobs:
           fi
           echo "tag and version agree: $VER"
 
+      # The long description is frozen into the release, but its raw URLs point
+      # at /main/. Moving images/ later would retroactively break every
+      # published page, so pin them to this tag before building. Only for tag
+      # pushes -- dispatch rehearsals keep /main/ and never reach PyPI.
+      - name: Pin README raw URLs to the release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          before="$(grep -c 'raw.githubusercontent.com/olenive/petritype/main/' README.md || true)"
+          sed -i "s|raw.githubusercontent.com/olenive/petritype/main/|raw.githubusercontent.com/olenive/petritype/${GITHUB_REF_NAME}/|g" README.md
+          sed -i "s|github.com/olenive/petritype/tree/main/|github.com/olenive/petritype/tree/${GITHUB_REF_NAME}/|g" README.md
+          after="$(grep -c "raw.githubusercontent.com/olenive/petritype/${GITHUB_REF_NAME}/" README.md || true)"
+          echo "pinned $before raw URL(s) to ${GITHUB_REF_NAME}; now $after"
+          if [ "$before" != "$after" ]; then
+            echo "::error::README URL pinning did not rewrite every occurrence"
+            exit 1
+          fi
+
       - run: uv build --out-dir dist
       - run: uvx twine check --strict dist/*
 

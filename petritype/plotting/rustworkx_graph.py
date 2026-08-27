@@ -1,6 +1,10 @@
 from typing import Optional, Union, Sequence, Iterable
 
 from pydantic import BaseModel
+from petritype._optional import require
+
+require("rustworkx", "viz")
+
 from rustworkx import PyDiGraph
 
 from petritype.core.data_structures import (

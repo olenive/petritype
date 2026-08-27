@@ -1,4 +1,8 @@
 from typing import Callable, Sequence, Union
+from petritype._optional import require
+
+require("rustworkx", "viz")
+
 from rustworkx import NodeIndices, PyDiGraph
 
 from petritype.core.data_structures import (
