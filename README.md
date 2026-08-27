@@ -137,14 +137,20 @@ A selector is just a callable over the enabled transitions, so round-robin, bott
 Built-in Graphviz rendering shows the graph structure, types, and current token state — including read arcs (dashed) and, in concurrent runs, in-flight transitions highlighted while their bodies run. The example notebooks (marimo) step through and animate execution live.
 
 ```python
+from petritype.plotting.rustworkx_graph import RustworkxGraph
 from petritype.plotting.simple_graphviz import SimpleGraphvizVisualization
 
-# Static graph image
-SimpleGraphvizVisualization.graph(graph)
+# The renderer draws a rustworkx view of the net, built once from the graph
+pydigraph = RustworkxGraph.from_executable_graph(graph)
 
-# Step-by-step animation in a notebook
-async for step in SimpleGraphvizVisualization.animate_execution_generator(graph):
-    display(step)
+# Static graph image
+SimpleGraphvizVisualization.graph(pydigraph)
+
+# Step-by-step animation, inside a notebook (`display` comes from marimo/IPython)
+async for step, diagram, fired in SimpleGraphvizVisualization.animate_execution_generator(
+    graph, pydigraph
+):
+    display(diagram)
 ```
 
 ### Output distribution
@@ -286,7 +292,7 @@ Optional features live behind extras:
 | --- | --- | --- |
 | `viz` | Graphviz rendering (`petritype.plotting`) | `pip install 'petritype[viz]'` |
 | `marimo` | Interactive notebook controls (`petritype.marimo_controls`) | `pip install 'petritype[marimo]'` |
-| `examples` | Everything needed to run the example notebooks | `pip install 'petritype[examples]'` |
+| `examples` | Dependencies for running the example notebooks (see [Examples](#examples)) | `pip install 'petritype[examples]'` |
 
 The `viz` extra also needs the Graphviz `dot` binary on your PATH
 (`brew install graphviz` / `apt install graphviz`).
@@ -299,4 +305,11 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **ML Training** — multi-step model training pipeline with evaluation and retraining loops
 - **Time Series** — statistical processing of time series data
 
-Open one with `uv run --extra examples marimo edit <notebook>`.
+The notebooks live in the repository — they are not part of the pip package — so
+run them from a clone:
+
+```bash
+git clone https://github.com/olenive/petritype
+cd petritype
+uv run --extra examples marimo edit examples/toy/parcel_distribution.py
+```
