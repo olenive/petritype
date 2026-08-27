@@ -38,8 +38,12 @@ dev = [
 ]
 # Graph rendering: petritype.plotting.*. Also needs the Graphviz `dot` binary
 # on PATH (e.g. `brew install graphviz` / `apt install graphviz`).
+# pillow is a direct requirement of rustworkx.visualization.graphviz_draw, which
+# raises ImportError without it; rustworkx does not declare it, and it reaches us
+# today only because matplotlib happens to pull it in.
 viz = [
     "matplotlib>=3.11.0",
+    "pillow>=9",
     "rustworkx>=0.18.0",
 ]
 # Interactive notebook controls: petritype.marimo_controls.
@@ -49,6 +53,8 @@ marimo = [
 examples = [
     "petritype[viz]",
     "petritype[marimo]",
+    # Imported directly by examples/time_series_stats/*.
+    "numpy>=1.25",
 ]
 
 [project.urls]

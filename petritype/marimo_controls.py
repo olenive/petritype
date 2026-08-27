@@ -10,7 +10,13 @@ Marimo-specific — import only where marimo is available (the ``marimo`` extra)
 
 try:
     import marimo as mo
-except ModuleNotFoundError as exc:  # pragma: no cover - depends on install extras
+except ModuleNotFoundError as exc:
+    # Only claim marimo is missing when it actually is. marimo has a large
+    # import chain, and a ModuleNotFoundError from somewhere inside it means a
+    # broken install, not an absent extra -- telling the user to install
+    # petritype[marimo] would be advice they have already followed.
+    if exc.name != "marimo":
+        raise
     raise ModuleNotFoundError(
         "petritype.marimo_controls requires marimo. "
         "Install it with: pip install 'petritype[marimo]'"
