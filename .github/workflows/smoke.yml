@@ -23,8 +23,29 @@ on:
     - cron: "0 6 * * 1"
 
 jobs:
+  # Until the first release, a scheduled run would fail red every Monday and
+  # train everyone to ignore the workflow meant to catch real breakage. On a
+  # schedule, skip when petritype is not on PyPI yet; dispatch and the
+  # post-release call always run.
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.check.outputs.published }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          if curl -sfo /dev/null https://pypi.org/simple/petritype/; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::petritype is not on PyPI yet"
+          fi
+
   install:
     name: pip install petritype (py${{ matrix.python }})
+    needs: preflight
+    if: github.event_name != 'schedule' || needs.preflight.outputs.published == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -75,37 +96,25 @@ jobs:
           print('imports OK')
           "
 
+      # Finding 13: fetch the one canonical quickstart rather than keeping a
+      # third inline copy that can drift. Pinned to the release tag when we
+      # have one. Still no actions/checkout, so the artifact is exercised
+      # without a source tree -- only this single file is fetched.
       - name: Quickstart produces the documented result
         shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          python - <<'PY'
-          import asyncio
-          from petritype.core.executable_graph_components import (
-              ExecutableGraphOperations, FunctionTransitionNode, ListPlaceNode,
-              ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
-          )
-
-          def double(x: int) -> int:
-              return x * 2
-
-          graph = ExecutableGraphOperations.construct_graph([
-              ListPlaceNode('Input', int, [1, 2, 3]),
-              ArgumentEdgeToTransition('Input', 'Double', 'x'),
-              FunctionTransitionNode('Double', double),
-              ReturnedEdgeFromTransition('Double', 'Output'),
-              ListPlaceNode('Output', int),
-          ])
-          graph, fired = asyncio.run(
-              ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
-          )
-          tokens = graph.place_named('Output').tokens
-          assert sorted(tokens) == [2, 4, 6], f"unexpected tokens: {tokens}"
-          assert fired == 3, f"expected 3 firings, got {fired}"
-          print("quickstart OK:", tokens)
-          PY
+          set -euo pipefail
+          REF="${VERSION:-main}"
+          curl -fsSL -o quickstart.py \
+            "https://raw.githubusercontent.com/olenive/petritype/${REF}/examples/quickstart.py"
+          python quickstart.py
 
   install-viz:
     name: pip install petritype[viz]
+    needs: preflight
+    if: github.event_name != 'schedule' || needs.preflight.outputs.published == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v5

@@ -29,17 +29,26 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          # Without a suffix every matrix leg computes the same key (the python
+          # component resolves .python-version, identical across legs), so the
+          # first job to finish owns the cache and the rest re-download their
+          # per-ABI wheels every run.
+          cache-suffix: py${{ matrix.python }}
 
       - name: Sync
         run: uv sync --python ${{ matrix.python }} --extra dev --extra examples
 
       # Run from the repo root: tests/helpers/io resolves fixture paths
       # relative to the process cwd, not to __file__.
+      # Extras are named explicitly rather than relying on `uv run` syncing
+      # inexactly (it installs what is missing but does not remove extras, so
+      # the Sync step's work survives by default-behaviour rather than by
+      # contract). This also matches copilot-instructions.md.
       - name: Unit tests
-        run: uv run --python ${{ matrix.python }} pytest -q
+        run: uv run --python ${{ matrix.python }} --extra dev --extra examples pytest -q
 
       - name: Notebook tests
-        run: uv run --python ${{ matrix.python }} pytest -m notebooks -q
+        run: uv run --python ${{ matrix.python }} --extra dev --extra examples pytest -m notebooks -q
 
   package:
     name: build + install check
@@ -49,6 +58,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+          cache-suffix: package
 
       - name: Build
         run: uv build --out-dir dist
@@ -98,31 +108,41 @@ jobs:
           print('viz extra OK')
           "
 
-      - name: Quickstart runs
+      # Finding 12: the marimo extra was exercised nowhere, so marimo_controls
+      # could grow a plotting import and every job would stay green (the
+      # notebook suite runs in the everything-installed examples env).
+      - name: marimo extra imports
+        run: |
+          uv venv /tmp/marimo --python 3.12
+          WHEEL="$(ls "$PWD"/dist/*.whl)"
+          uv pip install --python /tmp/marimo/bin/python "petritype[marimo] @ file://${WHEEL}"
+          cd /tmp
+          /tmp/marimo/bin/python -c "
+          import petritype.marimo_controls
+          print('marimo extra OK')
+          "
+
+      - name: marimo guard points at the extra on a base install
         run: |
           cd /tmp
           /tmp/base/bin/python - <<'PY'
-          import asyncio
-          from petritype.core.executable_graph_components import (
-              ExecutableGraphOperations, FunctionTransitionNode, ListPlaceNode,
-              ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
-          )
-          def double(x: int) -> int:
-              return x * 2
-          graph = ExecutableGraphOperations.construct_graph([
-              ListPlaceNode('Input', int, [1, 2, 3]),
-              ArgumentEdgeToTransition('Input', 'Double', 'x'),
-              FunctionTransitionNode('Double', double),
-              ReturnedEdgeFromTransition('Double', 'Output'),
-              ListPlaceNode('Output', int),
-          ])
-          graph, fired = asyncio.run(
-              ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
-          )
-          tokens = graph.place_named('Output').tokens
-          assert sorted(tokens) == [2, 4, 6], tokens
-          print("quickstart OK:", tokens)
+          try:
+              import petritype.marimo_controls
+          except ModuleNotFoundError as exc:
+              assert "petritype[marimo]" in str(exc), exc
+              print("guard OK:", exc)
+          else:
+              raise SystemExit("expected marimo_controls to fail on a base install")
           PY
+
+      # Finding 13: the quickstart lives in one place, examples/quickstart.py,
+      # which is checked against the README block by the unit suite. Run a copy
+      # from /tmp so the repo tree cannot shadow the installed package.
+      - name: Quickstart runs against the base install
+        run: |
+          cp examples/quickstart.py /tmp/quickstart.py
+          cd /tmp
+          /tmp/base/bin/python /tmp/quickstart.py
 
       - uses: actions/upload-artifact@v4
         with:
