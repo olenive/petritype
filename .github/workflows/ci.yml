@@ -75,10 +75,14 @@ jobs:
       # only declared in an extra, this fails here rather than for a user.
       - name: Base install imports (no extras)
         run: |
-          uv venv /tmp/base --python 3.12
-          uv pip install --python /tmp/base/bin/python dist/*.whl
-          cd /tmp   # never import from the repo root, or the source tree shadows the install
-          /tmp/base/bin/python - <<'PY'
+          uv venv /tmp/venvs/base --python 3.12
+          uv pip install --python /tmp/venvs/base/bin/python dist/*.whl
+          # -P keeps the current directory off sys.path, so neither the repo
+          # tree nor a stray directory can shadow the installed package. A
+          # venv named /tmp/marimo previously resolved as a namespace package
+          # and made the guard check below silently pass.
+          cd /tmp
+          /tmp/venvs/base/bin/python -P - <<'PY'
           import importlib
           for mod in [
               "petritype",
@@ -101,11 +105,11 @@ jobs:
 
       - name: viz extra imports
         run: |
-          uv venv /tmp/viz --python 3.12
+          uv venv /tmp/venvs/viz --python 3.12
           WHEEL="$(ls "$PWD"/dist/*.whl)"
-          uv pip install --python /tmp/viz/bin/python "petritype[viz] @ file://${WHEEL}"
+          uv pip install --python /tmp/venvs/viz/bin/python "petritype[viz] @ file://${WHEEL}"
           cd /tmp
-          /tmp/viz/bin/python -c "
+          /tmp/venvs/viz/bin/python -P -c "
           import petritype.plotting.rustworkx_graph
           import petritype.plotting.rustworkx_to_graphviz
           import petritype.plotting.simple_graphviz
@@ -117,11 +121,11 @@ jobs:
       # notebook suite runs in the everything-installed examples env).
       - name: marimo extra imports
         run: |
-          uv venv /tmp/marimo --python 3.12
+          uv venv /tmp/venvs/marimo --python 3.12
           WHEEL="$(ls "$PWD"/dist/*.whl)"
-          uv pip install --python /tmp/marimo/bin/python "petritype[marimo] @ file://${WHEEL}"
+          uv pip install --python /tmp/venvs/marimo/bin/python "petritype[marimo] @ file://${WHEEL}"
           cd /tmp
-          /tmp/marimo/bin/python -c "
+          /tmp/venvs/marimo/bin/python -P -c "
           import petritype.marimo_controls
           print('marimo extra OK')
           "
@@ -129,7 +133,7 @@ jobs:
       - name: marimo guard points at the extra on a base install
         run: |
           cd /tmp
-          /tmp/base/bin/python - <<'PY'
+          /tmp/venvs/base/bin/python -P - <<'PY'
           try:
               import petritype.marimo_controls
           except ModuleNotFoundError as exc:
@@ -146,7 +150,7 @@ jobs:
         run: |
           cp examples/quickstart.py /tmp/quickstart.py
           cd /tmp
-          /tmp/base/bin/python /tmp/quickstart.py
+          /tmp/venvs/base/bin/python -P /tmp/quickstart.py
 
       - uses: actions/upload-artifact@v4
         with:

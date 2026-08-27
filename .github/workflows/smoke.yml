@@ -95,7 +95,7 @@ jobs:
       - name: Base install imports
         shell: bash
         run: |
-          python -c "
+          python -P -c "
           from petritype import petri_net
           import petritype.runtime
           import petritype.core.executable_graph_components
@@ -116,7 +116,7 @@ jobs:
           REF="${VERSION:-main}"
           curl -fsSL -o quickstart.py \
             "https://raw.githubusercontent.com/olenive/petritype/${REF}/examples/quickstart.py"
-          python quickstart.py
+          python -P quickstart.py
 
   install-viz:
     name: pip install petritype[viz]
@@ -153,7 +153,7 @@ jobs:
       - name: Rendering imports and draws
         shell: bash
         run: |
-          python -c "
+          python -P -c "
           import petritype.plotting.simple_graphviz
           import petritype.plotting.rustworkx_to_graphviz
           import petritype.plotting.rustworkx_graph
