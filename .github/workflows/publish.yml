@@ -138,23 +138,34 @@ jobs:
           VER="$(basename "$WHEEL" | cut -d- -f2)"
           echo "verifying petritype==$VER"
 
+          # TestPyPI's index is materially slower to propagate than PyPI's: an
+          # upload has been observed taking over two minutes to become
+          # installable, so a short budget produces false failures on a
+          # perfectly good artifact. Allow ~10 minutes. --no-cache-dir keeps
+          # pip from reusing a negative index response between attempts.
           ok=""
-          for i in 1 2 3 4 5 6; do
-            if pip download --no-deps \
+          attempts=20
+          for i in $(seq 1 $attempts); do
+            if pip download --no-deps --no-cache-dir \
                  --index-url https://test.pypi.org/simple/ \
                  --dest fetched "petritype==${VER}"; then
               ok=1; break
             fi
-            echo "not visible on TestPyPI yet, retrying in 20s ($i/6)"
-            sleep 20
+            echo "not visible on TestPyPI yet, retrying in 30s ($i/$attempts)"
+            sleep 30
           done
           # A bare retry loop exits 0 when every attempt failed (its status is
           # the last `sleep`), so failure has to be raised explicitly.
           if [ -z "$ok" ]; then
-            echo "::error::petritype==$VER not installable from TestPyPI after 6 attempts"
+            echo "::error::petritype==$VER not installable from TestPyPI after $attempts attempts (~10 min)"
             exit 1
           fi
 
+          # Note on recovery: "Re-run failed jobs" reuses the dist artifact from
+          # the original build, so this comparison stays valid. "Re-run all
+          # jobs" rebuilds, and if that rebuild is not byte-identical the
+          # comparison will fail against the already-uploaded file -- at which
+          # point the version has to be bumped rather than re-run.
           FETCHED="$(ls fetched/*.whl)"
           if ! cmp -s "$WHEEL" "$FETCHED"; then
             echo "::error::TestPyPI wheel differs from the one built in this run."
