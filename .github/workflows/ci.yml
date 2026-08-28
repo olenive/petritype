@@ -23,14 +23,14 @@ jobs:
       matrix:
         python: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustworkx.visualization.graphviz_draw shells out to `dot`; the notebook
       # tests assert on the PNG bytes it produces, so the binary is required.
       - name: Install Graphviz
         run: sudo apt-get update && sudo apt-get install -y graphviz
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           # Without a suffix every matrix leg computes the same key (the python
@@ -58,8 +58,8 @@ jobs:
     name: build + install check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-suffix: package
@@ -152,7 +152,7 @@ jobs:
           cd /tmp
           /tmp/venvs/base/bin/python -P /tmp/quickstart.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
