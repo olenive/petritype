@@ -43,6 +43,20 @@ jobs:
           fi
           echo "tag and version agree: $VER"
 
+      # A rehearsal must never consume the version number we intend to release.
+      # Index filenames are permanently reserved -- deleting a release does not
+      # free them -- so a dispatch that uploaded plain 0.1.x would make that
+      # version unreleasable: its upload is later skipped as already-existing,
+      # and the verify step then compares this run's wheel against the older
+      # rehearsal's. Give rehearsals their own .devN version instead.
+      - name: Use a dev version for rehearsals
+        if: github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          BASE="$(uv version --short)"
+          uv version --frozen "${BASE}.dev${GITHUB_RUN_NUMBER}"
+          echo "rehearsing as $(uv version --short)"
+
       # The long description is frozen into the release, but its raw URLs point
       # at /main/. Moving images/ later would retroactively break every
       # published page, so pin them to this tag before building. Only for tag
