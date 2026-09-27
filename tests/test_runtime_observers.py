@@ -9,6 +9,9 @@ quiescence probe resets it to None — so nothing here asserts on its post-run
 value, only on what observers see at notification time.
 """
 
+import asyncio
+import threading
+
 import pytest
 
 from petritype.core.executable_graph_components import (
@@ -17,6 +20,7 @@ from petritype.core.executable_graph_components import (
     FunctionTransitionNode,
     ListPlaceNode,
     ReturnedEdgeFromTransition,
+    TransitionFailedError,
 )
 from petritype.runtime import ExecutionMode, RunContext, Runner, fired_since
 
@@ -131,3 +135,90 @@ class TestObserverSeesEveryFiring:
             totals_by_mode[mode] = state['totals']
         assert totals_by_mode[ExecutionMode.SEQUENTIAL] == {f'T{i}': 2 for i in range(1, 6)}
         assert totals_by_mode[ExecutionMode.SEQUENTIAL] == totals_by_mode[ExecutionMode.CONCURRENT]
+
+
+def _single_transition_graph(body, execution='inline'):
+    """One transition ``Work`` from ``In`` (holding one token) to ``Out``."""
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode('In', int, [1]),
+        ArgumentEdgeToTransition('In', 'Work', 'x'),
+        FunctionTransitionNode('Work', body, execution=execution),
+        ReturnedEdgeFromTransition('Work', 'Out'),
+        ListPlaceNode('Out', int),
+    ])
+
+
+class TestSequentialInFlight:
+    """Sequential firing names the running transition in ``graph.in_flight`` for
+    the length of its body, and leaves the set empty once the body returns or
+    raises, so a heartbeat reading the graph can say what is working."""
+
+    @pytest.mark.asyncio
+    async def test_body_sees_itself_in_flight_and_step_clears_it(self):
+        seen = []
+        holder = {}
+
+        def body(x: int) -> int:
+            seen.append(set(holder['graph'].in_flight))
+            return x
+
+        graph = _single_transition_graph(body)
+        holder['graph'] = graph
+        assert await Runner.step(RunContext(graph=graph)) == 1
+        assert seen == [{'Work'}]
+        assert graph.in_flight == set()
+
+    @pytest.mark.asyncio
+    async def test_thread_body_is_visible_from_the_event_loop(self):
+        """A slow ``execution="thread"`` body leaves the loop free, so a watcher
+        task on it plays the heartbeat: it must read the running transition's
+        name while the body runs."""
+        started = threading.Event()
+        release = threading.Event()
+        holder = {}
+        seen_inside = []
+
+        def body(x: int) -> int:
+            seen_inside.append(set(holder['graph'].in_flight))
+            started.set()
+            release.wait(timeout=5)
+            return x
+
+        graph = _single_transition_graph(body, execution='thread')
+        holder['graph'] = graph
+        step = asyncio.ensure_future(Runner.step(RunContext(graph=graph)))
+        await asyncio.get_running_loop().run_in_executor(None, started.wait, 5)
+        observed_while_running = set(graph.in_flight)
+        release.set()
+        assert await step == 1
+        assert seen_inside == [{'Work'}]
+        assert observed_while_running == {'Work'}
+        assert graph.in_flight == set()
+
+    @pytest.mark.asyncio
+    async def test_raising_body_clears_in_flight(self):
+        def body(x: int) -> int:
+            raise ValueError('boom')
+
+        graph = _single_transition_graph(body)
+        with pytest.raises(TransitionFailedError):
+            await Runner.step(RunContext(graph=graph))
+        assert graph.in_flight == set()
+
+    @pytest.mark.asyncio
+    async def test_each_write_assigns_a_fresh_set(self):
+        """Readers on another thread rely on the reference being replaced, never
+        mutated: a set captured during the body keeps its contents afterwards."""
+        holder = {}
+        captured = []
+
+        def body(x: int) -> int:
+            captured.append(holder['graph'].in_flight)
+            return x
+
+        graph = _single_transition_graph(body)
+        holder['graph'] = graph
+        await Runner.run_to_completion(RunContext(graph=graph))
+        assert captured[0] == {'Work'}
+        assert graph.in_flight == set()
+        assert graph.in_flight is not captured[0]

@@ -8,6 +8,9 @@ Layers built so far:
 - **Observation (#3, #6):** sync-or-async observers handed the *live graph by reference*
   after each state change. Best-effort coalescing views; no lossless observer *stream* —
   diffing ``graph.fired_counts`` snapshots via ``fired_since`` recovers every firing.
+  ``graph.in_flight`` names the transitions whose bodies are running, in both modes: in
+  sequential mode it holds the one firing transition for the length of its body, so a
+  thread reading the graph during a long synchronous body can tell what is working.
 - **Input (#4):** typed commands placed on `RunContext.inbox` (an `asyncio.Queue` the caller
   owns) and **drained between steps** — the runner is the only thing that mutates the graph.
   A control/UI produces commands; it never touches the net.

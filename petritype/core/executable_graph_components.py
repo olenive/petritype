@@ -267,9 +267,12 @@ class ExecutableGraph(BaseModel):
     # to drive stage/progress UI that must stay correct after the marking has
     # moved past a stage.
     fired_counts: dict[str, int] = {}
-    # Names of transitions whose bodies are currently executing — they consumed their inputs but
-    # have not yet deposited their outputs (only populated in concurrent mode). The renderer
-    # lights these "in flight" transitions distinctly; each is removed as it completes.
+    # Names of transitions whose bodies are currently executing: they consumed their inputs but
+    # have not yet deposited their outputs. Both modes maintain it. Concurrent mode holds every
+    # airborne transition; sequential firing (``fire_one_transition``) holds the one running
+    # transition while its body executes and empties the set when the body returns or raises.
+    # Writers always assign a fresh set, so a reader on another thread sees a whole value.
+    # The renderer lights these "in flight" transitions distinctly.
     in_flight: set[str] = set()
     transition_history: Sequence[FunctionTransitionNode] = []
     input_place_history: Sequence[ListPlaceNode] = []
@@ -1252,6 +1255,12 @@ class ExecutableGraphOperations:
             token_history_length=token_history_length,
             transition_names_to_read_edges=transition_names_to_read_edges,
         )
+        # Mark the chosen transition as running while its body executes, as the
+        # concurrent runner does, so an observer on another thread (a heartbeat
+        # reading the graph during a long synchronous body) can name it. Each
+        # write assigns a fresh set: replacing the reference is atomic, whereas
+        # mutating the set in place could be seen half-done.
+        executable_graph.in_flight = {transition.name}
         try:
             output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
                 transition=transition,
@@ -1272,6 +1281,8 @@ class ExecutableGraphOperations:
                 place_names_to_nodes=place_names_to_nodes,
                 restore_tokens_on_failure=restore_tokens_on_failure,
             )
+        finally:
+            executable_graph.in_flight = set()
         updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
             output_place_names_to_tokens=output_place_names_to_tokens,
             place_names_to_nodes=place_names_to_nodes,
