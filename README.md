@@ -104,7 +104,7 @@ FunctionTransitionNode('Fetch', fetch)
 Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
 
 - **`guard`** — an enabling condition the engine enforces in every execution mode: a transition whose guard returns `False` is not enabled, regardless of available tokens. Guards run on every enabled-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
-- **`priority`** — a selection hint: the default selector fires the highest-priority enabled transition. Unset scores `0.0`; ties fall back to definition order.
+- **`priority`** — a selection hint: the default selector fires the highest-priority enabled transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters.
 
 ```python
 # Guard: BatchProcess is not enabled until the pool is full

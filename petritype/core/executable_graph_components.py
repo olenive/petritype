@@ -135,7 +135,8 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
             predicate over the marking (None costs nothing — the check is skipped).
         priority: Optional (ExecutableGraph) -> float selection hint. The default
             selector fires the highest-priority enabled transition; transitions
-            without one score 0.0, and ties fall back to definition order. Only
+            without one score 0.0, and ties go to the first-defined transition (or
+            the last-defined, under the graph's ``tie_break="last_declared"``). Only
             called on enabled transitions at selection time.
         activation_function: Deprecated — use ``guard`` (engine-enforced enabling) or
             ``priority`` (selection ranking) instead. The engine never consults this
@@ -231,9 +232,21 @@ class ExecutableGraph(BaseModel):
         token_history: History of tokens
         transition_selector: Optional function to select which transition fires next.
             Signature: (graph, enabled_transitions) -> transition_to_fire
-            If None, defaults to firing the last enabled transition (current behavior).
-            The selector receives the full graph context and list of enabled transitions,
-            allowing for sophisticated selection strategies (priority-based, random, etc.).
+            If None, the default selector fires the highest-priority enabled
+            transition, breaking ties by ``tie_break``. The selector receives the
+            full graph context and list of enabled transitions (in definition
+            order), allowing for sophisticated selection strategies (priority-based,
+            random, etc.).
+        tie_break: Which enabled transition the default selector fires when several
+            share the highest priority (including nets that set no priorities).
+            ``"first_declared"`` (default) prefers the first-defined one;
+            ``"last_declared"`` prefers the last-defined one. With FIFO places the
+            two give different schedules for a pipeline: first-declared processes
+            it in batches (every token through stage one before any reaches stage
+            two), while last-declared lets each token flow through before the next
+            enters. Neither is more correct, so it is a setting, and the default
+            keeps the original behaviour. Only the default selector reads it; a
+            custom ``transition_selector`` is unaffected.
     """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
@@ -279,6 +292,11 @@ class ExecutableGraph(BaseModel):
     output_place_history: Sequence[ListPlaceNode] = []
     token_history: Sequence[Any] = []
     transition_selector: Optional[Callable] = None
+    # Tie-break for the default selector among equal-priority enabled transitions:
+    # "first_declared" (default) fires the first-defined, "last_declared" the
+    # last-defined. FIFO pipelines run in batches under the former and token by
+    # token under the latter. Custom selectors ignore it.
+    tie_break: Literal["first_declared", "last_declared"] = "first_declared"
     allow_token_copying: bool = False
     # When a firing fails after its input tokens were consumed, put them back
     # (best effort) before raising. Off by default: the body may have mutated
@@ -805,14 +823,16 @@ class ExecutableGraphCheck:
 
 # Default selector: highest `priority` wins; transitions without one score 0.0.
 # `max` keeps the first maximum, so ties — including nets where nobody sets a
-# priority — fall back to definition order.
+# priority — go to the first-defined transition; for `tie_break="last_declared"`
+# we scan the enabled list reversed, so the last-defined one is that first maximum.
 def default_transition_selector(
     graph: ExecutableGraph, enabled: list[FunctionTransitionNode]
 ) -> Optional[FunctionTransitionNode]:
-    """Default selector: highest-priority enabled transition, definition order on ties."""
+    """Default selector: highest-priority enabled transition, ties broken by ``graph.tie_break``."""
     if not enabled:
         return None
-    return max(enabled, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
+    candidates = reversed(enabled) if graph.tie_break == "last_declared" else enabled
+    return max(candidates, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
 
 
 class ExecutableGraphOperations:
@@ -842,6 +862,7 @@ class ExecutableGraphOperations:
         allow_token_copying: bool = False,
         restore_tokens_on_failure: bool = False,
         expect_acyclic: bool = False,
+        tie_break: Literal["first_declared", "last_declared"] = "first_declared",
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -863,7 +884,7 @@ class ExecutableGraphOperations:
         graph = ExecutableGraph(
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
-            restore_tokens_on_failure=restore_tokens_on_failure,
+            restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
@@ -1212,7 +1233,7 @@ class ExecutableGraphOperations:
         ``execute_graph``'s contract.
 
         Selector resolution matches ``execute_graph``: provided > graph's >
-        default (highest priority, definition order on ties). ``None`` for
+        default (highest priority, ties broken by the graph's ``tie_break``). ``None`` for
         ``allow_token_copying`` / ``restore_tokens_on_failure`` means use the
         graph's setting.
 

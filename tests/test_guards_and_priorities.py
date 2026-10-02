@@ -14,6 +14,7 @@ it is deprecated in favour of the two explicit fields but still visible to custo
 selectors until removed.
 """
 
+import asyncio
 import warnings
 
 import pytest
@@ -25,7 +26,7 @@ from petritype.core.executable_graph_components import (
     ListPlaceNode,
     ReturnedEdgeFromTransition,
 )
-from petritype.runtime import ExecutionMode, RunContext, Runner
+from petritype.runtime import Disable, ExecutionMode, RunContext, Runner
 
 
 def increment(x: int) -> int:
@@ -137,3 +138,58 @@ class TestActivationFunctionDeprecation:
             FunctionTransitionNode(
                 'T', increment, guard=lambda graph: True, priority=lambda graph: 1.0
             )
+
+
+def _shared_input_graph(names, priorities=None, **graph_kwargs):
+    """One 'In' place (single token) feeding every named transition, in the given
+    definition order; each transition deposits to its own '<name> Out' place, so
+    exactly one of them can fire."""
+    priorities = priorities or {}
+    components = [ListPlaceNode('In', int, [1])]
+    for name in names:
+        components += [
+            ArgumentEdgeToTransition('In', name, 'x'),
+            FunctionTransitionNode(name, increment, priority=priorities.get(name)),
+            ReturnedEdgeFromTransition(name, f'{name} Out'),
+            ListPlaceNode(f'{name} Out', int),
+        ]
+    return ExecutableGraphOperations.construct_graph(components, **graph_kwargs)
+
+
+async def _run_once_with_disabled(graph, *disabled):
+    """Disable transitions through the inbox (the real Disable path), then fire once."""
+    inbox = asyncio.Queue()
+    for name in disabled:
+        inbox.put_nowait(Disable(name))
+    return await Runner.run(RunContext(graph=graph, inbox=inbox), stop_after_n_firings=1)
+
+
+class TestRunnerDisableKeepsSelectionPolicy:
+    """Disabling a transition must only remove it from the candidates: priority, a
+    custom transition_selector and tie_break still decide among the rest."""
+
+    @pytest.mark.asyncio
+    async def test_priority_still_ranks_the_non_disabled(self):
+        graph = _shared_input_graph(['A', 'B', 'C'], priorities={'C': lambda graph: 1.0})
+        summary = await _run_once_with_disabled(graph, 'A')
+        assert summary.fired == {'C': 1}
+
+    @pytest.mark.asyncio
+    async def test_custom_selector_still_chooses_among_the_non_disabled(self):
+        graph = _shared_input_graph(['A', 'B', 'C'])
+        graph.transition_selector = lambda graph, enabled: enabled[-1] if enabled else None
+        summary = await _run_once_with_disabled(graph, 'C')
+        assert summary.fired == {'B': 1}
+
+    @pytest.mark.asyncio
+    async def test_tie_break_still_applies_to_the_non_disabled(self):
+        graph = _shared_input_graph(['A', 'B', 'C', 'D'], tie_break="last_declared")
+        summary = await _run_once_with_disabled(graph, 'A')
+        assert summary.fired == {'D': 1}
+
+    @pytest.mark.asyncio
+    async def test_everything_disabled_fires_nothing(self):
+        graph = _shared_input_graph(['A', 'B'])
+        summary = await _run_once_with_disabled(graph, 'A', 'B')
+        assert summary.n_fired == 0
+        assert graph.place_named('In').tokens == [1]

@@ -59,6 +59,7 @@ from petritype.core.executable_graph_components import (
     FunctionTransitionNode,
     MapPlaceNames,
     MapTransitionNames,
+    default_transition_selector,
 )
 from petritype.core.type_comparisons import CompareTypes
 
@@ -309,17 +310,25 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
 
 
 def _selector_for(ctx: RunContext):
-    """A transition selector that skips disabled transitions, or None (engine default) when
-    nothing is disabled. Recomputed each step since ``disabled`` may change between drains."""
+    """A transition selector that drops disabled transitions from the candidates and lets
+    the graph's own policy choose among the rest, or None (engine default) when nothing is
+    disabled. Recomputed each step since ``disabled`` may change between drains.
+
+    Disabling only narrows *which* transitions may fire; it must not change *how* one is
+    chosen. So the survivors go to the graph's ``transition_selector`` if set, else
+    ``default_transition_selector`` (priority, then ``tie_break``) — the same resolution
+    ``fire_one_transition`` uses. The previous version returned the first non-disabled
+    transition, silently discarding priority, a custom selector and ``tie_break`` for as
+    long as anything was disabled."""
     if not ctx.disabled:
         return None
     disabled = ctx.disabled
 
     def selector(graph, enabled):
-        for transition in enabled:
-            if transition.name not in disabled:
-                return transition
-        return None
+        remaining = [t for t in enabled if t.name not in disabled]
+        if not remaining:
+            return None
+        return (graph.transition_selector or default_transition_selector)(graph, remaining)
 
     return selector
 

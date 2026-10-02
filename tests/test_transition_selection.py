@@ -367,3 +367,108 @@ class TestSelectorWithActivationFunction:
         assert fired2 == 1
         assert len(updated_graph2.place_named('Pool').tokens) == 1
         assert len(updated_graph2.place_named('Output').tokens) == 1
+
+
+def _two_way_tie_graph(tie_break=None, first_priority=None, last_priority=None):
+    """'First' and 'Last' both consume from the same place; 'First' is defined first."""
+    kwargs = {} if tie_break is None else {'tie_break': tie_break}
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode('Input', int, [1]),
+        ArgumentEdgeToTransition('Input', 'First', 'x'),
+        FunctionTransitionNode('First', lambda x: x + 1, priority=first_priority),
+        ReturnedEdgeFromTransition('First', 'First Out'),
+        ListPlaceNode('First Out', int),
+        ArgumentEdgeToTransition('Input', 'Last', 'x'),
+        FunctionTransitionNode('Last', lambda x: x + 1, priority=last_priority),
+        ReturnedEdgeFromTransition('Last', 'Last Out'),
+        ListPlaceNode('Last Out', int),
+    ], **kwargs)
+
+
+def _three_stage_pipeline(log, tie_break=None):
+    """Source -(Stage1)-> A -(Stage2)-> B -(Stage3)-> Sink, seeded with three tokens."""
+    def stage(name):
+        def body(x: int) -> int:
+            log.append(name)
+            return x
+        return body
+
+    kwargs = {} if tie_break is None else {'tie_break': tie_break}
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode('Source', int, [1, 2, 3]),
+        ArgumentEdgeToTransition('Source', 'Stage1', 'x'),
+        FunctionTransitionNode('Stage1', stage('Stage1')),
+        ReturnedEdgeFromTransition('Stage1', 'A'),
+        ListPlaceNode('A', int),
+        ArgumentEdgeToTransition('A', 'Stage2', 'x'),
+        FunctionTransitionNode('Stage2', stage('Stage2')),
+        ReturnedEdgeFromTransition('Stage2', 'B'),
+        ListPlaceNode('B', int),
+        ArgumentEdgeToTransition('B', 'Stage3', 'x'),
+        FunctionTransitionNode('Stage3', stage('Stage3')),
+        ReturnedEdgeFromTransition('Stage3', 'Sink'),
+        ListPlaceNode('Sink', int),
+    ], **kwargs)
+
+
+class TestTieBreak:
+    """Tests for ExecutableGraph.tie_break, read only by the default selector."""
+
+    def test_default_is_first_declared(self):
+        assert _two_way_tie_graph().tie_break == "first_declared"
+
+    def test_invalid_value_rejected(self):
+        with pytest.raises(ValueError):
+            _two_way_tie_graph(tie_break="random")
+
+    @pytest.mark.asyncio
+    async def test_default_picks_first_defined_on_tie(self):
+        graph, fired = await ExecutableGraphOperations.execute_graph(
+            _two_way_tie_graph(), stop_after_n_firings=1,
+        )
+        assert fired == 1
+        assert graph.last_fired == 'First'
+
+    @pytest.mark.asyncio
+    async def test_last_declared_picks_last_defined_on_tie(self):
+        graph, fired = await ExecutableGraphOperations.execute_graph(
+            _two_way_tie_graph(tie_break="last_declared"), stop_after_n_firings=1,
+        )
+        assert fired == 1
+        assert graph.last_fired == 'Last'
+
+    @pytest.mark.asyncio
+    async def test_last_declared_still_honours_priority(self):
+        graph, fired = await ExecutableGraphOperations.execute_graph(
+            _two_way_tie_graph(tie_break="last_declared", first_priority=lambda g: 5.0),
+            stop_after_n_firings=1,
+        )
+        assert fired == 1
+        assert graph.last_fired == 'First'
+
+    @pytest.mark.asyncio
+    async def test_custom_selector_ignores_tie_break(self):
+        graph = _two_way_tie_graph(tie_break="last_declared")
+        graph.transition_selector = lambda g, enabled: enabled[0] if enabled else None
+        graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
+        assert fired == 1
+        assert graph.last_fired == 'First'
+
+    @pytest.mark.asyncio
+    async def test_first_declared_runs_pipeline_in_batches(self):
+        log = []
+        _, fired = await ExecutableGraphOperations.execute_graph(
+            _three_stage_pipeline(log), stop_after_n_firings=100,
+        )
+        assert fired == 9
+        assert log == ['Stage1'] * 3 + ['Stage2'] * 3 + ['Stage3'] * 3
+
+    @pytest.mark.asyncio
+    async def test_last_declared_runs_pipeline_in_flow_order(self):
+        log = []
+        graph, fired = await ExecutableGraphOperations.execute_graph(
+            _three_stage_pipeline(log, tie_break="last_declared"), stop_after_n_firings=100,
+        )
+        assert fired == 9
+        assert log == ['Stage1', 'Stage2', 'Stage3'] * 3
+        assert graph.place_named('Sink').tokens == [1, 2, 3]
