@@ -349,7 +349,7 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         """Fire one transition on the live graph.
 
         Records a snapshot only if a transition actually fired. Returns the number of
-        transitions fired — 0 means nothing was enabled, which is the signal to stop
+        transitions fired — 0 means nothing was fireable, which is the signal to stop
         auto-stepping.
         """
         graph = session["graph"]

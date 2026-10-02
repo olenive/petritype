@@ -19,7 +19,7 @@ def _(mo):
 
         The **same** net as `01_sequential.py` — two independent branches, each a 3-stage
         chain `Start → s1 → s2 → s3 → Done`, every stage ~0.4 s — driven with
-        `RunContext(mode=ExecutionMode.CONCURRENT)`: each enabled transition's tokens are
+        `RunContext(mode=ExecutionMode.CONCURRENT)`: each fireable transition's tokens are
         consumed immediately and its body runs as a background task, depositing on completion.
         **Watch** both branches advance in lockstep, one stage at a time — total wall-clock ≈
         the **max** of the durations (~1.2 s) rather than the sum.

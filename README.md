@@ -52,7 +52,7 @@ graph, fired = asyncio.run(
 print(graph.place_named('Output').tokens)  # [2, 4, 6]
 ```
 
-`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find enabled transitions, select one, fire it, repeat.
+`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find fireable transitions, select one, fire it, repeat.
 
 ## Key Features
 
@@ -103,11 +103,11 @@ FunctionTransitionNode('Fetch', fetch)
 
 Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
 
-- **`guard`** — an enabling condition the engine enforces in every execution mode: a transition whose guard returns `False` is not enabled, regardless of available tokens. Guards run on every enabled-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
-- **`priority`** — a selection hint: the default selector fires the highest-priority enabled transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters.
+- **`guard`** — a firing condition the engine enforces in every execution mode: a transition whose guard returns `False` is not fireable, regardless of available tokens. Guards run on every fireable-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
+- **`priority`** — a selection hint: the default selector fires the highest-priority fireable transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters.
 
 ```python
-# Guard: BatchProcess is not enabled until the pool is full
+# Guard: BatchProcess is not fireable until the pool is full
 def batch_ready(graph) -> bool:
     return len(graph.place_named('Pool').tokens) >= 10
 
@@ -119,15 +119,15 @@ FunctionTransitionNode('BatchProcess', batch_process, guard=batch_ready)
 FunctionTransitionNode('Drain', drain, priority=queue_pressure)
 ```
 
-For full control over what fires next, replace the selector itself — a function from the enabled transitions to the one to fire:
+For full control over what fires next, replace the selector itself — a function from the fireable transitions to the one to fire:
 
 ```python
-graph.transition_selector = my_selector   # (graph, enabled) -> transition or None
+graph.transition_selector = my_selector   # (graph, fireable) -> transition or None
 ```
 
 The older `activation_function` field is deprecated: the engine never consulted it, so use `guard` or `priority` instead. It remains visible to custom selectors until removed.
 
-A selector is just a callable over the enabled transitions, so round-robin, bottleneck-aware and other policies are a few lines each.
+A selector is just a callable over the fireable transitions, so round-robin, bottleneck-aware and other policies are a few lines each.
 
 ### Visualisation
 
@@ -194,7 +194,7 @@ ArgumentEdgeToTransition('Items', 'Summarise', 'items')
 
 ### Read arcs — non-consuming reads
 
-A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present to enable the transition, but firing never consumes it:
+A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present for the transition to be fireable, but firing never consumes it:
 
 - **`SnapshotEdge`** — the transition receives a deep-copy; the place is untouched.
 - **`MutateEdge`** — the transition receives the live tokens and may modify them in place.
@@ -267,7 +267,7 @@ It has been particularly useful for processes involving many calls to stateful e
 
 A [Petri net](https://en.wikipedia.org/wiki/Petri_net) is a bipartite directed graph used to model concurrent processes. It was originally developed by Carl Adam Petri in 1962 and has been applied across chemistry, logistics, manufacturing, protocol verification, and many other fields.
 
-The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is enabled when all its input places contain at least one token. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
+The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is fireable when all its input places contain at least one token (and its guard, if any, passes). Petri net texts say "enabled" for what this library calls "fireable"; "enabled" here is the on/off switch set by the `Enable` / `Disable` commands. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
 
 What makes Petri nets powerful is that they can model concurrency, synchronisation, and resource contention in a way that is both formally analysable and visually intuitive.
 

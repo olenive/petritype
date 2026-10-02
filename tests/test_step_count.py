@@ -89,10 +89,10 @@ class TestStepCountIncrement:
 
 
 class TestStepCountUnchangedOnNoFire:
-    """No enabled transition → no fire → step_count stays put."""
+    """No fireable transition → no fire → step_count stays put."""
 
     def test_no_input_tokens_no_increment(self):
-        """An empty Input place means no transition is enabled. The engine
+        """An empty Input place means no transition is fireable. The engine
         should return without firing and without bumping the counter."""
         graph = _make_increment_graph([])
         updated, fired = asyncio.run(

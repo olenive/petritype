@@ -128,17 +128,17 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
         function: The function to execute when this transition fires
         output_distribution_function: Optional function to distribute outputs to places
         kwargs: Optional keyword arguments to pass to the function
-        guard: Optional (ExecutableGraph) -> bool enabling condition, enforced by the
+        guard: Optional (ExecutableGraph) -> bool firing condition, enforced by the
             engine in every execution mode: a transition whose guard returns False is
-            not enabled, regardless of available tokens or selector. The guard runs on
-            every enabled-discovery sweep, so keep it a cheap, side-effect-free
+            not fireable, regardless of available tokens or selector. The guard runs on
+            every fireable-discovery sweep, so keep it a cheap, side-effect-free
             predicate over the marking (None costs nothing — the check is skipped).
         priority: Optional (ExecutableGraph) -> float selection hint. The default
-            selector fires the highest-priority enabled transition; transitions
+            selector fires the highest-priority fireable transition; transitions
             without one score 0.0, and ties go to the first-defined transition (or
             the last-defined, under the graph's ``tie_break="last_declared"``). Only
-            called on enabled transitions at selection time.
-        activation_function: Deprecated — use ``guard`` (engine-enforced enabling) or
+            called on fireable transitions at selection time.
+        activation_function: Deprecated — use ``guard`` (engine-enforced firing condition) or
             ``priority`` (selection ranking) instead. The engine never consults this
             field; it is only visible to custom transition selectors, and it will be
             removed in a future release.
@@ -161,7 +161,7 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
         if self.activation_function is not None:
             warnings.warn(
                 "activation_function is deprecated: use `guard` for an engine-enforced "
-                "enabling condition or `priority` for selection ranking. The engine ignores "
+                "firing condition or `priority` for selection ranking. The engine ignores "
                 "activation_function; it is only visible to custom transition selectors.",
                 DeprecationWarning,
                 stacklevel=2,
@@ -183,7 +183,7 @@ class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
 
 class SnapshotEdge(PositionalArgsBaseModel):
     """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
-    snapshot** of the place's tokens, so reading cannot disturb the place. Enabledness requires
+    snapshot** of the place's tokens, so reading cannot disturb the place. Fireability requires
     the place to be non-empty (presence), but firing does not consume the tokens."""
     place_node_name: PlaceNodeName
     transition_node_name: FunctionName
@@ -193,7 +193,7 @@ class SnapshotEdge(PositionalArgsBaseModel):
 class MutateEdge(PositionalArgsBaseModel):
     """A non-consuming read/write edge (place -> transition). The transition receives the
     **live** tokens and may modify them in place; they stay in the place (not consumed) but may
-    be changed. Enabledness requires the place to be non-empty (presence)."""
+    be changed. Fireability requires the place to be non-empty (presence)."""
     place_node_name: PlaceNodeName
     transition_node_name: FunctionName
     argument: ArgumentName
@@ -231,13 +231,16 @@ class ExecutableGraph(BaseModel):
         output_place_history: History of output place states
         token_history: History of tokens
         transition_selector: Optional function to select which transition fires next.
-            Signature: (graph, enabled_transitions) -> transition_to_fire
-            If None, the default selector fires the highest-priority enabled
+            Signature: (graph, fireable_transitions) -> transition_to_fire
+            If None, the default selector fires the highest-priority fireable
             transition, breaking ties by ``tie_break``. The selector receives the
-            full graph context and list of enabled transitions (in definition
+            full graph context and list of fireable transitions (in definition
             order), allowing for sophisticated selection strategies (priority-based,
-            random, etc.).
-        tie_break: Which enabled transition the default selector fires when several
+            random, etc.). It is called positionally, so existing selectors whose
+            second parameter is named ``enabled`` keep working. Petri net texts say
+            "enabled" for what this library calls "fireable"; "enabled" here is the
+            on/off switch set by the runtime's ``Enable`` / ``Disable`` commands.
+        tie_break: Which fireable transition the default selector fires when several
             share the highest priority (including nets that set no priorities).
             ``"first_declared"`` (default) prefers the first-defined one;
             ``"last_declared"`` prefers the last-defined one. With FIFO places the
@@ -292,7 +295,7 @@ class ExecutableGraph(BaseModel):
     output_place_history: Sequence[ListPlaceNode] = []
     token_history: Sequence[Any] = []
     transition_selector: Optional[Callable] = None
-    # Tie-break for the default selector among equal-priority enabled transitions:
+    # Tie-break for the default selector among equal-priority fireable transitions:
     # "first_declared" (default) fires the first-defined, "last_declared" the
     # last-defined. FIFO pipelines run in batches under the former and token by
     # token under the latter. Custom selectors ignore it.
@@ -611,16 +614,16 @@ class ExecutableGraphCheck:
                     return False
         return True
 
-    def transition_is_enabled(
+    def transition_is_fireable(
         transition: FunctionTransitionNode,
         executable_graph: ExecutableGraph,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
     ) -> bool:
-        """Full enablement: sufficient tokens plus the transition's guard, if any.
+        """Can fire now: sufficient tokens plus the transition's guard, if any.
 
-        Every enabled-discovery sweep (sequential execution and both concurrent runner
+        Every fireable-discovery sweep (sequential execution and both concurrent runner
         loops) must go through this, so a guard means the same thing in every execution
         mode. Guards run on every sweep — they should be cheap, side-effect-free
         predicates over the marking.
@@ -633,6 +636,32 @@ class ExecutableGraphCheck:
         ):
             return False
         return transition.guard is None or bool(transition.guard(executable_graph))
+
+    def transition_is_enabled(
+        transition: FunctionTransitionNode,
+        executable_graph: ExecutableGraph,
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[str, ListPlaceNode],
+        transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
+    ) -> bool:
+        """Deprecated alias of ``transition_is_fireable``; warns and delegates.
+
+        Renamed so that "enabled" means only the on/off switch (``Enable`` / ``Disable``).
+        """
+        warnings.warn(
+            "ExecutableGraphCheck.transition_is_enabled is deprecated: use "
+            "ExecutableGraphCheck.transition_is_fireable instead (\"enabled\" now means "
+            "only the Enable/Disable switch).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return ExecutableGraphCheck.transition_is_fireable(
+            transition=transition,
+            executable_graph=executable_graph,
+            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+            place_names_to_nodes=place_names_to_nodes,
+            transition_names_to_read_edges=transition_names_to_read_edges,
+        )
 
     def all_return_indices_are_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         for edge in outgoing_edges:
@@ -824,14 +853,14 @@ class ExecutableGraphCheck:
 # Default selector: highest `priority` wins; transitions without one score 0.0.
 # `max` keeps the first maximum, so ties — including nets where nobody sets a
 # priority — go to the first-defined transition; for `tie_break="last_declared"`
-# we scan the enabled list reversed, so the last-defined one is that first maximum.
+# we scan the fireable list reversed, so the last-defined one is that first maximum.
 def default_transition_selector(
-    graph: ExecutableGraph, enabled: list[FunctionTransitionNode]
+    graph: ExecutableGraph, fireable: list[FunctionTransitionNode]
 ) -> Optional[FunctionTransitionNode]:
-    """Default selector: highest-priority enabled transition, ties broken by ``graph.tie_break``."""
-    if not enabled:
+    """Default selector: highest-priority fireable transition, ties broken by ``graph.tie_break``."""
+    if not fireable:
         return None
-    candidates = reversed(enabled) if graph.tie_break == "last_declared" else enabled
+    candidates = reversed(fireable) if graph.tie_break == "last_declared" else fireable
     return max(candidates, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
 
 
@@ -946,7 +975,7 @@ class ExecutableGraphOperations:
 
         # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
         # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
-        # guaranteed by the enabledness check, so place.tokens is non-empty here.
+        # guaranteed by the fireability check, so place.tokens is non-empty here.
         for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
@@ -1222,7 +1251,7 @@ class ExecutableGraphOperations:
         place_history_length=1,
         token_history_length=0,
     ) -> Optional[TransitionName]:
-        """Fire at most one enabled transition, using prebuilt adjacency maps.
+        """Fire at most one fireable transition, using prebuilt adjacency maps.
 
         The single-firing primitive that ``execute_graph`` and the Runner's
         sequential loops compose. The caller owns the per-run setup: building the
@@ -1237,8 +1266,8 @@ class ExecutableGraphOperations:
         ``allow_token_copying`` / ``restore_tokens_on_failure`` means use the
         graph's setting.
 
-        Returns the fired transition's name, or None if no transition was enabled
-        (or the selector declined every enabled one).
+        Returns the fired transition's name, or None if no transition was fireable
+        (or the selector declined every fireable one).
         """
         if allow_token_copying is None:
             allow_token_copying = executable_graph.allow_token_copying
@@ -1250,21 +1279,21 @@ class ExecutableGraphOperations:
             or default_transition_selector
         )
 
-        # Get all enabled transitions (sufficient tokens and a passing guard), in
+        # Get all fireable transitions (sufficient tokens and a passing guard), in
         # definition order.
-        enabled_transitions = []
+        fireable_transitions = []
         for transition in executable_graph.transitions:
-            if ExecutableGraphCheck.transition_is_enabled(
+            if ExecutableGraphCheck.transition_is_fireable(
                 transition=transition,
                 executable_graph=executable_graph,
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                 place_names_to_nodes=place_names_to_nodes,
                 transition_names_to_read_edges=transition_names_to_read_edges,
             ):
-                enabled_transitions.append(transition)
+                fireable_transitions.append(transition)
 
         # Let selector choose which transition to fire
-        transition = selector(executable_graph, enabled_transitions)
+        transition = selector(executable_graph, fireable_transitions)
         if transition is None:
             return None
 
@@ -1361,7 +1390,7 @@ class ExecutableGraphOperations:
         Args:
             executable_graph: The graph to execute
             stop_after_n_firings: Stop — without error — after this many firings
-                (default 1); None means run until no transition is enabled.
+                (default 1); None means run until no transition is fireable.
                 Disambiguation idiom: a return with fired < stop_after_n_firings
                 proves the net quiesced; fired == stop_after_n_firings means it
                 may have been cut off mid-pipeline. Resolve by calling again (0
@@ -1378,8 +1407,8 @@ class ExecutableGraphOperations:
             place_history_length: Length of place history to maintain
             token_history_length: Length of token history to maintain
             transition_selector: Optional function to select which transition to fire.
-                Signature: (graph, enabled_transitions) -> transition_to_fire
-                If None, uses graph.transition_selector or default behavior.
+                Signature: (graph, fireable_transitions) -> transition_to_fire
+                (called positionally). If None, uses graph.transition_selector or default behavior.
             max_transitions: Deprecated alias of ``stop_after_n_firings`` (kept for
                 legacy callers; passing it warns).
 
@@ -1426,7 +1455,7 @@ class ExecutableGraphOperations:
         transition_names_to_read_edges = MapTransitionNames.to_read_edges(executable_graph)
 
         while True:
-            # stop_after_n_firings=None means run until no transition is enabled.
+            # stop_after_n_firings=None means run until no transition is fireable.
             if stop_after_n_firings is not None and transitions_fired >= stop_after_n_firings:
                 if verbose:
                     print(f"Performed {transitions_fired} transitions, stop_after_n_firings reached.")

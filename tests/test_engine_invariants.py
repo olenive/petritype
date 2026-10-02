@@ -18,7 +18,7 @@ Each test encodes intended behavior that the engine at the time violated:
    body may have mutated them before failing); restore_tokens_on_failure=True
    opts into best-effort restoration.
 5. execute_graph(stop_after_n_firings=None) crashed on `>=` against None instead
-   of running until no transition is enabled.
+   of running until no transition is fireable.
 6. return_index was assigned by the construction helpers but ignored by the
    fire path; indexed return edges now split a tuple result by position.
 7. ensure_token_type_matches_place_type treated any list token in a
@@ -246,7 +246,7 @@ class TestReturnIndexRouting:
 
 
 class TestUnboundedExecution:
-    """Issue 5: stop_after_n_firings=None means run until nothing is enabled."""
+    """Issue 5: stop_after_n_firings=None means run until nothing is fireable."""
 
     @pytest.mark.asyncio
     async def test_stop_after_n_firings_none_runs_to_completion(self):

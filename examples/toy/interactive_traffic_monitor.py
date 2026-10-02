@@ -71,12 +71,12 @@ def classify(reading: Reading) -> Classification:
 
 
 def user_first_selector(
-    graph: ExecutableGraph, enabled: list[FunctionTransitionNode]
+    graph: ExecutableGraph, fireable: list[FunctionTransitionNode]
 ) -> FunctionTransitionNode | None:
     """Priority: a pending user injection wins, then classify pending readings,
     then auto-sample. This is next-fire responsiveness -- the injected input is
     acted on before the net generates anything new."""
-    by_name = {t.name: t for t in enabled}
+    by_name = {t.name: t for t in fireable}
     for name in ("InjectReading", "Classify", "AutoSample"):
         if name in by_name:
             return by_name[name]

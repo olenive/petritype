@@ -184,7 +184,7 @@ class TestErrorAfterNFirings:
         ctx = RunContext(graph=_chain_graph(1, [1]), error_after_n_firings=1)
         first = await Runner.run(ctx)  # fires exactly 1, quiesces
         assert first.quiesced is True
-        second = await Runner.run(ctx)  # nothing enabled — spent fuse must not raise
+        second = await Runner.run(ctx)  # nothing fireable — spent fuse must not raise
         assert second.n_fired == 0
         assert second.quiesced is True
 

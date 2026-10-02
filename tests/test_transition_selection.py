@@ -72,8 +72,8 @@ class TestTransitionSelector:
 
     def test_transition_selector_can_be_set(self):
         """Test that transition_selector can be set on graph."""
-        def my_selector(graph, enabled):
-            return enabled[0] if enabled else None
+        def my_selector(graph, fireable):
+            return fireable[0] if fireable else None
 
         graph_nodes = [
             ListPlaceNode('Input', int, [1]),
@@ -121,9 +121,9 @@ class TestExecuteGraphWithSelector:
         def increment(x: int) -> int:
             return x + 1
 
-        # Custom selector that always picks first enabled
-        def first_enabled_selector(graph, enabled):
-            return enabled[0] if enabled else None
+        # Custom selector that always picks first fireable
+        def first_fireable_selector(graph, fireable):
+            return fireable[0] if fireable else None
 
         graph = ExecutableGraphOperations.construct_graph([
             ListPlaceNode('Input', int, [1, 2, 3]),
@@ -137,7 +137,7 @@ class TestExecuteGraphWithSelector:
         updated_graph, fired = await ExecutableGraphOperations.execute_graph(
             graph,
             stop_after_n_firings=1,
-            transition_selector=first_enabled_selector,
+            transition_selector=first_fireable_selector,
         )
 
         assert fired == 1
@@ -150,7 +150,7 @@ class TestExecuteGraphWithSelector:
             return x + 1
 
         # Selector that returns None (no transition should fire)
-        def no_selector(graph, enabled):
+        def no_selector(graph, fireable):
             return None
 
         graph = ExecutableGraphOperations.construct_graph([
@@ -178,11 +178,11 @@ class TestExecuteGraphWithSelector:
         def increment(x: int) -> int:
             return x + 1
 
-        def graph_selector(graph, enabled):
+        def graph_selector(graph, fireable):
             return None  # Would fire nothing
 
-        def param_selector(graph, enabled):
-            return enabled[0] if enabled else None  # Fire first
+        def param_selector(graph, fireable):
+            return fireable[0] if fireable else None  # Fire first
 
         graph = ExecutableGraphOperations.construct_graph([
             ListPlaceNode('Input', int, [1]),
@@ -218,8 +218,8 @@ class TestSelectorWithActivationFunction:
             return False
 
         # Selector that checks activation functions (guards)
-        def guard_aware_selector(graph, enabled):
-            for t in enabled:
+        def guard_aware_selector(graph, fireable):
+            for t in fireable:
                 if t.activation_function is None:
                     return t
                 # Try calling activation
@@ -261,8 +261,8 @@ class TestSelectorWithActivationFunction:
             return x - 1
 
         # Priority-based selector
-        def priority_selector(graph, enabled):
-            if not enabled:
+        def priority_selector(graph, fireable):
+            if not fireable:
                 return None
 
             def get_priority(t):
@@ -270,7 +270,7 @@ class TestSelectorWithActivationFunction:
                     return t.activation_function()
                 return 0.0
 
-            return max(enabled, key=get_priority)
+            return max(fireable, key=get_priority)
 
         graph = ExecutableGraphOperations.construct_graph([
             ListPlaceNode('Input', int, [5]),
@@ -319,8 +319,8 @@ class TestSelectorWithActivationFunction:
             return len(pool.tokens) >= 2  # Only fire if 2+ items in pool
 
         # Guard-aware selector
-        def guard_selector(graph, enabled):
-            for t in enabled:
+        def guard_selector(graph, fireable):
+            for t in fireable:
                 if t.activation_function is None:
                     return t
                 try:
@@ -449,7 +449,7 @@ class TestTieBreak:
     @pytest.mark.asyncio
     async def test_custom_selector_ignores_tie_break(self):
         graph = _two_way_tie_graph(tie_break="last_declared")
-        graph.transition_selector = lambda g, enabled: enabled[0] if enabled else None
+        graph.transition_selector = lambda g, fireable: fireable[0] if fireable else None
         graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
         assert fired == 1
         assert graph.last_fired == 'First'

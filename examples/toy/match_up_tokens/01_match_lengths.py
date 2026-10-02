@@ -34,14 +34,14 @@ def _(mo):
         unmatched tokens are returned to their original places.
 
         To avoid a futile cycle (endlessly extracting and re-depositing the same tokens
-        once no match remains), the transition carries a `guard` — an enabling condition
+        once no match remains), the transition carries a `guard` — a firing condition
         the engine checks alongside token availability: when no string/length match is
-        possible the transition is no longer enabled, so the run ends gracefully with
+        possible the transition is no longer fireable, so the run ends gracefully with
         the unmatched tokens still visible in their places.
 
         The net is fired **live**, one transition at a time:
 
-        - **Step** — fire the next enabled transition and redraw the real (mutated) net.
+        - **Step** — fire the next fireable transition and redraw the real (mutated) net.
         - **Repeat Step** — keep firing until no transition can be fired successfully.
         - **◀ Back / Forward ▶** — move through the states you have already visited.
         - **↺ Reset** — rebuild a fresh graph.
@@ -189,7 +189,7 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         """Fire one transition on the live graph.
 
         Records a snapshot only if a transition actually fired. Returns the number of
-        transitions fired — 0 means nothing was enabled, which is the signal to stop
+        transitions fired — 0 means nothing was fireable, which is the signal to stop
         auto-stepping.
         """
         graph = session["graph"]

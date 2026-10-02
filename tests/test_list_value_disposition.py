@@ -36,8 +36,8 @@ multiple output places. [] type-matches every place, but only a deposit at a
 list-typed place is observable, so ambiguity is counted over the list-typed
 matches — see TestStage2EmptyListArbitration for the three cases.
 
-Out of scope on purpose: the input side. An empty place disables a
-transition even when the argument is list-typed and could accept [] — that
+Out of scope on purpose: the input side. An empty place makes a
+transition unfireable even when the argument is list-typed and could accept [] — that
 is classic Petri-net enablement semantics, not a copy of this rule.
 """
 

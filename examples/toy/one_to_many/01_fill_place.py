@@ -27,7 +27,7 @@ def _(mo):
 
         The net is fired **live**, one transition at a time:
 
-        - **Step** — fire the next enabled transition and redraw the real (mutated) net.
+        - **Step** — fire the next fireable transition and redraw the real (mutated) net.
         - **Repeat Step** — keep firing until no transition can be fired successfully.
         - **◀ Back / Forward ▶** — move through the states you have already visited.
         - **↺ Reset** — rebuild a fresh graph.
@@ -154,7 +154,7 @@ def _(ExecutableGraphOperations, RustworkxToGraphviz, graphviz_draw, to_frame):
         """Fire one transition on the live graph.
 
         Records a snapshot only if a transition actually fired. Returns the number of
-        transitions fired — 0 means nothing was enabled, which is the signal to stop
+        transitions fired — 0 means nothing was fireable, which is the signal to stop
         auto-stepping.
         """
         graph = session["graph"]

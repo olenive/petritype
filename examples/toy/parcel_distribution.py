@@ -27,8 +27,8 @@ def _(mo):
         - **Perpetual execution** — `Receive Parcel` has no inputs, so it generates tokens
           from nothing.
         - **Time-based guards** — `guard`s use wall-clock time (`1s` arrivals, `5s`
-          dispatch), so timing is controlled by enabling conditions the engine checks
-          during enabled-transition discovery, not by sleeping inside transitions.
+          dispatch), so timing is controlled by firing conditions the engine checks
+          during fireable-transition discovery, not by sleeping inside transitions.
         - **Probabilistic behaviour** — each parcel has a 1-in-10 chance of being left
           behind.
 

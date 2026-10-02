@@ -1,11 +1,11 @@
 """Tests for the per-transition `guard` and `priority` callables.
 
-`guard` is engine-level semantics: an (ExecutableGraph) -> bool enabling condition
-checked during enabled-transition discovery alongside token availability, in every
+`guard` is engine-level semantics: an (ExecutableGraph) -> bool firing condition
+checked during fireable-transition discovery alongside token availability, in every
 execution mode (sequential and both concurrent runner loops). `priority` is
 selection policy: an (ExecutableGraph) -> float hint the default selector uses to
-fire the highest-priority enabled transition — unset scores 0.0 and ties fall back
-to definition order, so nets without priorities keep the old first-enabled
+fire the highest-priority fireable transition — unset scores 0.0 and ties fall back
+to definition order, so nets without priorities keep the old first-fireable
 behaviour.
 
 The legacy `activation_function` conflated both roles and the engine never
@@ -21,9 +21,12 @@ import pytest
 
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
+    MapPlaceNames,
+    MapTransitionNames,
     ReturnedEdgeFromTransition,
 )
 from petritype.runtime import Disable, ExecutionMode, RunContext, Runner
@@ -61,10 +64,10 @@ def _two_lane_graph(first_kwargs=None, second_kwargs=None, a_tokens=(1,), b_toke
 
 
 class TestGuard:
-    """A failing guard means "not enabled", indistinguishable from missing tokens."""
+    """A failing guard means "not fireable", indistinguishable from missing tokens."""
 
     @pytest.mark.asyncio
-    async def test_failing_guard_disables_the_transition(self):
+    async def test_failing_guard_makes_the_transition_unfireable(self):
         graph = _relay_graph(guard=lambda graph: False)
         graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None)
         assert fired == 0
@@ -73,7 +76,7 @@ class TestGuard:
 
     @pytest.mark.asyncio
     async def test_guard_reads_the_live_marking(self):
-        # Enabled only while more than one token remains: the run ends with the
+        # Fireable only while more than one token remains: the run ends with the
         # last token still in place, not when the tokens run out.
         graph = _relay_graph(guard=lambda graph: len(graph.place_named('In').tokens) > 1)
         graph, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None)
@@ -83,7 +86,7 @@ class TestGuard:
 
     @pytest.mark.asyncio
     async def test_guard_applies_in_the_concurrent_runner(self):
-        # The concurrent runner has its own enabled-discovery sweep; a guarded
+        # The concurrent runner has its own fireable-discovery sweep; a guarded
         # transition must not be launched there either.
         graph = _relay_graph(guard=lambda graph: False)
         ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT)
@@ -93,7 +96,7 @@ class TestGuard:
 
 
 class TestPriority:
-    """The default selector fires the highest-priority enabled transition."""
+    """The default selector fires the highest-priority fireable transition."""
 
     @pytest.mark.asyncio
     async def test_higher_priority_fires_before_definition_order(self):
@@ -177,7 +180,7 @@ class TestRunnerDisableKeepsSelectionPolicy:
     @pytest.mark.asyncio
     async def test_custom_selector_still_chooses_among_the_non_disabled(self):
         graph = _shared_input_graph(['A', 'B', 'C'])
-        graph.transition_selector = lambda graph, enabled: enabled[-1] if enabled else None
+        graph.transition_selector = lambda graph, fireable: fireable[-1] if fireable else None
         summary = await _run_once_with_disabled(graph, 'C')
         assert summary.fired == {'B': 1}
 
@@ -193,3 +196,23 @@ class TestRunnerDisableKeepsSelectionPolicy:
         summary = await _run_once_with_disabled(graph, 'A', 'B')
         assert summary.n_fired == 0
         assert graph.place_named('In').tokens == [1]
+
+
+class TestTransitionIsEnabledDeprecation:
+    """`transition_is_enabled` was renamed `transition_is_fireable` ("enabled" now means only
+    the Enable/Disable switch); the old name is a warning alias with the same answer."""
+
+    @pytest.mark.parametrize("guard", [None, lambda graph: False])
+    def test_alias_warns_and_matches_transition_is_fireable(self, guard):
+        graph = _relay_graph(guard=guard)
+        maps = dict(
+            transition=graph.transitions[0],
+            executable_graph=graph,
+            transition_names_to_incoming_edges=MapTransitionNames.to_incoming_edges(graph),
+            place_names_to_nodes=MapPlaceNames.to_list_place_nodes(graph),
+            transition_names_to_read_edges=MapTransitionNames.to_read_edges(graph),
+        )
+        expected = ExecutableGraphCheck.transition_is_fireable(**maps)
+        assert expected is (guard is None)
+        with pytest.warns(DeprecationWarning, match="transition_is_fireable"):
+            assert ExecutableGraphCheck.transition_is_enabled(**maps) is expected

@@ -43,7 +43,7 @@ def _chain_graph(length: int, tokens=(0,)):
 
 
 def _two_lane_graph():
-    """Two independent lanes, both enabled from the start. The concurrent sweep
+    """Two independent lanes, both fireable from the start. The concurrent sweep
     launches both in one pass and their (synchronous) bodies complete in the
     same ``asyncio.wait`` batch — the case where ``last_fired`` alone would
     lose a firing."""

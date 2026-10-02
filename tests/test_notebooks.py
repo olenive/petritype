@@ -14,7 +14,7 @@ Two tiers, both gated behind the ``notebooks`` marker (deselected by default —
   state to completion, asserting it fires exactly its expected number of transitions and that
   a valid PNG plot is recorded for the initial state and for every fired step. The counts are
   exact because a deadlock is indistinguishable from normal completion from outside (both are
-  just "nothing enabled"), so "it terminated" alone would let a net that stalls halfway pass.
+  just "nothing fireable"), so "it terminated" alone would let a net that stalls halfway pass.
 """
 
 from __future__ import annotations

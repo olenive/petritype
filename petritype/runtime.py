@@ -16,7 +16,7 @@ Layers built so far:
   A control/UI produces commands; it never touches the net.
 - **Real-time (#6):** `run_indefinitely` drives the net on an internal clock until `stop` is
   set, draining input each tick and surviving idle ticks (it never stops just because nothing
-  is enabled).
+  is fireable).
 - **Offloaded bodies (#8):** a synchronous transition marked `execution="thread"` runs on a
   thread-pool executor instead of the event loop, so blocking user code can't stall the runner.
 - **Read arcs (#10):** a transition can read a place's tokens as an argument without consuming
@@ -324,8 +324,8 @@ def _selector_for(ctx: RunContext):
         return None
     disabled = ctx.disabled
 
-    def selector(graph, enabled):
-        remaining = [t for t in enabled if t.name not in disabled]
+    def selector(graph, fireable):
+        remaining = [t for t in fireable if t.name not in disabled]
         if not remaining:
             return None
         return (graph.transition_selector or default_transition_selector)(graph, remaining)
@@ -366,18 +366,18 @@ def _blow_fuse(ctx: RunContext, transition_name: str) -> None:
 
 def _check_fuse(ctx: RunContext, place_nodes: dict, incoming: dict, read: dict) -> None:
     """Sequential-path fuse check on prebuilt maps: raise iff the fuse is spent *and*
-    a firing would be attempted (some non-disabled transition is enabled). Costs one
+    a firing would be attempted (some non-disabled transition is fireable). Costs one
     int compare until the fuse is spent. A custom selector that would have vetoed
-    every enabled transition is not consulted — an enabled net with a spent fuse
+    every fireable transition is not consulted — a fireable net with a spent fuse
     counts as attempting. (The concurrent loops don't need this sweep: they check
-    the fuse right before each launch, where enabledness is already established.)"""
+    the fuse right before each launch, where fireability is already established.)"""
     if not _fuse_spent(ctx):
         return
     graph = ctx.graph
     for transition in graph.transitions:
         if transition.name in ctx.disabled:
             continue
-        if ExecutableGraphCheck.transition_is_enabled(
+        if ExecutableGraphCheck.transition_is_fireable(
             transition=transition,
             executable_graph=graph,
             transition_names_to_incoming_edges=incoming,
@@ -499,7 +499,7 @@ class Runner:
         """Drive the net on an internal clock — forever — draining input each tick and
         notifying observers, until ``ctx.stop`` is set (or the task is cancelled).
 
-        Unlike ``run_to_completion`` it does **not** stop on an idle tick: nothing enabled just
+        Unlike ``run_to_completion`` it does **not** stop on an idle tick: nothing fireable just
         means the net is waiting for input or a time-based guard. This is the net-driven /
         real-time regime (#6) — the caller launches it as a task and ends it via ``ctx.stop``.
         Observers are awaited between ticks, so keep them cheap; a slow renderer would throttle
@@ -589,7 +589,7 @@ class Runner:
                     for transition in graph.transitions:
                         if transition.name in airborne or transition.name in ctx.disabled:
                             continue  # already running, or toggled off via Disable
-                        if ExecutableGraphCheck.transition_is_enabled(
+                        if ExecutableGraphCheck.transition_is_fireable(
                             transition=transition,
                             executable_graph=graph,
                             transition_names_to_incoming_edges=incoming,
@@ -702,7 +702,7 @@ class Runner:
                 for transition in graph.transitions:
                     if transition.name in airborne or transition.name in ctx.disabled:
                         continue
-                    if ExecutableGraphCheck.transition_is_enabled(
+                    if ExecutableGraphCheck.transition_is_fireable(
                         transition=transition,
                         executable_graph=graph,
                         transition_names_to_incoming_edges=incoming,
