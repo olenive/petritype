@@ -1,6 +1,7 @@
 # The protocol runner and the library changes behind it
 
-Status: **design proposal, 2026-10-03, not yet implemented.** The protocol
+Status: **design of 2026-10-03; token ids and events built the same day**
+("As built" below), the runner module not yet. The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -88,6 +89,30 @@ the `Enable`/`Disable` switch.
   the switch lives on `RunContext.disabled` (runner-level, as since 0.1.3),
   not on the graph. That stays: `enable`/`disable` over the protocol
   enqueue the existing `Enable`/`Disable` commands and drain them.
+
+### As built, 2026-10-03
+
+Token ids and events landed as designed, with these settlements:
+
+- `ParamChanged.param` is one keyword name, one event per key, matching the
+  protocol's `{param, transition?}`.
+- A stage-3 failure (a wrongly typed element of a routed tuple) records
+  `Failed(restored=False)` after an `Added` for each token already placed,
+  and the original `TypeError` still propagates as before.
+- In concurrent mode a `Mutated` is emitted only if the token is still in
+  its place when the firing completes; a peer may have consumed it.
+- `construct_graph(..., record_events=False)` carries the flag.
+- Resync runs at the start of a firing, of command application, of each
+  concurrent launch sweep, and inside the id lookup. It compares lengths
+  only: a same-length replacement of `place.tokens` keeps the old ids, a
+  place object shared by two graphs is re-seeded by the graph built last,
+  and a body that resizes a place through a whole-list mutate edge is
+  repaired at the next entry point. All three are the price of keeping
+  `place.tokens` a plain list.
+- The events are `petritype/core/events.py`; the id bookkeeping is the
+  `TokenIds` namespace class; a firing's events go through `GraphEvents`
+  and `ExecutableGraphOperations.deposit_and_record`, which both execution
+  modes share, so every firing is reported exactly once.
 
 ### What the runner reads from the graph
 

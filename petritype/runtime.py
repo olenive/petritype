@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -56,11 +57,15 @@ from petritype.core.executable_graph_components import (
     ExecutableGraph,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
+    FiringTokenIds,
     FunctionTransitionNode,
+    GraphEvents,
     MapPlaceNames,
     MapTransitionNames,
+    TokenIds,
     default_transition_selector,
 )
+from petritype.core.events import Added, ParamChanged, Removed, Toggled
 from petritype.core.type_comparisons import CompareTypes
 
 _log = logging.getLogger(__name__)
@@ -266,8 +271,14 @@ def _reject(ctx: RunContext, reason: str) -> bool:
 
 
 def _apply_command(ctx: RunContext, cmd: Command) -> bool:
-    """Apply one input command to the live graph. Returns True if applied."""
+    """Apply one input command to the live graph. Returns True if applied.
+
+    Token ids and events: ``Extend`` gives each new token a fresh id (``Added``);
+    ``SetTokens`` retires every old id (``Removed``) and gives every new token a
+    fresh one (``Added``); ``SetParam`` records one ``ParamChanged`` per keyword;
+    ``Enable``/``Disable`` record ``Toggled`` only when the switch changed."""
     graph = ctx.graph
+    TokenIds.resync(graph)
 
     if isinstance(cmd, (Extend, SetTokens)):
         place = graph.place_named(cmd.place)
@@ -282,10 +293,13 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
                 return _reject(
                     ctx, f"token {token!r} does not match place {place.name!r} type {place.type!r}"
                 )
-        if isinstance(cmd, Extend):
-            place.tokens.extend(cmd.tokens)
-        else:  # SetTokens
-            place.tokens = list(cmd.tokens)
+        if isinstance(cmd, SetTokens):
+            for token_id in place.token_ids:
+                GraphEvents.record(graph, Removed(place.name, token_id))
+            place.tokens = []
+            place._token_ids = []
+        for token_id in TokenIds.append(graph, place, list(cmd.tokens)):
+            GraphEvents.record(graph, Added(place.name, token_id))
         return True
 
     if isinstance(cmd, SetParam):
@@ -295,15 +309,21 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
         if not isinstance(cmd.kwargs, dict):
             return _reject(ctx, f"SetParam.kwargs must be a dict, got {type(cmd.kwargs).__name__}")
         transition.kwargs = {**(transition.kwargs or {}), **cmd.kwargs}
+        for param in cmd.kwargs:
+            GraphEvents.record(graph, ParamChanged(cmd.transition, param))
         return True
 
     if isinstance(cmd, (Enable, Disable)):
         if _transition_named(graph, cmd.transition) is None:
             return _reject(ctx, f"unknown transition {cmd.transition!r}")
-        if isinstance(cmd, Disable):
-            ctx.disabled.add(cmd.transition)
-        else:
+        enabled = isinstance(cmd, Enable)
+        was_enabled = cmd.transition not in ctx.disabled
+        if enabled:
             ctx.disabled.discard(cmd.transition)
+        else:
+            ctx.disabled.add(cmd.transition)
+        if enabled != was_enabled:
+            GraphEvents.record(graph, Toggled(cmd.transition, enabled))
         return True
 
     return _reject(ctx, f"unrecognised command {cmd!r}")
@@ -408,6 +428,70 @@ async def _fire_one(ctx: RunContext, place_nodes: dict, incoming: dict, outgoing
         return False
     ctx.n_fired += 1
     return True
+
+
+def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: dict, incoming: dict,
+            outgoing: dict, read: dict) -> tuple[asyncio.Future, FiringTokenIds, dict]:
+    """Concurrent-mode launch: consume the inputs synchronously (no await, so peers
+    can't grab the same tokens), then start the body as a background task. The task
+    resolves to ``(outputs, duration_ms)``, timed around the body itself rather than
+    around the loop's wait for it."""
+    firing_ids = FiringTokenIds()
+    args, _ = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
+        transition=transition,
+        transition_names_to_incoming_edges=incoming,
+        place_names_to_nodes=place_nodes,
+        transition_names_to_read_edges=read,
+        firing_ids=firing_ids,
+    )
+
+    async def timed_body():
+        started = time.perf_counter()
+        outputs = await ExecutableGraphOperations.stage_2_call_transition_function(
+            transition=transition,
+            tokens_kwargs=args,
+            transition_names_to_outgoing_edges=outgoing,
+            place_names_to_nodes=place_nodes,
+            executor=ctx.thread_pool,
+        )
+        return outputs, (time.perf_counter() - started) * 1000.0
+
+    return asyncio.ensure_future(timed_body()), firing_ids, args
+
+
+def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransitionNode, consumed: dict,
+              firing_ids: FiringTokenIds, place_nodes: dict, incoming: dict) -> None:
+    """Concurrent-mode completion of one finished task: deposit its outputs and
+    record its events, or raise ``TransitionFailedError`` (restoring the inputs, ids
+    included, when ``graph.restore_tokens_on_failure`` is set)."""
+    graph = ctx.graph
+    try:
+        outputs, duration_ms = task.result()
+    except Exception as exception:
+        ExecutableGraphOperations.handle_failed_firing(
+            transition=transition,
+            exception=exception,
+            input_edge_names_to_tokens=consumed,
+            transition_names_to_incoming_edges=incoming,
+            place_names_to_nodes=place_nodes,
+            restore_tokens_on_failure=graph.restore_tokens_on_failure,
+            executable_graph=graph,
+            firing_ids=firing_ids,
+        )
+    ExecutableGraphOperations.deposit_and_record(
+        executable_graph=graph,
+        transition=transition,
+        output_place_names_to_tokens=outputs,
+        place_names_to_nodes=place_nodes,
+        firing_ids=firing_ids,
+        duration_ms=duration_ms,
+    )
+    name = transition.name
+    graph.step_count += 1
+    graph.fired_counts[name] = graph.fired_counts.get(name, 0) + 1
+    # Convenience only: names *one* completion of this batch. Observers
+    # that need every firing should diff fired_counts via fired_since.
+    graph.last_fired = name
 
 
 def _summarise(previous: dict[str, int], graph: ExecutableGraph, quiesced: bool) -> RunSummary:
@@ -579,6 +663,8 @@ class Runner:
             while True:
                 if Runner.drain_inbox(ctx):
                     await _notify(ctx)
+                # An observer or a body may have assigned place.tokens directly.
+                TokenIds.resync(graph)
 
                 capped = (
                     stop_after_n_firings is not None
@@ -598,25 +684,9 @@ class Runner:
                         ):
                             if _fuse_spent(ctx):
                                 _blow_fuse(ctx, transition.name)
-                            # Consume synchronously (no await) so peers can't grab the same tokens...
-                            args, _ = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
-                                transition=transition,
-                                transition_names_to_incoming_edges=incoming,
-                                place_names_to_nodes=place_nodes,
-                                transition_names_to_read_edges=read,
-                            )
-                            # ...then launch the body as a background task.
-                            task = asyncio.ensure_future(
-                                ExecutableGraphOperations.stage_2_call_transition_function(
-                                    transition=transition,
-                                    tokens_kwargs=args,
-                                    transition_names_to_outgoing_edges=outgoing,
-                                    place_names_to_nodes=place_nodes,
-                                    executor=ctx.thread_pool,
-                                )
-                            )
+                            task, firing_ids, args = _launch(ctx, transition, place_nodes, incoming, outgoing, read)
                             in_flight[task] = transition.name
-                            flight_state[task] = (transition, args)
+                            flight_state[task] = (transition, args, firing_ids)
                             airborne.add(transition.name)
                             launched_this_call += 1
                             ctx.n_fired += 1
@@ -638,31 +708,13 @@ class Runner:
 
                 done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
-                    name = in_flight.pop(task)
-                    fired_transition, consumed = flight_state.pop(task)
-                    try:
-                        outputs = task.result()
-                    except Exception as exception:
+                    in_flight.pop(task)
+                    fired_transition, consumed, firing_ids = flight_state.pop(task)
+                    if task.exception() is not None:
                         graph.in_flight = set(in_flight.values())
-                        # Raises TransitionFailedError carrying the consumed tokens;
-                        # restores them first when graph.restore_tokens_on_failure is set.
-                        ExecutableGraphOperations.handle_failed_firing(
-                            transition=fired_transition,
-                            exception=exception,
-                            input_edge_names_to_tokens=consumed,
-                            transition_names_to_incoming_edges=incoming,
-                            place_names_to_nodes=place_nodes,
-                            restore_tokens_on_failure=graph.restore_tokens_on_failure,
-                        )
-                    ExecutableGraphOperations.add_tokens_to_places(
-                        output_place_names_to_tokens=outputs,
-                        place_names_to_nodes=place_nodes,
-                    )
-                    graph.step_count += 1
-                    graph.fired_counts[name] = graph.fired_counts.get(name, 0) + 1
-                    # Convenience only: names *one* completion of this batch. Observers
-                    # that need every firing should diff fired_counts via fired_since.
-                    graph.last_fired = name
+                    # Raises TransitionFailedError carrying the consumed tokens if the
+                    # body failed; restores them first when graph.restore_tokens_on_failure is set.
+                    _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
                 graph.in_flight = set(in_flight.values())
                 await _notify(ctx)  # tokens deposited — branches advanced one stage
         finally:
@@ -697,6 +749,8 @@ class Runner:
         try:
             while not (ctx.stop is not None and ctx.stop.is_set()):
                 changed = bool(Runner.drain_inbox(ctx))
+                # An observer or a body may have assigned place.tokens directly.
+                TokenIds.resync(graph)
 
                 airborne = set(in_flight.values())
                 for transition in graph.transitions:
@@ -711,53 +765,19 @@ class Runner:
                     ):
                         if _fuse_spent(ctx):
                             _blow_fuse(ctx, transition.name)
-                        args, _ = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
-                            transition=transition,
-                            transition_names_to_incoming_edges=incoming,
-                            place_names_to_nodes=place_nodes,
-                            transition_names_to_read_edges=read,
-                        )
-                        task = asyncio.ensure_future(
-                            ExecutableGraphOperations.stage_2_call_transition_function(
-                                transition=transition,
-                                tokens_kwargs=args,
-                                transition_names_to_outgoing_edges=outgoing,
-                                place_names_to_nodes=place_nodes,
-                                executor=ctx.thread_pool,
-                            )
-                        )
+                        task, firing_ids, args = _launch(ctx, transition, place_nodes, incoming, outgoing, read)
                         in_flight[task] = transition.name
-                        flight_state[task] = (transition, args)
+                        flight_state[task] = (transition, args, firing_ids)
                         airborne.add(transition.name)
                         ctx.n_fired += 1
                         changed = True
 
                 for task in [t for t in in_flight if t.done()]:
-                    name = in_flight.pop(task)
-                    fired_transition, consumed = flight_state.pop(task)
-                    try:
-                        outputs = task.result()
-                    except Exception as exception:
-                        # Raises TransitionFailedError carrying the consumed
-                        # tokens; restores them first when
-                        # graph.restore_tokens_on_failure is set.
-                        ExecutableGraphOperations.handle_failed_firing(
-                            transition=fired_transition,
-                            exception=exception,
-                            input_edge_names_to_tokens=consumed,
-                            transition_names_to_incoming_edges=incoming,
-                            place_names_to_nodes=place_nodes,
-                            restore_tokens_on_failure=graph.restore_tokens_on_failure,
-                        )
-                    ExecutableGraphOperations.add_tokens_to_places(
-                        output_place_names_to_tokens=outputs,
-                        place_names_to_nodes=place_nodes,
-                    )
-                    graph.step_count += 1
-                    graph.fired_counts[name] = graph.fired_counts.get(name, 0) + 1
-                    # Convenience only: names *one* completion of this batch. Observers
-                    # that need every firing should diff fired_counts via fired_since.
-                    graph.last_fired = name
+                    in_flight.pop(task)
+                    fired_transition, consumed, firing_ids = flight_state.pop(task)
+                    # Raises TransitionFailedError carrying the consumed tokens if the
+                    # body failed; restores them first when graph.restore_tokens_on_failure is set.
+                    _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
                     changed = True
 
                 graph.in_flight = set(in_flight.values())

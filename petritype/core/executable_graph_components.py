@@ -1,14 +1,17 @@
 from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
 from typing import Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, PrivateAttr, model_validator
 import asyncio
 import functools
 import inspect
+import time
 import warnings
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
+from petritype.core.events import Added, Event, Failed, Fired, Mutated, PlaceTokenId, Resynced
 from petritype.core.type_comparisons import CompareTypes
 from petritype.helpers.structures import SafeMerge
 
@@ -75,6 +78,19 @@ class ListPlaceNode(PositionalArgsBaseModel):
     type: Any  # Temporarily accept any value  
     tokens: list[Any] = []
     # TODO: Add validation to check that type matches tokens
+    # Stable ids of the tokens, parallel to ``tokens`` (same length, same order). Assigned
+    # by the graph that holds the place (``TokenIds``); empty until then. Private so that
+    # ``tokens`` keeps its type and every existing reader keeps working.
+    _token_ids: list[int] = PrivateAttr(default_factory=list)
+
+    @property
+    def token_ids(self) -> tuple[int, ...]:
+        """Read-only view of the ids of ``tokens``, index for index.
+
+        Only meaningful once the place belongs to an ``ExecutableGraph``. If code
+        assigned ``tokens`` directly the two can disagree until the graph's next
+        engine entry point resyncs them (``TokenIds.resync``)."""
+        return tuple(self._token_ids)
 
     @model_validator(mode="after")
     def validate_type_field(self):
@@ -250,6 +266,17 @@ class ExecutableGraph(BaseModel):
             enters. Neither is more correct, so it is a setting, and the default
             keeps the original behaviour. Only the default selector reads it; a
             custom ``transition_selector`` is unaffected.
+        next_token_id: The id the next token to enter a place will get. Every token
+            gets a stable integer id when it enters a place (seed tokens at
+            construction, in place order, from 1; then deposits, ``Extend`` and
+            ``SetTokens``). Ids are never reused: a token keeps its id while it rests
+            in a place, a consumed token's id is retired, and a token restored after a
+            failed firing comes back with its old id. Read them with
+            ``place.token_ids``; find one with ``TokenIds.locate``.
+        record_events: When True the engine and the runtime append event records
+            (``petritype.core.events``) to the graph, read with ``drain_events()``.
+            Off by default, so a program that never drains does not grow a list
+            for ever. Id bookkeeping happens either way.
     """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
@@ -308,6 +335,23 @@ class ExecutableGraph(BaseModel):
     # immutable or bodies do not mutate them before they can fail. Either way
     # the raised TransitionFailedError carries the consumed tokens.
     restore_tokens_on_failure: bool = False
+    # Monotonic token-id counter; see the class docstring. Never reset except by
+    # constructing a new graph.
+    next_token_id: int = 1
+    record_events: bool = False
+    # Event records waiting to be drained; never dumped with the model.
+    _events: list[Event] = PrivateAttr(default_factory=list)
+
+    def model_post_init(self, context: Any, /) -> None:
+        # Seed tokens get their ids here, in place order. Runs once per construction
+        # (not on model_copy), after pydantic has initialised the private attributes.
+        TokenIds.seed(self)
+
+    def drain_events(self) -> list[Event]:
+        """Return the recorded events, oldest first, and clear them. Empty unless
+        ``record_events`` was on while they happened."""
+        events, self._events = self._events, []
+        return events
 
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
@@ -478,6 +522,146 @@ class ExecutableGraph(BaseModel):
                     )
 
         return values
+
+
+@dataclass
+class FiringTokenIds:
+    """Which token ids one firing touched. Passive state, filled in as the firing
+    goes: stage 1 records what it consumed (per argument, in the order taken) and
+    what it handed over through mutate edges; stage 3 records what it deposited.
+    ``restore_argument_tokens_to_places`` reads ``consumed`` to put the same ids back.
+    """
+
+    consumed: dict[ArgumentName, tuple[PlaceNodeName, list[int]]] = field(default_factory=dict)
+    mutated: list[PlaceTokenId] = field(default_factory=list)
+    produced: list[PlaceTokenId] = field(default_factory=list)
+
+
+class TokenIds:
+    """Functions that keep each place's token ids in step with its tokens.
+
+    Every token in a place has a stable integer id (``ListPlaceNode.token_ids``,
+    parallel to ``tokens``) drawn from ``ExecutableGraph.next_token_id``. The engine
+    moves ids together with tokens; code that assigns or resizes ``place.tokens``
+    directly bypasses them, which ``resync`` detects and repairs at each engine
+    entry point.
+    """
+
+    def allocate(executable_graph: ExecutableGraph, count: int) -> list[int]:
+        """Take ``count`` fresh ids from the graph's counter."""
+        start = executable_graph.next_token_id
+        executable_graph.next_token_id = start + count
+        return list(range(start, start + count))
+
+    def seed(executable_graph: ExecutableGraph) -> None:
+        """Give every token already in a place a fresh id, place by place in
+        declaration order. Called once, when the graph is constructed."""
+        for place in executable_graph.places:
+            place._token_ids = TokenIds.allocate(executable_graph, len(place.tokens))
+
+    def resync(executable_graph: ExecutableGraph) -> tuple[PlaceNodeName, ...]:
+        """Re-id every place whose token list and id list differ in length, and
+        record a ``Resynced`` event for each. Returns the names of the places re-ided.
+
+        A length check is all it can do: code that swaps a token for another in
+        place, keeping the length, goes unseen and the old id names the new token.
+        Called at every engine entry point (each firing, each command applied, each
+        concurrent-loop sweep, each ``locate``); cheap, one ``len`` pair per place.
+        """
+        resynced = []
+        for place in executable_graph.places:
+            if len(place._token_ids) != len(place.tokens):
+                place._token_ids = TokenIds.allocate(executable_graph, len(place.tokens))
+                GraphEvents.record(executable_graph, Resynced(place.name))
+                resynced.append(place.name)
+        return tuple(resynced)
+
+    def append(executable_graph: ExecutableGraph, place: ListPlaceNode, tokens: list) -> list[int]:
+        """Append ``tokens`` to ``place`` with fresh ids; return the ids."""
+        ids = TokenIds.allocate(executable_graph, len(tokens))
+        place.tokens.extend(tokens)
+        place._token_ids.extend(ids)
+        return ids
+
+    def locate(executable_graph: ExecutableGraph, token_id: int) -> Optional[tuple[PlaceNodeName, Any]]:
+        """``(place_name, token)`` for the live token with this id, or None if no
+        place holds it (consumed, removed, or never issued). Resyncs first, so a
+        place whose tokens were assigned directly answers with its fresh ids."""
+        TokenIds.resync(executable_graph)
+        for place in executable_graph.places:
+            for index, candidate in enumerate(place._token_ids):
+                if candidate == token_id:
+                    return place.name, place.tokens[index]
+        return None
+
+
+class GraphEvents:
+    """Functions that append event records (``petritype.core.events``) to a graph.
+    Every append goes through ``record``, which does nothing unless
+    ``executable_graph.record_events`` is on."""
+
+    def record(executable_graph: ExecutableGraph, event: Event) -> None:
+        if executable_graph.record_events:
+            executable_graph._events.append(event)
+
+    def consumed_pairs(firing_ids: FiringTokenIds) -> tuple[PlaceTokenId, ...]:
+        """The consumed ids as ``(place, id)`` pairs, in the order they were taken."""
+        return tuple(
+            (place_name, token_id)
+            for place_name, ids in firing_ids.consumed.values()
+            for token_id in ids
+        )
+
+    def record_mutations(
+        executable_graph: ExecutableGraph,
+        firing_ids: FiringTokenIds,
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
+    ) -> None:
+        """One ``Mutated`` per token handed over through a mutate edge that is still
+        in its place (in concurrent mode a peer may have consumed it meanwhile)."""
+        for place_name, token_id in firing_ids.mutated:
+            if token_id in place_names_to_nodes[place_name]._token_ids:
+                GraphEvents.record(executable_graph, Mutated(place_name, token_id))
+
+    def record_fired(
+        executable_graph: ExecutableGraph,
+        transition_name: TransitionName,
+        firing_ids: FiringTokenIds,
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
+        duration_ms: float,
+    ) -> None:
+        """A firing completed: its ``Mutated`` records, then its ``Fired``."""
+        if not executable_graph.record_events:
+            return
+        GraphEvents.record_mutations(executable_graph, firing_ids, place_names_to_nodes)
+        GraphEvents.record(executable_graph, Fired(
+            transition=transition_name,
+            consumed=GraphEvents.consumed_pairs(firing_ids),
+            produced=tuple(firing_ids.produced),
+            duration_ms=duration_ms,
+        ))
+
+    def record_failed(
+        executable_graph: ExecutableGraph,
+        transition_name: TransitionName,
+        firing_ids: FiringTokenIds,
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
+        restored: bool,
+        exception: BaseException,
+    ) -> None:
+        """A firing failed: its ``Mutated`` records, ``Added`` for anything a failed
+        deposit had already placed, then its ``Failed``."""
+        if not executable_graph.record_events:
+            return
+        GraphEvents.record_mutations(executable_graph, firing_ids, place_names_to_nodes)
+        for place_name, token_id in firing_ids.produced:
+            GraphEvents.record(executable_graph, Added(place_name, token_id))
+        GraphEvents.record(executable_graph, Failed(
+            transition=transition_name,
+            consumed=GraphEvents.consumed_pairs(firing_ids),
+            restored=restored,
+            error=f"{type(exception).__name__}: {exception}",
+        ))
 
 
 # This is intended as shorthand for the common case when adding a transition with output(s) to a graph.
@@ -892,6 +1076,7 @@ class ExecutableGraphOperations:
         restore_tokens_on_failure: bool = False,
         expect_acyclic: bool = False,
         tie_break: Literal["first_declared", "last_declared"] = "first_declared",
+        record_events: bool = False,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -914,6 +1099,7 @@ class ExecutableGraphOperations:
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
+            record_events=record_events,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
@@ -933,10 +1119,15 @@ class ExecutableGraphOperations:
         # place_history_length: int = 1,
         token_history_length: int = 0,
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
+        firing_ids: Optional[FiringTokenIds] = None,
     ) -> tuple[dict[ArgumentName, any], Sequence[ListPlaceNode]]:
         """Remove input tokens from source places
         
         Return input tokens matched to function arguments and the input places without the removed tokens.
+
+        Token ids leave with their tokens. If ``firing_ids`` is given, the ids taken
+        (per argument, in order) and the ids handed over through mutate edges are
+        recorded on it; snapshot edges touch no ids.
 
         A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
         """
@@ -961,17 +1152,22 @@ class ExecutableGraphOperations:
                 # pass all tokens as a list.
                 tokens = place.tokens
                 place.tokens = []
+                taken_ids, place._token_ids = place._token_ids, []
                 if allow_token_copying and token_history_length >= 1:
                     tokens_copy = deepcopy(tokens)
                     place_copy.tokens.extend(tokens_copy)
                 input_edge_names_to_tokens[edge.argument] = tokens
             else:  # Pass in a single token (FIFO: consume the oldest token first).
                 token = place.tokens.pop(0)
+                taken_ids = place._token_ids[:1]
+                del place._token_ids[:1]
                 # if place_history_length >= 1:
                 if allow_token_copying and token_history_length >= 1:
                     token_copy = deepcopy(token)
                     place_copy.tokens.append(token_copy)
                 input_edge_names_to_tokens[edge.argument] = token
+            if firing_ids is not None:
+                firing_ids.consumed[edge.argument] = (place.name, taken_ids)
 
         # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
         # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
@@ -984,8 +1180,12 @@ class ExecutableGraphOperations:
                 annotation_maybe_in_list=argument_type,
             ):
                 value = place.tokens  # all tokens, as a list
+                read_ids = list(place._token_ids)
             else:
                 value = place.tokens[0]  # the single token
+                read_ids = place._token_ids[:1]
+            if firing_ids is not None and isinstance(edge, MutateEdge):
+                firing_ids.mutated.extend((place.name, token_id) for token_id in read_ids)
             input_edge_names_to_tokens[edge.argument] = (
                 deepcopy(value) if isinstance(edge, SnapshotEdge) else value
             )
@@ -997,8 +1197,13 @@ class ExecutableGraphOperations:
         input_edge_names_to_tokens: dict[ArgumentName, any],
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
+        firing_ids: Optional[FiringTokenIds] = None,
     ) -> None:
         """Put the tokens consumed by stage 1 back into their source places.
+
+        With ``firing_ids`` (as filled by stage 1) the tokens get their old ids back,
+        at the front, in the order taken. Without it the ids are not restored and the
+        graph's next ``TokenIds.resync`` re-ids those places.
 
         Used when restore_tokens_on_failure is enabled and a firing fails
         after extraction. Single tokens go back to the front of their place
@@ -1022,6 +1227,8 @@ class ExecutableGraphOperations:
                 place.tokens[:0] = input_edge_names_to_tokens[edge.argument]
             else:  # A single token was popped from the front.
                 place.tokens.insert(0, input_edge_names_to_tokens[edge.argument])
+            if firing_ids is not None and edge.argument in firing_ids.consumed:
+                place._token_ids[:0] = firing_ids.consumed[edge.argument][1]
 
     def handle_failed_firing(
         transition: FunctionTransitionNode,
@@ -1030,6 +1237,8 @@ class ExecutableGraphOperations:
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
         restore_tokens_on_failure: bool,
+        executable_graph: Optional[ExecutableGraph] = None,
+        firing_ids: Optional[FiringTokenIds] = None,
     ) -> NoReturn:
         """Raise TransitionFailedError for a firing that failed after stage 1.
 
@@ -1039,6 +1248,9 @@ class ExecutableGraphOperations:
         failing, and silently restoring possibly-corrupt tokens to a place is
         worse than a visible loss. With restore_tokens_on_failure=True they
         are restored first (best effort).
+
+        Given the graph and the firing's ids, the restored tokens get their old ids
+        back and the firing's ``Mutated`` and ``Failed`` events are recorded.
         """
         incoming_edges = transition_names_to_incoming_edges.get(transition.name, tuple())
         consumed = {
@@ -1053,8 +1265,13 @@ class ExecutableGraphOperations:
                 input_edge_names_to_tokens=input_edge_names_to_tokens,
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                 place_names_to_nodes=place_names_to_nodes,
+                firing_ids=firing_ids,
             )
             restored = True
+        if executable_graph is not None and firing_ids is not None:
+            GraphEvents.record_failed(
+                executable_graph, transition.name, firing_ids, place_names_to_nodes, restored, exception,
+            )
         raise TransitionFailedError(transition.name, consumed, restored) from exception
 
     async def stage_2_call_transition_function(
@@ -1180,8 +1397,15 @@ class ExecutableGraphOperations:
         place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
         allow_token_copying: bool = False,
         check_types: bool = True,
+        executable_graph: Optional[ExecutableGraph] = None,
+        firing_ids: Optional[FiringTokenIds] = None,
     ) -> dict[PlaceNodeName, ListPlaceNode]:
         """Distribute the output tokens to the corresponding places.
+
+        Every deposited token is a new token with a fresh id from
+        ``executable_graph`` (a copy made under token copying included), recorded on
+        ``firing_ids.produced`` if given. Without a graph no ids are assigned and the
+        graph's next ``TokenIds.resync`` re-ids the places that changed.
         
         Handle token copying if required.
         Handle updating ListPlaceNode with either a single token or a list of tokens.
@@ -1231,10 +1455,52 @@ class ExecutableGraphOperations:
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token_or_list_to_add, place)
             disposition = ExecutableGraphCheck.value_disposition_for_place(token_or_list_to_add, place)
             if disposition == "batch":
-                place.tokens.extend(token_or_list_to_add)
+                deposited = list(token_or_list_to_add)
             elif disposition == "token":
-                place.tokens.append(token_or_list_to_add)
+                deposited = [token_or_list_to_add]
+            else:
+                deposited = []
+            if executable_graph is None:
+                place.tokens.extend(deposited)
+            else:
+                ids = TokenIds.append(executable_graph, place, deposited)
+                if firing_ids is not None:
+                    firing_ids.produced.extend((place.name, token_id) for token_id in ids)
             updated_places[place_name] = place
+        return updated_places
+
+    def deposit_and_record(
+        executable_graph: ExecutableGraph,
+        transition: FunctionTransitionNode,
+        output_place_names_to_tokens: dict[PlaceNodeName, Any],
+        place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
+        firing_ids: FiringTokenIds,
+        duration_ms: float,
+        allow_token_copying: bool = False,
+    ) -> dict[PlaceNodeName, ListPlaceNode]:
+        """Stage 3 for a firing whose body returned, then its events: ``Mutated``s and
+        ``Fired`` on success. A deposit that raises (a token that does not fit its
+        place) ends the firing as ``Failed`` (consumed tokens not restored; anything
+        already deposited reported as ``Added``) and the error propagates unchanged.
+        Shared by sequential firing and the concurrent runner's completion paths, so
+        both report every firing exactly once."""
+        try:
+            updated_places = ExecutableGraphOperations.add_tokens_to_places(
+                output_place_names_to_tokens=output_place_names_to_tokens,
+                place_names_to_nodes=place_names_to_nodes,
+                allow_token_copying=allow_token_copying,
+                executable_graph=executable_graph,
+                firing_ids=firing_ids,
+            )
+        except Exception as exception:
+            GraphEvents.record_failed(
+                executable_graph, transition.name, firing_ids, place_names_to_nodes,
+                restored=False, exception=exception,
+            )
+            raise
+        GraphEvents.record_fired(
+            executable_graph, transition.name, firing_ids, place_names_to_nodes, duration_ms,
+        )
         return updated_places
 
     async def fire_one_transition(
@@ -1268,7 +1534,12 @@ class ExecutableGraphOperations:
 
         Returns the fired transition's name, or None if no transition was fireable
         (or the selector declined every fireable one).
+
+        Token ids move with the tokens (``TokenIds``); places whose tokens were
+        assigned directly are resynced first. With ``record_events`` on, a firing
+        records its ``Mutated`` events then one ``Fired`` (or ``Failed``).
         """
+        TokenIds.resync(executable_graph)
         if allow_token_copying is None:
             allow_token_copying = executable_graph.allow_token_copying
         if restore_tokens_on_failure is None:
@@ -1297,6 +1568,7 @@ class ExecutableGraphOperations:
         if transition is None:
             return None
 
+        firing_ids = FiringTokenIds()
         input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
             transition=transition,
             transition_names_to_incoming_edges=transition_names_to_incoming_edges,
@@ -1304,6 +1576,7 @@ class ExecutableGraphOperations:
             allow_token_copying=allow_token_copying,
             token_history_length=token_history_length,
             transition_names_to_read_edges=transition_names_to_read_edges,
+            firing_ids=firing_ids,
         )
         # Mark the chosen transition as running while its body executes, as the
         # concurrent runner does, so an observer on another thread (a heartbeat
@@ -1311,6 +1584,7 @@ class ExecutableGraphOperations:
         # write assigns a fresh set: replacing the reference is atomic, whereas
         # mutating the set in place could be seen half-done.
         executable_graph.in_flight = {transition.name}
+        started = time.perf_counter()
         try:
             output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
                 transition=transition,
@@ -1330,12 +1604,19 @@ class ExecutableGraphOperations:
                 transition_names_to_incoming_edges=transition_names_to_incoming_edges,
                 place_names_to_nodes=place_names_to_nodes,
                 restore_tokens_on_failure=restore_tokens_on_failure,
+                executable_graph=executable_graph,
+                firing_ids=firing_ids,
             )
         finally:
             executable_graph.in_flight = set()
-        updated_places_dict = ExecutableGraphOperations.add_tokens_to_places(
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        updated_places_dict = ExecutableGraphOperations.deposit_and_record(
+            executable_graph=executable_graph,
+            transition=transition,
             output_place_names_to_tokens=output_place_names_to_tokens,
             place_names_to_nodes=place_names_to_nodes,
+            firing_ids=firing_ids,
+            duration_ms=duration_ms,
             allow_token_copying=allow_token_copying,
         )
         output_places: Sequence[ListPlaceNode] = list(updated_places_dict.values())
