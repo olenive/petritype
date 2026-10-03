@@ -2,8 +2,8 @@
 
 Status: **design of 2026-10-03; token ids, events, the runner's state
 machine and its process layer built the same day** ("As built" sections
-below). `python -m petritype.runner` works; the shared transcripts and the
-0.2.0 release are not done yet. The protocol
+below). `python -m petritype.runner` works and the four shared transcripts
+replay against it; the 0.2.0 release is not done yet. The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -239,6 +239,26 @@ Settlements:
 - Known gaps: `json.dumps` still allows `NaN`/`Infinity`, as the server did;
   no signal handlers on Windows and the descriptor redirect is untested
   there.
+
+### As built, 2026-10-03: the transcripts
+
+`tests/test_protocol_transcripts.py` replays every `tests/protocol/*.json`
+through `Owner` (awaiting each firing inline) and one of them over pipes
+against the real process, with the matching rules now written into
+PROTOCOL.md §11 (`<any>`, `<unordered>`, `<id:NAME>` were added for them).
+The conformance net `tests/protocol_nets/parcel_distribution.py` is the
+Rust example copied exactly, because the Python original under
+`examples/toy/` creates parcels from nothing, uses wall-clock guards and
+randomness, and cannot be replayed. A second shared-safety test asserts
+each transcript masks what differs by runtime and carries no `color`.
+
+Rust-side follow-ups before the shared set runs there: register the
+conformance net in the Rust runner example under the name
+`parcel-distribution` and the same description (the demo net now using that
+name needs another), mark its four places serializable and derive
+`Serialize`/`Deserialize` on `Parcel`. Covering `not_serializable` in the
+shared set needs a second token type in the conformance net, since Python
+decides serializability per type.
 
 ## Release
 

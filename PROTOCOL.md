@@ -179,7 +179,8 @@ once per generation and lays it out.
   `"take_all"`, `"snapshot"`, `"mutate"` (a reader that meets another value
   draws a plain edge); `slot?` for output edges of a transition with more
   than one output. Read edges (`snapshot`, `mutate`) are listed: they move no
-  tokens but they are part of the net.
+  tokens but they are part of the net. The order of `edges[]` is not
+  significant; a reader keys an edge by its endpoints.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
@@ -438,9 +439,19 @@ runner's state machine, or over pipes against the binary.
   ... in order. `expect` is every line the runner must write for that
   request, responses and notifications alike, in order.
 - Masks stand in any value position: `"<label>"`, `"<time>"` and `"<id>"`
-  match any string; `"<ms>"` and `"<version>"` match any number. A
-  transcript shared across runtimes masks every token id and every
-  `marking_version` (§2, §4) and uses no `color` or `type_name`.
+  match any string; `"<ms>"` and `"<version>"` match any number (a boolean
+  is not a number); `"<any>"` matches any value, objects and arrays
+  included; `{"<unordered>": [...]}` matches an array holding the same
+  elements in any order (for `edges[]`, §5.1); `"<id:NAME>"` matches any
+  string and binds it for the rest of the transcript, so a later `expect`
+  must show the same string and a later `send` has it substituted, which is
+  how a transcript names a runtime-assigned token id. Numbers compare by
+  value (`0` matches `0.0`); an object must have exactly the expected keys;
+  arrays must have the same length and match element by element.
+- A transcript shared across runtimes masks every token id and every
+  `marking_version` (§2, §4), every `type_name` and `label`, `runtime` and
+  `runtime_version`, every `duration_ms` and time, sets every `detail` to
+  `"<any>"`, and uses no `color`.
 - Before comparing, the harness folds a `launched` immediately followed by
   its `distributed` into one `fired {transition, consumed, produced,
   duration_ms}`, so a transcript recorded against either runtime reads the
@@ -448,5 +459,14 @@ runner's state machine, or over pipes against the binary.
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
-  here under `tests/protocol/`, over nets that exist in both languages
-  (parcel distribution first); none is written yet.
+  here under `tests/protocol/` (four files as of 2026-10-03, replayed by
+  `tests/test_protocol_transcripts.py` both through the runner's state
+  machine and over pipes against `python -m petritype.runner`). They run
+  over the **conformance net** `tests/protocol_nets/parcel_distribution.py`,
+  named `parcel-distribution`, described "Sort, stage and dispatch
+  parcels": places `Receiving`, `Sorting`, `Staging Area`, `Dispatched`;
+  transitions `Sort`, `Stage`, `Dispatch Truck`; eight seeded parcels; a
+  deterministic copy of the Rust example `petritype/examples/parcel_distribution.rs`.
+  The Rust runner has yet to register that net under the same name and
+  description with its places marked serializable; until it does, the
+  shared set is checked against Python only.
