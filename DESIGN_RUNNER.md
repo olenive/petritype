@@ -1,7 +1,8 @@
 # The protocol runner and the library changes behind it
 
-Status: **design of 2026-10-03; token ids and events built the same day**
-("As built" below), the runner module not yet. The protocol
+Status: **design of 2026-10-03; token ids, events and the runner's state
+machine built the same day** ("As built" sections below); the process layer
+(`__main__`, threads, the stdout swap) and the transcripts not yet. The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -149,6 +150,57 @@ Token ids and events landed as designed, with these settlements:
 - The runner speaks version 1 only. Translation for version 0 clients lives
   in petritype-server's worker for one release (see its design doc), so the
   library never carries the old shapes.
+
+### As built, 2026-10-03: the state machine
+
+`petritype/runner/` has `protocol.py` (the wire shapes as pydantic models;
+optional fields omitted, never `null`, except the few the protocol lists as
+nullable), `registry.py` (entries from `@petri_net` factories, `describe`,
+the version-0 `load` resolver), `translate.py` (labels, colours, type names,
+`serializable`, `inject` decoding, `detail`, topology by names) and
+`owner.py`. The owner mirrors the Rust runner's: `handle(request, now)`,
+`completed(landing, now)` and `tick(now)` each return the lines to write, a
+firing for the caller to await, and an exit flag. It creates no tasks or
+threads and reads no clock but `now`, so the whole protocol is tested by
+feeding it inputs (50 tests), and the process layer and the transcript
+harness will drive it the same way.
+
+Settlements:
+
+- **Reads while a body runs** are served from a snapshot of the marking taken
+  at launch, not from the live graph. Sync bodies run on a thread (every sync
+  transition is set to `execution="thread"` at load, as the server did), and a
+  thread is not bound by await points: through a mutate edge it can change a
+  token, or a whole live list, while a read iterates it. The snapshot is a
+  shallow copy of each place's token and id lists plus the labels of the
+  tokens handed to the body, rendered before it starts. Counts are true, any
+  page works, the airborne transition shows `in_flight`. Cost is one shallow
+  copy of the marking per firing, in place of the server's capped-plus-full
+  snapshots refreshed after every mutation. A later refinement could copy
+  only the places the body can touch (its mutate edges).
+- `get_token` for a token the airborne body holds waits for the landing;
+  every other id is answered at once.
+- `duration_ms` comes from the engine's own `Fired.duration_ms`; the owner
+  never reads a clock.
+- `set_param` without `transition`, or naming a keyword the function does
+  not take or an edge already supplies, is `invalid_params`; `unsupported`
+  is never used, since Python can always do it.
+- Load parameters and `set_param` values are validated against the factory's
+  annotations with a pydantic `TypeAdapter`; a failure is `invalid_params`.
+  Scalar `inject` is strict: no `bool` where a number is expected, no
+  truncation of `1.5` to an int.
+- Version-0 `load`: a missing module or function is `unknown_net`; a module
+  that raises on import is `load_failed`.
+- `load_progress` goes out once, after the parameters bind and before the
+  factory runs, so a refused `load` sends none.
+- Only the canonical decimal spelling names a token (`"01"` is
+  `unknown_token`).
+- A selector or guard that raises makes `step` answer `internal`, and stops
+  a run with `execution_stopped {reason: "transition_failed"}`.
+- An unknown or missing `.color` is omitted, not given the server's grey.
+- `TokenIds.resync` also runs at each landing, so a body that resizes a
+  place through a live list shows up as `reloaded {reason: "resync"}` in the
+  same batch.
 
 ## Release
 
