@@ -1,0 +1,136 @@
+{
+  "net": "parcel-distribution",
+  "params": {},
+  "exchanges": [
+    {
+      "send": {"method": "describe", "params": {}},
+      "expect": [
+        {"id": "1", "result": {
+          "protocol_version": 1, "runtime": "<label>", "runtime_version": "<label>",
+          "nets": [
+            {"name": "parcel-distribution", "description": "Sort, stage and dispatch parcels", "mode": "manual",
+             "params": []}
+          ]
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_state", "params": {}},
+      "expect": [
+        {"id": "2", "error": {"code": "not_loaded", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "load", "params": {"net": "nowhere"}},
+      "expect": [
+        {"id": "3", "error": {"code": "unknown_net", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "load", "params": {"net": "parcel-distribution"}},
+      "expect": [
+        {"method": "load_progress", "params": {"step": "build", "message": "<label>", "marking_version": "<version>", "running": false}},
+        {"method": "reloaded", "params": {"generation": 1, "reason": "load", "marking_version": "<version>", "running": false}},
+        {"id": "4", "result": {"status": "loaded", "generation": 1, "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "get_state", "params": {}},
+      "expect": [
+        {"id": "5", "result": {
+          "protocol_version": 1, "runtime": "<label>", "net": "parcel-distribution",
+          "generation": 1, "marking_version": "<version>", "running": false,
+          "topology": {
+            "places": [
+              {"name": "Receiving", "type_name": "<label>", "serializable": true},
+              {"name": "Sorting", "type_name": "<label>", "serializable": true},
+              {"name": "Staging Area", "type_name": "<label>", "serializable": true},
+              {"name": "Dispatched", "type_name": "<label>", "serializable": true}
+            ],
+            "transitions": [
+              {"name": "Sort", "detail": "<any>"},
+              {"name": "Stage", "detail": "<any>"},
+              {"name": "Dispatch Truck", "detail": "<any>"}
+            ],
+            "edges": {"<unordered>": [
+              {"place": "Receiving", "transition": "Sort", "direction": "in", "kind": "take"},
+              {"place": "Sorting", "transition": "Sort", "direction": "out"},
+              {"place": "Sorting", "transition": "Stage", "direction": "in", "kind": "take"},
+              {"place": "Staging Area", "transition": "Stage", "direction": "out"},
+              {"place": "Staging Area", "transition": "Dispatch Truck", "direction": "in", "kind": "take_all"},
+              {"place": "Dispatched", "transition": "Dispatch Truck", "direction": "out", "slot": 0},
+              {"place": "Staging Area", "transition": "Dispatch Truck", "direction": "out", "slot": 1}
+            ]}
+          },
+          "transitions": {
+            "Sort": {"enabled": true, "fireable": true, "in_flight": false, "priority": 0},
+            "Stage": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0},
+            "Dispatch Truck": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0}
+          },
+          "marking": {"places": {
+            "Receiving": {"count": 8, "tokens": [
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}
+            ]},
+            "Sorting": {"count": 0, "tokens": []},
+            "Staging Area": {"count": 0, "tokens": []},
+            "Dispatched": {"count": 0, "tokens": []}
+          }},
+          "progress": {"step_count": 0, "last_fired": null, "fired_counts": {}, "last_progress_at": null}
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_state", "params": {"token_limit": 2}},
+      "expect": [
+        {"id": "6", "result": {
+          "protocol_version": 1, "runtime": "<label>", "net": "parcel-distribution",
+          "generation": 1, "marking_version": "<version>", "running": false,
+          "topology": "<any>",
+          "transitions": "<any>",
+          "marking": {"places": {
+            "Receiving": {"count": 8, "tokens": [{"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}]},
+            "Sorting": {"count": 0, "tokens": []},
+            "Staging Area": {"count": 0, "tokens": []},
+            "Dispatched": {"count": 0, "tokens": []}
+          }},
+          "progress": "<any>"
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_place_tokens", "params": {"place": "Receiving", "offset": 2, "limit": 3}},
+      "expect": [
+        {"id": "7", "result": {
+          "place": "Receiving", "marking_version": "<version>", "count": 8, "offset": 2, "limit": 3,
+          "tokens": [{"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}],
+          "has_more": true
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_place_tokens", "params": {"place": "Receiving", "offset": 6, "limit": 3}},
+      "expect": [
+        {"id": "8", "result": {
+          "place": "Receiving", "marking_version": "<version>", "count": 8, "offset": 6, "limit": 3,
+          "tokens": [{"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}],
+          "has_more": false
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_place_tokens", "params": {"place": "Loading Bay"}},
+      "expect": [
+        {"id": "9", "error": {"code": "unknown_place", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "teleport"},
+      "expect": [
+        {"id": "10", "error": {"code": "unknown_method", "message": "<label>"}}
+      ]
+    }
+  ]
+}

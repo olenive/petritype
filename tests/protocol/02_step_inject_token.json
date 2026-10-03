@@ -1,0 +1,117 @@
+{
+  "net": "parcel-distribution",
+  "params": {},
+  "exchanges": [
+    {
+      "send": {"method": "load", "params": {"net": "parcel-distribution"}},
+      "expect": [
+        {"method": "load_progress", "params": {"step": "build", "message": "<label>", "marking_version": "<version>", "running": false}},
+        {"method": "reloaded", "params": {"generation": 1, "reason": "load", "marking_version": "<version>", "running": false}},
+        {"id": "1", "result": {"status": "loaded", "generation": 1, "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id:r1>"]],
+          "produced": [["Sorting", "<id:s1>", "<label>"]], "duration_ms": "<ms>",
+          "marking_version": "<version>", "running": false}},
+        {"method": "fireable", "params": {"transitions": ["Sort", "Stage"], "marking_version": "<version>", "running": false}},
+        {"id": "2", "result": {"fired": true, "transition": "Sort", "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id:r2>"]],
+          "produced": [["Sorting", "<id:s2>", "<label>"]], "duration_ms": "<ms>",
+          "marking_version": "<version>", "running": false}},
+        {"id": "3", "result": {"fired": true, "transition": "Sort", "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id:r3>"]],
+          "produced": [["Sorting", "<id:s3>", "<label>"]], "duration_ms": "<ms>",
+          "marking_version": "<version>", "running": false}},
+        {"id": "4", "result": {"fired": true, "transition": "Sort", "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "<id:s1>"}},
+      "expect": [
+        {"id": "5", "result": {"id": "<id:s1>", "place": "Sorting", "type_name": "<label>", "kind": "json",
+          "value": {"id": 1, "deferrals": 0}}}
+      ]
+    },
+    {
+      "send": {"method": "inject", "params": {"place": "Receiving", "token": {"id": 9, "deferrals": 0}}},
+      "expect": [
+        {"method": "added", "params": {"place": "Receiving", "id": "<id:new>", "label": "<label>",
+          "marking_version": "<version>", "running": false}},
+        {"id": "6", "result": {"status": "injected", "id": "<id:new>", "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "get_place_tokens", "params": {"place": "Receiving", "offset": 5}},
+      "expect": [
+        {"id": "7", "result": {
+          "place": "Receiving", "marking_version": "<version>", "count": 6, "offset": 5, "limit": 200,
+          "tokens": [{"id": "<id:new>", "label": "<label>"}], "has_more": false
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "<id:new>"}},
+      "expect": [
+        {"id": "8", "result": {"id": "<id:new>", "place": "Receiving", "type_name": "<label>", "kind": "json",
+          "value": {"id": 9, "deferrals": 0}}}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "<id:r1>"}},
+      "expect": [
+        {"id": "9", "error": {"code": "unknown_token", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "999999"}},
+      "expect": [
+        {"id": "10", "error": {"code": "unknown_token", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "inject", "params": {"place": "Receiving", "token": {"id": "nine"}}},
+      "expect": [
+        {"id": "11", "error": {"code": "invalid_token", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "inject", "params": {"place": "Loading Bay", "token": {"id": 10, "deferrals": 0}}},
+      "expect": [
+        {"id": "12", "error": {"code": "unknown_place", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "get_log", "params": {"after": 1}},
+      "expect": [
+        {"id": "13", "result": {"entries": [
+          {"seq": 2, "transition": "Sort", "started_at": "<time>", "duration_ms": "<ms>", "outcome": "fired",
+           "consumed": [["Receiving", "<id:r2>"]], "produced": [["Sorting", "<id:s2>"]]},
+          {"seq": 3, "transition": "Sort", "started_at": "<time>", "duration_ms": "<ms>", "outcome": "fired",
+           "consumed": [["Receiving", "<id:r3>"]], "produced": [["Sorting", "<id:s3>"]]}
+        ]}}
+      ]
+    },
+    {
+      "send": {"method": "get_log", "params": {"after": 1, "limit": 1}},
+      "expect": [
+        {"id": "14", "result": {"entries": [
+          {"seq": 2, "transition": "Sort", "started_at": "<time>", "duration_ms": "<ms>", "outcome": "fired",
+           "consumed": [["Receiving", "<id:r2>"]], "produced": [["Sorting", "<id:s2>"]]}
+        ]}}
+      ]
+    }
+  ]
+}

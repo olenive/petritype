@@ -1,0 +1,106 @@
+{
+  "net": "parcel-distribution",
+  "params": {},
+  "exchanges": [
+    {
+      "send": {"method": "load", "params": {"net": "parcel-distribution"}},
+      "expect": [
+        {"method": "load_progress", "params": {"step": "build", "message": "<label>", "marking_version": "<version>", "running": false}},
+        {"method": "reloaded", "params": {"generation": 1, "reason": "load", "marking_version": "<version>", "running": false}},
+        {"id": "1", "result": {"status": "loaded", "generation": 1, "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "start"},
+      "expect": [
+        {"id": "2", "result": {"status": "started", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fireable", "params": {"transitions": ["Sort", "Stage"], "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]], "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fireable", "params": {"transitions": ["Stage"], "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fireable", "params": {"transitions": ["Stage", "Dispatch Truck"], "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Stage", "consumed": [["Sorting", "<id>"]], "produced": [["Staging Area", "<id>", "<label>"]], "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fireable", "params": {"transitions": ["Dispatch Truck"], "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Dispatch Truck",
+          "consumed": [["Staging Area", "<id>"], ["Staging Area", "<id>"], ["Staging Area", "<id>"], ["Staging Area", "<id>"],
+                       ["Staging Area", "<id>"], ["Staging Area", "<id>"], ["Staging Area", "<id>"], ["Staging Area", "<id>"]],
+          "produced": [["Dispatched", "<id:gone1>", "<label>"], ["Dispatched", "<id>", "<label>"], ["Dispatched", "<id>", "<label>"],
+                       ["Dispatched", "<id>", "<label>"], ["Dispatched", "<id>", "<label>"], ["Dispatched", "<id>", "<label>"],
+                       ["Staging Area", "<id:left4>", "<label>"], ["Staging Area", "<id:left8>", "<label>"]],
+          "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fired", "params": {"transition": "Dispatch Truck",
+          "consumed": [["Staging Area", "<id:left4>"], ["Staging Area", "<id:left8>"]],
+          "produced": [["Dispatched", "<id:gone4>", "<label>"], ["Dispatched", "<id:gone8>", "<label>"]],
+          "duration_ms": "<ms>", "marking_version": "<version>", "running": true}},
+        {"method": "fireable", "params": {"transitions": [], "marking_version": "<version>", "running": true}},
+        {"method": "execution_stopped", "params": {"reason": "no_fireable_transitions", "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "get_state", "params": {"token_limit": 1}},
+      "expect": [
+        {"id": "3", "result": {
+          "protocol_version": 1, "runtime": "<label>", "net": "parcel-distribution",
+          "generation": 1, "marking_version": "<version>", "running": false,
+          "topology": "<any>",
+          "transitions": {
+            "Sort": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0},
+            "Stage": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0},
+            "Dispatch Truck": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0}
+          },
+          "marking": {"places": {
+            "Receiving": {"count": 0, "tokens": []},
+            "Sorting": {"count": 0, "tokens": []},
+            "Staging Area": {"count": 0, "tokens": []},
+            "Dispatched": {"count": 8, "tokens": [{"id": "<id:gone1>", "label": "<label>"}]}
+          }},
+          "progress": {"step_count": 18, "last_fired": "Dispatch Truck",
+                       "fired_counts": {"Sort": 8, "Stage": 8, "Dispatch Truck": 2}, "last_progress_at": "<time>"}
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "<id:gone1>"}},
+      "expect": [
+        {"id": "4", "result": {"id": "<id:gone1>", "place": "Dispatched", "type_name": "<label>", "kind": "json",
+          "value": {"id": 1, "deferrals": 0}}}
+      ]
+    },
+    {
+      "send": {"method": "get_token", "params": {"id": "<id:gone4>"}},
+      "expect": [
+        {"id": "5", "result": {"id": "<id:gone4>", "place": "Dispatched", "type_name": "<label>", "kind": "json",
+          "value": {"id": 4, "deferrals": 1}}}
+      ]
+    },
+    {
+      "send": {"method": "get_place_tokens", "params": {"place": "Dispatched", "offset": 6}},
+      "expect": [
+        {"id": "6", "result": {
+          "place": "Dispatched", "marking_version": "<version>", "count": 8, "offset": 6, "limit": 200,
+          "tokens": [{"id": "<id:gone4>", "label": "<label>"}, {"id": "<id:gone8>", "label": "<label>"}],
+          "has_more": false
+        }}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"id": "7", "result": {"fired": false, "marking_version": "<version>", "running": false}}
+      ]
+    }
+  ]
+}

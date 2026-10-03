@@ -1,0 +1,135 @@
+{
+  "net": "parcel-distribution",
+  "params": {},
+  "exchanges": [
+    {
+      "send": {"method": "load", "params": {"net": "parcel-distribution"}},
+      "expect": [
+        {"method": "load_progress", "params": {"step": "build", "message": "<label>", "marking_version": "<version>", "running": false}},
+        {"method": "reloaded", "params": {"generation": 1, "reason": "load", "marking_version": "<version>", "running": false}},
+        {"id": "1", "result": {"status": "loaded", "generation": 1, "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "disable", "params": {"transition": "Sort"}},
+      "expect": [
+        {"method": "toggled", "params": {"transition": "Sort", "enabled": false, "marking_version": "<version>", "running": false}},
+        {"method": "fireable", "params": {"transitions": [], "marking_version": "<version>", "running": false}},
+        {"id": "2", "result": {"marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "disable", "params": {"transition": "Sort"}},
+      "expect": [
+        {"id": "3", "result": {"marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"id": "4", "result": {"fired": false, "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "get_state", "params": {"token_limit": 1}},
+      "expect": [
+        {"id": "5", "result": {
+          "protocol_version": 1, "runtime": "<label>", "net": "parcel-distribution",
+          "generation": 1, "marking_version": "<version>", "running": false,
+          "topology": "<any>",
+          "transitions": {
+            "Sort": {"enabled": false, "fireable": false, "in_flight": false, "priority": 0},
+            "Stage": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0},
+            "Dispatch Truck": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0}
+          },
+          "marking": "<any>",
+          "progress": {"step_count": 0, "last_fired": null, "fired_counts": {}, "last_progress_at": null}
+        }}
+      ]
+    },
+    {
+      "send": {"method": "enable", "params": {"transition": "Sort"}},
+      "expect": [
+        {"method": "toggled", "params": {"transition": "Sort", "enabled": true, "marking_version": "<version>", "running": false}},
+        {"method": "fireable", "params": {"transitions": ["Sort"], "marking_version": "<version>", "running": false}},
+        {"id": "6", "result": {"marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "enable", "params": {"transition": "Sort"}},
+      "expect": [
+        {"id": "7", "result": {"marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "disable", "params": {"transition": "Teleport"}},
+      "expect": [
+        {"id": "8", "error": {"code": "unknown_transition", "message": "<label>"}}
+      ]
+    },
+    {
+      "send": {"method": "step"},
+      "expect": [
+        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]],
+          "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>",
+          "marking_version": "<version>", "running": false}},
+        {"method": "fireable", "params": {"transitions": ["Sort", "Stage"], "marking_version": "<version>", "running": false}},
+        {"id": "9", "result": {"fired": true, "transition": "Sort", "marking_version": "<version>", "running": false}}
+      ]
+    },
+    {
+      "send": {"method": "disable", "params": {"transition": "Stage"}},
+      "expect": [
+        {"method": "toggled", "params": {"transition": "Stage", "enabled": false, "marking_version": "<version>", "running": false}},
+        {"method": "fireable", "params": {"transitions": ["Sort"], "marking_version": "<version>", "running": false}},
+        {"id": "10", "result": {"marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "reset"},
+      "expect": [
+        {"method": "reloaded", "params": {"generation": 2, "reason": "reset", "marking_version": "<version>", "running": false}},
+        {"id": "11", "result": {"status": "reset", "generation": 2, "marking_version": "<version>"}}
+      ]
+    },
+    {
+      "send": {"method": "get_state"},
+      "expect": [
+        {"id": "12", "result": {
+          "protocol_version": 1, "runtime": "<label>", "net": "parcel-distribution",
+          "generation": 2, "marking_version": "<version>", "running": false,
+          "topology": "<any>",
+          "transitions": {
+            "Sort": {"enabled": true, "fireable": true, "in_flight": false, "priority": 0},
+            "Stage": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0},
+            "Dispatch Truck": {"enabled": true, "fireable": false, "in_flight": false, "priority": 0}
+          },
+          "marking": {"places": {
+            "Receiving": {"count": 8, "tokens": [
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"},
+              {"id": "<id>", "label": "<label>"}, {"id": "<id>", "label": "<label>"}
+            ]},
+            "Sorting": {"count": 0, "tokens": []},
+            "Staging Area": {"count": 0, "tokens": []},
+            "Dispatched": {"count": 0, "tokens": []}
+          }},
+          "progress": {"step_count": 0, "last_fired": null, "fired_counts": {}, "last_progress_at": null}
+        }}
+      ]
+    },
+    {
+      "send": {"method": "get_log"},
+      "expect": [
+        {"id": "13", "result": {"entries": []}}
+      ]
+    },
+    {
+      "send": {"method": "shutdown"},
+      "expect": [
+        {"id": "14", "result": {"status": "ok"}}
+      ]
+    }
+  ]
+}
