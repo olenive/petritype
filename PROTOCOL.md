@@ -1,8 +1,11 @@
 # The petritype net protocol
 
-Status: **design proposal, 2026-10-03, not yet implemented.** Protocol
-version 1. This file is the single source of truth for the protocol; the
-other repositories link here and do not restate the shapes:
+Status: **protocol version 1.** Written 2026-10-03 and amended the same day
+after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11). The
+Rust runner (`petritype-runner`, in `../petritype-rs`) implements it; the
+Python runner (`DESIGN_RUNNER.md`) is not yet implemented. This file is the
+single source of truth for the protocol; the other repositories link here
+and do not restate the shapes:
 
 - library side (Python): [`DESIGN_RUNNER.md`](DESIGN_RUNNER.md)
 - library side (Rust): `../petritype-rs/DESIGN.md` §19
@@ -41,7 +44,9 @@ are out of scope.
   saved file and a URL know, and they survive a change of declaration order.
 - **Token ids are strings holding a decimal integer**, for example `"17"`.
   Within one generation of a net (§4) an id is handed out once and never
-  reused, so a viewer may key animations, caches and selections by it.
+  reused, so a viewer may key animations, caches and selections by it. The
+  first id of a generation is the runtime's choice (the Rust runner starts
+  at `"0"`, the Python runner at `"1"`); nothing may depend on it.
   Strings rather than numbers because a JavaScript number loses precision
   above 2^53 and a Rust `TokenId` is a `u64`; the runner converts at the
   boundary. A reader must treat the id as opaque and compare it as a string;
@@ -112,8 +117,12 @@ without parsing `message`:
   and is stamped on it, so a viewer holding version *v* expects the next
   state notification at *v + 1*; anything else is a gap and the viewer
   refetches `get_state`. Every response that reads state says which version
-  it reflects. Requests that change nothing do not move it. A `reloaded`
-  notification (§7.2) sets a new value and always means "refetch".
+  it reflects. Requests that change nothing do not move it. `load` and
+  `reset` do not reset it: the `reloaded` notification (§7.2) carries the
+  current value and always means "refetch". A firing moves it once per
+  state notification, so by one where a runtime reports `fired` and by two
+  where it reports `launched` then `distributed` (§6.3); nothing may
+  compare version numbers across runtimes.
 - **`running`** (boolean) says whether the net process is executing on its
   own (after `start`, until `stop` or quiescence).
 
@@ -202,8 +211,11 @@ viewer reads sizes from `count`, never from `tokens.length`.
 A token is `{id, label, color?, type_name?}`:
 
 - `label`: short display text chosen by the runtime, at most 1000
-  characters. Python: the pydantic JSON dump or `repr`; Rust: the place's
-  `Debug` via `Net::label`. The full value is `get_token`.
+  characters counted as Unicode scalar values, *including* any truncation
+  marker the runtime appends (both runners append `...`, so a cut label is
+  997 characters of text plus the marker). Python: the pydantic JSON dump
+  or `repr`; Rust: the place's `Debug`. The full value is `get_token`
+  (§6.5).
 - `color?`: a CSS hex colour (`"#rrggbb"`), when the runtime has one for this
   token (Python: a `.color` attribute).
 - `type_name?`: only when it differs from the place's `type_name` (a Python
@@ -225,7 +237,7 @@ it.
 | `get_state` | `{token_limit?}` | State (§5) | never waits for a running body |
 | `get_place_tokens` | `{place, offset?, limit?}` | `{place, marking_version, count, offset, limit, tokens, has_more}` | `limit` clamped to 1..1000, default 200 |
 | `get_token` | `{id}` | `{id, place, type_name, kind: "json", value}` or `{id, place, type_name, kind: "text", text}` | live tokens only |
-| `step` | `{}` | `{fired: bool, transition?, marking_version, running}` | one firing, sequential semantics |
+| `step` | `{}` | `{fired: bool, transition?, failed?, marking_version, running}` | one firing, sequential semantics (§6.3) |
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
@@ -247,7 +259,6 @@ it.
       "name": "parcel-distribution",
       "description": "Sort and dispatch parcels",
       "mode": "manual",
-      "schedule": null,
       "params": [{"name": "trucks", "type_name": "u32", "required": false, "default": 2}]
     }
   ]
@@ -257,7 +268,8 @@ it.
 - `nets[].mode?` and `schedule?` are the hosting hints Python's
   `@petri_net(mode=..., schedule=...)` already declares (`"manual"`,
   `"24/7"`, `"batch"`, `"cron"`). A host that schedules uses them; a viewer
-  ignores them.
+  ignores them. Like every optional field they are omitted when absent,
+  never `null` (§2); `description?` likewise.
 - `params[].default?` is a JSON value, present only when the default has
   one.
 - A net process may also answer `describe` without a stdin session: a Rust
@@ -277,7 +289,10 @@ before it moves to `describe`.
 
 - `step` drains pending input, then fires at most one transition, chosen by
   the net's own selector. `fired: false` with no `transition` means nothing
-  was fireable. Its response is written when the firing is complete (after
+  was fireable. `fired: true` with `transition` means a transition was
+  chosen and its firing landed, successfully or not: when the body failed
+  the response also carries `failed: true`, and follows the `failed`
+  notification. Its response is written when the firing is complete (after
   `fired`, `distributed` or `failed`), so a caller waiting on `step` waits
   for the body. `step` is the one request answered out of order: `get_state`,
   `get_place_tokens`, `get_token`, `get_log` and `stop` that arrive while
@@ -306,6 +321,15 @@ before it moves to `describe`.
   transition (`transition` required); Rust sets a net-wide parameter by its
   registered name (`transition` ignored). A runtime that cannot answers
   `unsupported`.
+
+### 6.5 Reading one token
+
+`get_token {id}` answers `kind: "json"` with `value` exactly when the
+token's place is `serializable` (§5.1), and `kind: "text"` with `text`
+otherwise. `text` is the runtime's full rendering of the token (Python:
+`repr`; Rust: `Debug`), never truncated: `label` (§5.3) is the short form,
+this is the long one. A host that wants JSON for a place that has none gets
+`kind: "text"`, not an error; `not_serializable` is for `inject`.
 
 ## 7. Notifications
 
@@ -388,8 +412,41 @@ A host that serves the net to remote viewers relays the same shapes:
 
 ## 11. Conformance
 
-The Python repository keeps a set of recorded transcripts (a net, a sequence
-of requests, the expected responses and notifications with labels and
-timings masked) under `tests/protocol/`. Both runners are tested against the
-same transcripts for the nets that exist in both languages, which is what
-keeps "the same protocol" true.
+Conformance is tested by recorded transcripts: one JSON file per scenario,
+replayed through a runner without a process by a harness that owns the
+runner's state machine, or over pipes against the binary.
+
+```json
+{
+  "net": "parcel-distribution",
+  "params": {"trucks": 2},
+  "exchanges": [
+    {"send": {"method": "describe", "params": {}},
+     "expect": [{"id": "1", "result": {"protocol_version": 1, "runtime": "<label>", "..." : "..."}}]},
+    {"send": {"method": "step", "params": {}},
+     "expect": [
+       {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]],
+                                      "produced": [["Sorting", "<id>", "<label>"]], "duration_ms": "<ms>",
+                                      "marking_version": "<version>", "running": false}},
+       {"id": "2", "result": {"fired": true, "transition": "Sort", "marking_version": "<version>", "running": false}}
+     ]}
+  ]
+}
+```
+
+- `send` is a request without its `id`; the harness assigns `"1"`, `"2"`,
+  ... in order. `expect` is every line the runner must write for that
+  request, responses and notifications alike, in order.
+- Masks stand in any value position: `"<label>"`, `"<time>"` and `"<id>"`
+  match any string; `"<ms>"` and `"<version>"` match any number. A
+  transcript shared across runtimes masks every token id and every
+  `marking_version` (§2, §4) and uses no `color` or `type_name`.
+- Before comparing, the harness folds a `launched` immediately followed by
+  its `distributed` into one `fired {transition, consumed, produced,
+  duration_ms}`, so a transcript recorded against either runtime reads the
+  same (§6.3).
+- The format was first implemented by the Rust runner, whose own four
+  transcripts (over a demo net with no Python twin) live in
+  `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
+  here under `tests/protocol/`, over nets that exist in both languages
+  (parcel distribution first); none is written yet.
