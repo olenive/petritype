@@ -3,7 +3,8 @@
 Status: **design of 2026-10-03; token ids, events, the runner's state
 machine and its process layer built the same day** ("As built" sections
 below). `python -m petritype.runner` works and the four shared transcripts
-replay against it; the 0.2.0 release is not done yet. The protocol
+replay against it. Version bumped to 0.2.0 on 2026-10-03; the `v0.2.0` tag
+cuts the release. The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions

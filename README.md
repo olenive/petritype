@@ -244,8 +244,28 @@ await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefin
 - **Limits** — `Runner.run(ctx, stop_after_n_firings=N)` paces: it always returns a `RunSummary` whose `quiesced` flag tells "stopped by the limit, call again to continue" from "nothing left to fire". `RunContext.error_after_n_firings` is a run-wide fuse for nets that should quiesce quickly: `TooManyFiringsError` is raised *before* the net fires past it (a net that fires exactly n and quiesces is fine).
 - **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
 - **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox (needs the `marimo` extra: `pip install 'petritype[marimo]'`).
+- **Token ids and events** — every token carries a stable integer id (`place.token_ids`, handed out once and never reused), and with `record_events=True` the graph records `Fired`, `Failed`, `Added`, `Removed`, `Mutated`, `Toggled` and `ParamChanged` for `graph.drain_events()`: what fired, what it consumed and produced, by id, in both execution modes. Off by default, so existing programs see no change.
 
 Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler) — open with `uv run --extra examples marimo edit <notebook>`.
+
+## Net protocol — run a net as a process
+
+```bash
+python -m petritype.runner --module your.nets            # serve on stdin/stdout
+python -m petritype.runner --describe --module your.nets # list the nets it carries
+```
+
+`petritype.runner` serves the nets a module declares with `@petri_net` over the
+[net protocol](PROTOCOL.md): newline-delimited JSON on stdin and stdout, the
+same protocol the Rust port's `petritype-runner` speaks. A host or viewer —
+petritype-server, the Bevy visualiser, a test harness — therefore drives
+either runtime the same way: `describe`, `load`, `get_state`, `step`,
+`start`/`stop`, `inject`, `enable`/`disable`, `set_param`, `get_token`,
+`get_log`, with `fired`, `added`, `toggled` and the other notifications as the
+net changes. A `print` in a body goes to stderr; stdout belongs to the
+protocol. No extra is needed: the runner is the standard library plus
+`pydantic`. Conformance is checked by the recorded transcripts under
+`tests/protocol/`, which are written to run against both runtimes.
 
 ## When to Use This
 
