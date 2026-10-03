@@ -467,6 +467,8 @@ runner's state machine, or over pipes against the binary.
   parcels": places `Receiving`, `Sorting`, `Staging Area`, `Dispatched`;
   transitions `Sort`, `Stage`, `Dispatch Truck`; eight seeded parcels; a
   deterministic copy of the Rust example `petritype/examples/parcel_distribution.rs`.
-  The Rust runner has yet to register that net under the same name and
-  description with its places marked serializable; until it does, the
-  shared set is checked against Python only.
+  Both runners carry it (Rust: the `petritype-runner` example binary) and
+  both replay the shared set. **The shared set is replayed against a runner
+  carrying the conformance net alone**, so a shared transcript may pin
+  `describe` in full; a runner that carries other nets too replays it with
+  a registry reduced to the conformance net.

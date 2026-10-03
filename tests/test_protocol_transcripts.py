@@ -135,18 +135,29 @@ def _match(expected, actual, bindings: dict) -> bool:
 
 
 def _match_unordered(expected: list, actual, bindings: dict) -> bool:
+    """Same elements in any order: a pairing of every expected element with a
+    distinct actual one. Backtracks, because a masked element (``"<id>"``) can
+    greedily take the actual element a later literal needed; PROTOCOL.md §11
+    asks only that some pairing exist, as the Rust harness implements it."""
     if not isinstance(actual, list) or len(expected) != len(actual):
         return False
-    unused = list(range(len(actual)))
-    for e in expected:
+
+    def pair(remaining: list, unused: list[int], trial: dict) -> dict | None:
+        if not remaining:
+            return trial
+        head, *rest = remaining
         for index in unused:
-            trial = dict(bindings)
-            if _match(e, actual[index], trial):
-                bindings.update(trial)
-                unused.remove(index)
-                break
-        else:
-            return False
+            attempt = dict(trial)
+            if _match(head, actual[index], attempt):
+                found = pair(rest, [i for i in unused if i != index], attempt)
+                if found is not None:
+                    return found
+        return None
+
+    found = pair(expected, list(range(len(actual))), dict(bindings))
+    if found is None:
+        return False
+    bindings.update(found)
     return True
 
 
