@@ -112,6 +112,12 @@
            "consumed": [["Receiving", "<id:r2>"]], "produced": [["Sorting", "<id:s2>"]]}
         ]}}
       ]
+    },
+    {
+      "send": {"method": "inject", "params": {"place": "Receiving", "token": {"id": "9", "deferrals": 0}}},
+      "expect": [
+        {"id": "15", "error": {"code": "invalid_token", "message": "<label>"}}
+      ]
     }
   ]
 }

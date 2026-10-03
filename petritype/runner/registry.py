@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Iterable, Optional
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, ProtocolError
-from petritype.runner.translate import TypeNames
+from petritype.runner.translate import StrictJson, TypeNames
 
 
 @dataclass(frozen=True)
@@ -132,8 +132,9 @@ class NetEntries:
         """The keyword arguments for ``entry.factory`` from JSON ``params``, or
         ``ProtocolError(invalid_params)``: an unknown name (unless the factory
         takes ``**kwargs``), a missing required one, or a value that does not
-        validate against its annotation (with pydantic, so a model parameter
-        decodes from a JSON object). An annotation pydantic cannot handle, or a
+        validate against its annotation (with pydantic in strict JSON mode,
+        ``StrictJson``, so a model parameter decodes from a JSON object and
+        ``"9"`` is not an ``int``). An annotation pydantic cannot handle, or a
         string one, passes the value through unchanged."""
         known = {spec.name: spec for spec in entry.params}
         unknown = sorted(set(params) - set(known))
@@ -163,11 +164,11 @@ class NetEntries:
         except Exception:
             return value
         try:
-            return adapter.validate_python(value)
-        except ValidationError as error:
+            return StrictJson.validate(adapter, value)
+        except ValueError as error:
             raise ProtocolError(
                 ErrorCode.INVALID_PARAMS,
-                f"parameter {spec.name!r} ({spec.type_name}): {error.errors()[0].get('msg', error)}",
+                f"parameter {spec.name!r} ({spec.type_name}): {StrictJson.message(error)}",
             ) from error
 
 

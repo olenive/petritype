@@ -15,7 +15,7 @@ import re
 import types
 from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_args, get_origin, get_type_hints
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode
 from petritype.core.type_comparisons import CompareTypes
@@ -146,6 +146,40 @@ class Tokens:
         return json.loads(json.dumps(token, allow_nan=False))
 
 
+class StrictJson:
+    """Validate wire input as the JSON it arrived as, in pydantic's strict mode.
+
+    Pydantic's default lax mode coerces ``"9"`` to ``9``, ``1`` to ``True`` and
+    ``true`` to ``1``; a wire value must already be the type it claims. Strict
+    *JSON* mode rather than strict Python mode, because the wire is JSON: strict
+    Python mode refuses the only spellings JSON has for some types (an ISO 8601
+    string for a ``datetime``, an array for a ``tuple`` or a ``set``), strict JSON
+    mode takes them. It accepts a JSON integer for a ``float`` (JSON has one
+    number type) and makes it a ``float``. The value is re-serialised with
+    ``json.dumps`` (never ``NaN``), so a value that is not plain JSON raises
+    ``ValueError`` too."""
+
+    def validate(target: Any, value: Any) -> Any:
+        """``target`` is a pydantic model class or a ``TypeAdapter``. Raises
+        ``ValueError`` (pydantic's ``ValidationError`` is one) on a mismatch."""
+        try:
+            text = json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"not plain JSON: {error}") from error
+        if isinstance(target, TypeAdapter):
+            return target.validate_json(text, strict=True)
+        return target.model_validate_json(text, strict=True)
+
+    def message(error: ValueError) -> str:
+        """Pydantic's first message for a ``ValidationError``, else the text."""
+        errors = getattr(error, "errors", None)
+        if callable(errors):
+            first = errors()
+            if first:
+                return first[0].get("msg", str(error))
+        return str(error)
+
+
 class Serializable:
     """Functions that decide and use a place's JSON form."""
 
@@ -165,16 +199,18 @@ class Serializable:
         return False
 
     def decode(place_type: Any, payload: Any) -> Any:
-        """Build a token of ``place_type`` from plain JSON: ``model_validate`` for a
-        pydantic model, the constructor for a scalar. Raises ``ValueError`` (or
+        """Build a token of ``place_type`` from plain JSON: ``StrictJson.validate``
+        for a pydantic model (strict all the way down), the constructor for a scalar. Raises ``ValueError`` (or
         pydantic's ``ValidationError``, a subclass) when it does not decode.
 
-        Scalars take only a JSON scalar, never ``bool`` for a number (JSON's
-        ``true`` is not ``1``), a ``bool`` place takes only ``true``/``false``
-        (``bool("false")`` is ``True``), and an ``int`` place refuses a
-        fractional number rather than truncate it."""
+        Scalars are as strict as the models: the JSON type must be the
+        place's. An ``int`` place takes only an integer (never ``"9"``, never
+        ``2.0``), a ``str`` place only a string (never ``9``), a ``bool`` place
+        only ``true``/``false`` (``bool("false")`` is ``True``), and a ``float``
+        place a number, an integer included, as strict JSON mode does for a
+        model's float field. JSON's ``true`` is never ``1``."""
         if isinstance(place_type, type) and issubclass(place_type, BaseModel):
-            return place_type.model_validate(payload)
+            return StrictJson.validate(place_type, payload)
         if place_type not in JSON_SCALARS:
             raise ValueError(f"{TypeNames.of(place_type)} has no JSON form")
         if payload is None or not isinstance(payload, JSON_SCALARS):
@@ -185,8 +221,12 @@ class Serializable:
             return payload
         if isinstance(payload, bool):
             raise ValueError(f"expected {place_type.__name__}, got a boolean")
-        if place_type is int and isinstance(payload, float) and not payload.is_integer():
+        if place_type is int and not isinstance(payload, int):
             raise ValueError(f"expected an integer, got {payload!r}")
+        if place_type is float and not isinstance(payload, (int, float)):
+            raise ValueError(f"expected a number, got {payload!r}")
+        if place_type is str and not isinstance(payload, str):
+            raise ValueError(f"expected a string, got {payload!r}")
         try:
             return place_type(payload)
         except (TypeError, ValueError) as error:

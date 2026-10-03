@@ -200,6 +200,16 @@ Settlements:
 - A selector or guard that raises makes `step` answer `internal`, and stops
   a run with `execution_stopped {reason: "transition_failed"}`.
 - An unknown or missing `.color` is omitted, not given the server's grey.
+- **Strict decoding, 2026-10-03.** Pydantic's default lax mode coerced
+  `"9"` to `9` at the three wire boundaries (`inject`, `set_param`, load
+  parameters), and the scalar `inject` path did the same through the
+  constructor; Oleg ruled this out. Models now validate with
+  `validate_json(..., strict=True)`, JSON semantics rather than Python's,
+  because strict Python mode would refuse the only spellings JSON has for
+  a date-time, a tuple or a set; scalars require the exact JSON type, with
+  an integer accepted for a float as strict JSON mode does. Pinned in
+  `tests/test_runner_strict_input.py` and by a shared transcript exchange
+  both runtimes answer with `invalid_token`.
 - `TokenIds.resync` also runs at each landing, so a body that resizes a
   place through a live list shows up as `reloaded {reason: "resync"}` in the
   same batch.

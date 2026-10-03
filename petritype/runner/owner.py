@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Coroutine, Optional, Union
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 from petritype.core import events as core_events
 from petritype.core.executable_graph_components import (
@@ -72,7 +72,7 @@ from petritype.core.executable_graph_components import (
 from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
-from petritype.runner.translate import Serializable, Tokens, Topologies, TypeNames
+from petritype.runner.translate import Serializable, StrictJson, Tokens, Topologies, TypeNames
 from petritype.runtime import Disable, Enable, Extend, RunContext, Runner, SetParam
 
 
@@ -821,10 +821,10 @@ class Owner:
         except Exception:
             return value
         try:
-            return adapter.validate_python(value)
-        except ValidationError as error:
+            return StrictJson.validate(adapter, value)
+        except ValueError as error:
             raise ProtocolError(
-                ErrorCode.INVALID_PARAMS, f"{param!r} must be {TypeNames.of(annotation)}: {error.errors()[0]['msg']}",
+                ErrorCode.INVALID_PARAMS, f"{param!r} must be {TypeNames.of(annotation)}: {StrictJson.message(error)}",
             ) from error
 
     def _transition(self, name: str) -> FunctionTransitionNode:

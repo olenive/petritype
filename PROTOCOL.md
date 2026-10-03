@@ -314,9 +314,16 @@ before it moves to `describe`.
 ### 6.4 Input
 
 - `inject {place, token}` decodes `token` (plain JSON) into the place's type
-  and appends it. Python decodes with `model_validate` for pydantic models
-  and the constructor for scalars; Rust with the place's `from_json`, which
-  needs a place marked `serializable` (`not_serializable` otherwise).
+  and appends it. Rust decodes with the place's `from_json`, which needs a
+  place marked `serializable` (`not_serializable` otherwise); Python with
+  pydantic in strict JSON mode for models and exact JSON types for scalars.
+  **Decoding is strict in both runtimes**, with JSON's own types as the
+  rule: a number spelt as a string, a string given as a number, a float for
+  an integer, or a boolean for a number is `invalid_token`; an integer for a
+  float field and an ISO 8601 string for a date-time are accepted, since
+  JSON has no other way to carry them. Parameter values (`load`,
+  `set_param`) follow the same rule, answering `invalid_params`. The shared
+  transcripts check it.
 - `enable` and `disable` set the switch. Both libraries have it.
 - `set_param` is optional. Python sets one keyword argument of one
   transition (`transition` required); Rust sets a net-wide parameter by its

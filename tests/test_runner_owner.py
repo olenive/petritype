@@ -873,10 +873,12 @@ async def test_inject_errors():
     [line] = await h.send("inject", {"place": "Things", "token": "a"})
     assert line["error"]["code"] == "not_serializable"
     await h.loaded("chain")
-    for token in ("seven", 1.5, True, None, [1]):
+    # Scalars are as strict as models: no numeric strings, no floats for an
+    # int, no bools for a number (the same answers the Rust runner gives).
+    for token in ("seven", "9", 1.5, 2.0, True, None, [1]):
         [line] = await h.send("inject", {"place": "Input", "token": token})
         assert line["error"]["code"] == "invalid_token", token
-    lines = await h.send("inject", {"place": "Input", "token": 2.0})
+    lines = await h.send("inject", {"place": "Input", "token": 2})
     assert lines[-1]["result"]["status"] == "injected"
 
 
