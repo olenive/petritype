@@ -1,8 +1,9 @@
 # The protocol runner and the library changes behind it
 
-Status: **design of 2026-10-03; token ids, events and the runner's state
-machine built the same day** ("As built" sections below); the process layer
-(`__main__`, threads, the stdout swap) and the transcripts not yet. The protocol
+Status: **design of 2026-10-03; token ids, events, the runner's state
+machine and its process layer built the same day** ("As built" sections
+below). `python -m petritype.runner` works; the shared transcripts and the
+0.2.0 release are not done yet. The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -201,6 +202,43 @@ Settlements:
 - `TokenIds.resync` also runs at each landing, so a body that resizes a
   place through a live list shows up as `reloaded {reason: "resync"}` in the
   same batch.
+
+### As built, 2026-10-03: the process layer
+
+`petritype/runner/process.py` with `__main__.py`. `python -m petritype.runner
+[--module M ...]` serves until `shutdown`, end of input, SIGTERM or SIGINT;
+`--describe --module M ...` prints one line and exits 0; a missing module,
+an import error or a bad argument exits 2 with the message on stderr.
+`--module` is optional when serving, since the version-0 `load` form names
+its module itself.
+
+Settlements:
+
+- **Start-up order**: parse arguments; flush and `dup` descriptor 1 as the
+  protocol stream (not inherited by children); `dup2` stderr onto
+  descriptor 1 and set `sys.stdout = sys.stderr`; only then import the
+  user's modules. A `print` at import time or in a body, and a C extension
+  writing to descriptor 1, all land on stderr.
+- **Writer**: a lock-held object, not a thread. One `write` and one flush
+  per batch (the lines of one owner call), so a heartbeat never splits a
+  request's notifications from its response.
+- **Heartbeat** never touches the owner. After each owner call the loop
+  snapshots `loaded`, `marking_version`, `running` and `status` into a
+  frozen value handed to the writer with the batch; the heartbeat thread
+  writes from the latest one under the writer's lock. It therefore keeps
+  going while an async body blocks the loop, which a round trip through the
+  loop could not. The same thread posts the owner's `tick` every period.
+  Period 30 s, `PETRITYPE_RUNNER_HEARTBEAT_MS` overrides for tests.
+- **Reader**: `os.read` on descriptor 0 with its own line splitting, because
+  a daemon thread holding `sys.stdin`'s lock can make interpreter shutdown
+  fatal. Lines of 17 MiB are tested.
+- **Exit with a body still running**: flush, then `os._exit(0)`, because a
+  normal exit would join the executor thread and `asyncio.run` waits up to
+  300 s for it. `shutdown` is answered promptly even with a 60 s body.
+- A broken stdout pipe stops the loop and exits 0.
+- Known gaps: `json.dumps` still allows `NaN`/`Infinity`, as the server did;
+  no signal handlers on Windows and the descriptor redirect is untested
+  there.
 
 ## Release
 
