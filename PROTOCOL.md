@@ -1,11 +1,13 @@
 # The petritype net protocol
 
 Status: **protocol version 1.** Written 2026-10-03 and amended the same day
-after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11). The
-Rust runner (`petritype-runner`, in `../petritype-rs`) implements it; the
-Python runner (`DESIGN_RUNNER.md`) is not yet implemented. This file is the
-single source of truth for the protocol; the other repositories link here
-and do not restate the shapes:
+after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11). Both
+runners implement it, the Rust one (`petritype-runner`, in
+`../petritype-rs`) and the Python one (`python -m petritype.runner`,
+`DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
+Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
+2026-10-04. This file is the single source of truth for the protocol; the
+other repositories link here and do not restate the shapes:
 
 - library side (Python): [`DESIGN_RUNNER.md`](DESIGN_RUNNER.md)
 - library side (Rust): `../petritype-rs/DESIGN.md` §19
