@@ -313,7 +313,9 @@ before it moves to `describe`.
   current runner is. Either way, state reads and `stop` are answered while
   a body runs, and a viewer must handle both shapes.
 - A failing body emits `failed`; whether execution goes on is the runtime's
-  policy and is reported by `execution_stopped` when it stops.
+  policy and is reported by `execution_stopped` when it stops, with
+  `reason: "transition_failed"` and the failure's `error_type` and `message`
+  (both runners stop).
 
 ### 6.4 Input
 
