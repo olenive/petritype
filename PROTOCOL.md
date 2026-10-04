@@ -1,7 +1,8 @@
 # The petritype net protocol
 
 Status: **protocol version 1.** Written 2026-10-03 and amended the same day
-after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11). Both
+after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11), and on
+2026-10-04 when the Python runner moved to two-piece firings (§6.3, §7.1). Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -305,11 +306,12 @@ before it moves to `describe`.
   per idle spell) and keeps polling; any other net stops at quiescence and
   emits `execution_stopped {reason: "no_fireable_transitions"}` (version 0 spelt
   this `no_enabled_transitions`; the server's translation maps it).
-- The runtime picks its driver. Both fire one transition at a time. The
-  Python runner reports each firing as `fired`; the Rust runner runs every
-  body off its request thread and reports `launched` then `distributed`.
-  Either way, state reads and `stop` are answered while a body runs, and a
-  viewer must handle both shapes.
+- The runtime picks its driver. Both fire one transition at a time. Both
+  runners run every body off their request thread and report `launched`
+  then `distributed` (the Python one since 2026-10-04). `fired` remains
+  legal for a runtime that cannot observe a body part-way, which neither
+  current runner is. Either way, state reads and `stop` are answered while
+  a body runs, and a viewer must handle both shapes.
 - A failing body emits `failed`; whether execution goes on is the runtime's
   policy and is reported by `execution_stopped` when it stops.
 
@@ -350,8 +352,8 @@ one) and `running`.
 
 | method | params | when |
 |---|---|---|
-| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece (every Python firing) |
-| `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (the Rust runner, which runs every body off its request thread): inputs taken, body started |
+| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece, by a runtime that cannot observe a body part-way (neither current runner) |
+| `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (both runners, which run every body off their request thread): inputs taken, body started |
 | `distributed` | `{transition, produced: [[place, id, label, color?]], duration_ms}` | the second piece: body returned, outputs placed |
 | `failed` | `{transition, error, restored, consumed: [[place, id]]}` | a body failed; `restored` says whether the consumed tokens went back (same ids, front of their places) |
 | `added` | `{place, id, label, color?}` | a token arrived from outside (`inject`, a command) |

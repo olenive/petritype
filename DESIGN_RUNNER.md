@@ -86,6 +86,13 @@ the `Enable`/`Disable` switch.
   enabled)`, `ParamChanged(transition, param)`, each with `(place_name,
   token_id)` pairs. Python emits no `Launched`/`Distributed`: a Python
   firing is reported once, when it completes.
+  *2026-10-04:* that stays true of the engine's events, but the runner now
+  reports every firing in two pieces on the wire, `launched` when it hands
+  the firing out (the tokens stage 1 will take, predicted from the edges and
+  checked against `Fired`/`Failed` on landing) and `distributed` or `failed`
+  when it lands, as the Rust runner does. One piece hid the body: a viewer of
+  a slow Python body saw nothing but heartbeats until it landed, while the
+  owner already knew the transition was in flight.
 - The engine appends `Fired` and `Failed` in `fire_one_transition` and in
   the concurrent deposit loops; `Added`/`Removed` come from command
   application; `Toggled` and `ParamChanged` from `_apply_command`, because
@@ -176,12 +183,15 @@ Settlements:
   token, or a whole live list, while a read iterates it. The snapshot is a
   shallow copy of each place's token and id lists plus the labels of the
   tokens handed to the body, rendered before it starts. Counts are true, any
-  page works, the airborne transition shows `in_flight`. Cost is one shallow
+  page works, the airborne transition shows `in_flight`. Since 2026-10-04
+  the snapshot is of the marking `launched` describes: the taken tokens are
+  gone from it, and only mutate-edge tokens are rendered early. Cost is one shallow
   copy of the marking per firing, in place of the server's capped-plus-full
   snapshots refreshed after every mutation. A later refinement could copy
   only the places the body can touch (its mutate edges).
-- `get_token` for a token the airborne body holds waits for the landing;
-  every other id is answered at once.
+- `get_token` for a token the airborne body holds through a mutate edge
+  waits for the landing; every other id is answered at once, and a token the
+  body took is in no place, so `unknown_token` (as the Rust runner answers).
 - `duration_ms` comes from the engine's own `Fired.duration_ms`; the owner
   never reads a clock.
 - `set_param` without `transition`, or naming a keyword the function does

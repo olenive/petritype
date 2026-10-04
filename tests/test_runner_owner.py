@@ -2,8 +2,12 @@
 
 Every test feeds requests with a fixed ``now`` and reads back the lines, awaiting
 each ``Launch`` inline and handing its ``Landing`` to ``completed`` — exactly how
-the transcript harness and the process layer drive it. ``duration_ms`` of a
-``fired`` is the engine's own measurement of the body, so it is masked.
+the transcript harness and the process layer drive it. Every firing is reported
+in two pieces, ``launched`` when it is launched and ``distributed`` (or
+``failed``) when it lands, each raising ``marking_version`` by one; nothing is
+written between the two but the firing's own ``mutated`` lines. ``duration_ms``
+of a ``distributed`` is the engine's own measurement of the body, so it is
+masked.
 """
 
 import asyncio
@@ -156,14 +160,16 @@ def explode(x: int) -> int:
 
 
 @petri_net(name="fails")
-def fails():
-    return ExecutableGraphOperations.construct_graph([
+def fails(restore: bool = False):
+    graph = ExecutableGraphOperations.construct_graph([
         ListPlaceNode("In", int, [1, 2]),
         ArgumentEdgeToTransition("In", "Explode", "x"),
         FunctionTransitionNode("Explode", explode),
         ReturnedEdgeFromTransition("Explode", "Out"),
         ListPlaceNode("Out", int),
     ])
+    graph.restore_tokens_on_failure = restore
+    return graph
 
 
 @petri_net(name="watcher", mode="24/7")
@@ -543,10 +549,11 @@ async def test_pydantic_labels_colors_and_per_token_type_names():
         {"id": "3", "label": '{"id":3,"weight":7,"color":"chartreuse"}'},
     ]
     lines = await h.send("step")
-    assert lines[0] == note(
-        "fired", 1, transition="Sort", consumed=[["Receiving", "1"]],
+    assert lines[0] == note("launched", 1, transition="Sort", consumed=[["Receiving", "1"]])
+    assert lines[1] == note(
+        "distributed", 2, transition="Sort",
         produced=[["Sorted", "4", '{"id":1,"weight":5,"color":"red"}', "#ef4444"]],
-        duration_ms=lines[0]["params"]["duration_ms"],
+        duration_ms=lines[1]["params"]["duration_ms"],
     )
 
 
@@ -584,18 +591,18 @@ async def test_get_token_errors():
 # --- step, notifications and the log --------------------------------------------------------
 
 
-async def test_step_writes_fired_and_fireable_before_its_response():
+async def test_step_writes_launched_distributed_and_fireable_before_its_response():
     h = Harness(chain)
     await h.loaded("chain", {"n": 1})
     lines = await h.send("step")
     assert_lines([
-        note("fired", 1, transition="Double", consumed=[["Input", "1"]],
-             produced=[["Output", "2", "2"]], duration_ms=MS),
-        note("fireable", 1, transitions=[]),
-        {"id": "2", "result": {"fired": True, "transition": "Double", "marking_version": 1, "running": False}},
+        note("launched", 1, transition="Double", consumed=[["Input", "1"]]),
+        note("distributed", 2, transition="Double", produced=[["Output", "2", "2"]], duration_ms=MS),
+        note("fireable", 2, transitions=[]),
+        {"id": "2", "result": {"fired": True, "transition": "Double", "marking_version": 2, "running": False}},
     ], lines)
     lines = await h.send("step")
-    assert lines == [{"id": "3", "result": {"fired": False, "marking_version": 1, "running": False}}]
+    assert lines == [{"id": "3", "result": {"fired": False, "marking_version": 2, "running": False}}]
     [line] = await h.send("get_state")
     assert line["result"]["progress"] == {
         "step_count": 1, "last_fired": "Double", "fired_counts": {"Double": 1}, "last_progress_at": ISO_NOW,
@@ -620,16 +627,17 @@ async def test_get_log_entries_and_paging():
     assert line["error"]["code"] == "invalid_params"
 
 
-async def test_mutated_comes_before_fired():
+async def test_mutated_comes_before_distributed():
     h = Harness(shapes)
     await h.loaded("shapes")
     lines = await h.send("step")
     assert_lines([
-        note("mutated", 1, place="Counters", id="1", label="101"),
-        note("fired", 2, transition="Bump", consumed=[["Totals", "2"], ["Totals", "3"]],
-             produced=[["Sum", "4", "5"], ["Len", "5", "2"]], duration_ms=MS),
-        note("fireable", 2, transitions=[]),
-        {"id": "2", "result": {"fired": True, "transition": "Bump", "marking_version": 2, "running": False}},
+        # A take-all edge: every token of the place, in order.
+        note("launched", 1, transition="Bump", consumed=[["Totals", "2"], ["Totals", "3"]]),
+        note("mutated", 2, place="Counters", id="1", label="101"),
+        note("distributed", 3, transition="Bump", produced=[["Sum", "4", "5"], ["Len", "5", "2"]], duration_ms=MS),
+        note("fireable", 3, transitions=[]),
+        {"id": "2", "result": {"fired": True, "transition": "Bump", "marking_version": 3, "running": False}},
     ], lines)
 
 
@@ -638,10 +646,11 @@ async def test_a_failing_body_answers_step_with_failed_true():
     await h.loaded("fails")
     lines = await h.send("step")
     assert lines == [
-        note("failed", 1, transition="Explode", error="ValueError: cannot take 1", restored=False,
+        note("launched", 1, transition="Explode", consumed=[["In", "1"]]),
+        note("failed", 2, transition="Explode", error="ValueError: cannot take 1", restored=False,
              consumed=[["In", "1"]]),
         {"id": "2", "result": {"fired": True, "transition": "Explode", "failed": True,
-                               "marking_version": 1, "running": False}},
+                               "marking_version": 2, "running": False}},
     ]
     [line] = await h.send("get_log")
     assert line["result"]["entries"] == [{
@@ -653,21 +662,43 @@ async def test_a_failing_body_answers_step_with_failed_true():
     assert line["result"]["progress"]["last_fired"] is None
 
 
+async def test_a_failing_body_that_restores_puts_the_launched_tokens_back_at_the_front():
+    h = Harness(fails)
+    await h.loaded("fails", {"restore": True})
+    lines = await h.send("step", land=False)
+    assert lines == [note("launched", 1, transition="Explode", consumed=[["In", "1"]])]
+    [line] = await h.send("get_place_tokens", {"place": "In"})  # mid-body: token 1 has left
+    assert [t["id"] for t in line["result"]["tokens"]] == ["2"]
+    lines = await h.land()
+    assert lines == [
+        note("failed", 2, transition="Explode", error="ValueError: cannot take 1", restored=True,
+             consumed=[["In", "1"]]),
+        {"id": "2", "result": {"fired": True, "transition": "Explode", "failed": True,
+                               "marking_version": 2, "running": False}},
+    ]
+    [line] = await h.send("get_place_tokens", {"place": "In"})
+    assert line["result"]["tokens"] == [{"id": "1", "label": "1"}, {"id": "2", "label": "2"}]
+    assert line["result"]["marking_version"] == 2
+
+
 # --- the deferred step ---------------------------------------------------------------------
 
 
 async def test_reads_are_answered_while_a_step_is_airborne_and_the_rest_waits():
     h = Harness(chain)
     await h.loaded("chain", {"n": 2})
-    assert await h.send("step", land=False) == []  # id 2: airborne, no answer yet
+    # id 2: airborne, no answer yet; ``launched`` goes out at once.
+    assert await h.send("step", land=False) == [note("launched", 1, transition="Double", consumed=[["Input", "1"]])]
     assert h.owner.status == ("Double", NOW)
     [line] = await h.send("get_state")  # id 3: at once, from the snapshot
     state = line["result"]
-    assert state["marking_version"] == 0
-    assert state["marking"]["places"]["Input"]["count"] == 2  # as of version 0
+    assert state["marking_version"] == 1
+    # As of the launched: the taken token has left.
+    assert state["marking"]["places"]["Input"] == {"count": 1, "tokens": [{"id": "2", "label": "2"}]}
+    assert state["marking"]["places"]["Output"]["count"] == 0
     assert state["transitions"]["Double"] == {"enabled": True, "fireable": False, "in_flight": True, "priority": 0.0}
     [line] = await h.send("get_place_tokens", {"place": "Input"})  # id 4
-    assert line["result"]["count"] == 2
+    assert line["result"]["count"] == 1 and line["result"]["marking_version"] == 1
     [line] = await h.send("get_token", {"id": "2"})  # id 5: not handed to the body
     assert line["result"]["value"] == 2
     [line] = await h.send("get_log")  # id 6
@@ -676,23 +707,43 @@ async def test_reads_are_answered_while_a_step_is_airborne_and_the_rest_waits():
     assert "result" in line
     assert await h.send("inject", {"place": "Input", "token": 10}) == []  # id 8: waits
     assert await h.send("step") == []  # id 9: a second step waits too
-    assert await h.send("get_token", {"id": "1"}) == []  # id 10: the body holds token 1
+    # id 10: the body took token 1, so it is in no place (as the Rust runner answers).
+    assert await h.send("get_token", {"id": "1"}) == [
+        {"id": "10", "error": {"code": "unknown_token", "message": "no live token '1'"}},
+    ]
     lines = await h.land(again=False)
     assert_lines([
-        note("fired", 1, transition="Double", consumed=[["Input", "1"]], produced=[["Output", "3", "2"]],
-             duration_ms=MS),
-        {"id": "2", "result": {"fired": True, "transition": "Double", "marking_version": 1, "running": False}},
-        note("added", 2, place="Input", id="4", label="10"),
-        {"id": "8", "result": {"status": "injected", "id": "4", "marking_version": 2}},
+        note("distributed", 2, transition="Double", produced=[["Output", "3", "2"]], duration_ms=MS),
+        {"id": "2", "result": {"fired": True, "transition": "Double", "marking_version": 2, "running": False}},
+        note("added", 3, place="Input", id="4", label="10"),
+        {"id": "8", "result": {"status": "injected", "id": "4", "marking_version": 3}},
+        note("launched", 4, transition="Double", consumed=[["Input", "2"]]),
     ], lines)
-    assert h.pending is not None  # the deferred step launched; id 10 waits behind it
+    assert h.pending is not None  # the deferred step launched
     lines = await h.land()
     assert_lines([
-        note("fired", 3, transition="Double", consumed=[["Input", "2"]], produced=[["Output", "5", "4"]],
-             duration_ms=MS),
-        {"id": "9", "result": {"fired": True, "transition": "Double", "marking_version": 3, "running": False}},
-        {"id": "10", "error": {"code": "unknown_token", "message": "no live token '1'"}},
+        note("distributed", 5, transition="Double", produced=[["Output", "5", "4"]], duration_ms=MS),
+        {"id": "9", "result": {"fired": True, "transition": "Double", "marking_version": 5, "running": False}},
     ], lines)
+
+
+async def test_get_token_waits_only_for_a_token_handed_over_through_a_mutate_edge():
+    h = Harness(shapes)
+    await h.loaded("shapes")
+    lines = await h.send("step", land=False)
+    assert lines == [note("launched", 1, transition="Bump", consumed=[["Totals", "2"], ["Totals", "3"]])]
+    [line] = await h.send("get_state")
+    places = line["result"]["marking"]["places"]
+    assert places["Totals"] == {"count": 0, "tokens": []}  # a take-all edge took both
+    assert places["Counters"] == {"count": 1, "tokens": [{"id": "1", "label": "1"}]}  # a mutate edge takes nothing
+    [line] = await h.send("get_token", {"id": "2"})  # taken: in no place
+    assert line["error"]["code"] == "unknown_token"
+    assert await h.send("get_token", {"id": "1"}) == []  # the body may be changing it: waits
+    lines = await h.land()
+    assert methods(lines) == ["mutated", "distributed", "fireable", "result", "result"]
+    assert lines[-1] == {"id": "5", "result": {
+        "id": "1", "place": "Counters", "type_name": "int", "kind": "json", "value": 101,
+    }}
 
 
 async def test_get_state_does_not_wait_for_a_body_running_on_its_thread():
@@ -706,14 +757,14 @@ async def test_get_state_does_not_wait_for_a_body_running_on_its_thread():
     while not ENTERED.is_set():  # the body is now blocked on its thread
         await asyncio.sleep(0.001)
     [line] = await h.send("get_state")
-    assert line["result"]["marking"]["places"]["Input"]["count"] == 2
+    assert line["result"]["marking"]["places"]["Input"]["count"] == 1  # the body took one
     assert line["result"]["transitions"]["Slow"]["in_flight"] is True
     [line] = await h.send("stop")
-    assert line["result"] == {"status": "stopped", "marking_version": 0, "running": False}
+    assert line["result"] == {"status": "stopped", "marking_version": 1, "running": False}
     RELEASE.set()
     landing = await task
     out = await h.owner.completed(landing, NOW)
-    assert methods(out.lines) == ["fired", "result"]
+    assert methods(out.lines) == ["distributed", "result"]
     assert out.lines[-1]["id"] == "2"
 
 
@@ -732,7 +783,7 @@ async def test_a_stale_landing_is_ignored():
     await h.send("step", land=False)
     landing = await h.pending.coroutine
     first = await h.owner.completed(landing, NOW)
-    assert methods(first.lines) == ["fired", "result"]
+    assert methods(first.lines) == ["distributed", "result"]
     again = await h.owner.completed(landing, NOW)
     assert again.lines == [] and again.launch is None
 
@@ -746,12 +797,12 @@ async def test_start_runs_to_quiescence_and_stops():
     lines = await h.send("start")
     assert_lines([
         {"id": "2", "result": {"status": "started", "marking_version": 0, "running": True}},
-        note("fired", 1, True, transition="Double", consumed=[["Input", "1"]], produced=[["Output", "3", "2"]],
-             duration_ms=MS),
-        note("fired", 2, True, transition="Double", consumed=[["Input", "2"]], produced=[["Output", "4", "4"]],
-             duration_ms=MS),
-        note("fireable", 2, True, transitions=[]),
-        note("execution_stopped", 2, reason="no_fireable_transitions"),
+        note("launched", 1, True, transition="Double", consumed=[["Input", "1"]]),
+        note("distributed", 2, True, transition="Double", produced=[["Output", "3", "2"]], duration_ms=MS),
+        note("launched", 3, True, transition="Double", consumed=[["Input", "2"]]),
+        note("distributed", 4, True, transition="Double", produced=[["Output", "4", "4"]], duration_ms=MS),
+        note("fireable", 4, True, transitions=[]),
+        note("execution_stopped", 4, reason="no_fireable_transitions"),
     ], lines)
     assert not h.owner.running
 
@@ -759,11 +810,11 @@ async def test_start_runs_to_quiescence_and_stops():
 async def test_stop_lets_the_airborne_body_land_and_ends_the_run():
     h = Harness(chain)
     await h.loaded("chain", {"n": 3})
-    await h.send("start", land=False)
+    assert methods(await h.send("start", land=False)) == ["result", "launched"]
     [line] = await h.send("stop")
     assert line["result"]["running"] is False
     lines = await h.land()
-    assert methods(lines) == ["fired"]  # landed and reported; nothing more launched
+    assert methods(lines) == ["distributed"]  # landed and reported; nothing more launched
     assert h.pending is None and not h.owner.running
 
 
@@ -774,10 +825,10 @@ async def test_a_continuous_net_goes_idle_once_per_spell():
     lines = await h.send("start")
     assert_lines([
         {"id": "2", "result": {"status": "started", "marking_version": 0, "running": True}},
-        note("fired", 1, True, transition="Double", consumed=[["Input", "1"]], produced=[["Output", "2", "2"]],
-             duration_ms=MS),
-        note("fireable", 1, True, transitions=[]),
-        note("idle", 1, True, idle_since=ISO_NOW),
+        note("launched", 1, True, transition="Double", consumed=[["Input", "1"]]),
+        note("distributed", 2, True, transition="Double", produced=[["Output", "2", "2"]], duration_ms=MS),
+        note("fireable", 2, True, transitions=[]),
+        note("idle", 2, True, idle_since=ISO_NOW),
     ], lines)
     assert h.owner.running
     assert await h.tick() == []
@@ -785,13 +836,13 @@ async def test_a_continuous_net_goes_idle_once_per_spell():
     h.now = later
     lines = await h.send("inject", {"place": "Input", "token": 5})
     assert_lines([
-        note("added", 2, True, place="Input", id="3", label="5"),
-        note("fireable", 2, True, transitions=["Double"]),
-        {"id": "3", "result": {"status": "injected", "id": "3", "marking_version": 2}},
-        note("fired", 3, True, transition="Double", consumed=[["Input", "3"]], produced=[["Output", "4", "10"]],
-             duration_ms=MS),
-        note("fireable", 3, True, transitions=[]),
-        note("idle", 3, True, idle_since="2026-10-03T09:15:07.413Z"),  # a new spell
+        note("added", 3, True, place="Input", id="3", label="5"),
+        note("fireable", 3, True, transitions=["Double"]),
+        {"id": "3", "result": {"status": "injected", "id": "3", "marking_version": 3}},
+        note("launched", 4, True, transition="Double", consumed=[["Input", "3"]]),
+        note("distributed", 5, True, transition="Double", produced=[["Output", "4", "10"]], duration_ms=MS),
+        note("fireable", 5, True, transitions=[]),
+        note("idle", 5, True, idle_since="2026-10-03T09:15:07.413Z"),  # a new spell
     ], lines)
 
 
@@ -801,9 +852,10 @@ async def test_a_failure_while_running_stops_the_run():
     lines = await h.send("start")
     assert lines == [
         {"id": "2", "result": {"status": "started", "marking_version": 0, "running": True}},
-        note("failed", 1, True, transition="Explode", error="ValueError: cannot take 1", restored=False,
+        note("launched", 1, True, transition="Explode", consumed=[["In", "1"]]),
+        note("failed", 2, True, transition="Explode", error="ValueError: cannot take 1", restored=False,
              consumed=[["In", "1"]]),
-        note("execution_stopped", 1, reason="transition_failed", error_type="ValueError",
+        note("execution_stopped", 2, reason="transition_failed", error_type="ValueError",
              message="cannot take 1"),
     ]
     assert not h.owner.running
@@ -815,21 +867,21 @@ async def test_a_failure_while_running_stops_the_run():
 async def test_generation_rises_on_load_and_reset_and_the_version_never_resets():
     h = Harness(chain)
     await h.loaded("chain", {"n": 1})
-    await h.send("step")  # version 1
+    await h.send("step")  # version 2: launched, then distributed
     lines = await h.send("reset")
     assert lines == [
-        note("reloaded", 1, generation=2, reason="reset"),
-        {"id": "3", "result": {"status": "reset", "generation": 2, "marking_version": 1}},
+        note("reloaded", 2, generation=2, reason="reset"),
+        {"id": "3", "result": {"status": "reset", "generation": 2, "marking_version": 2}},
     ]
     [line] = await h.send("get_state")
     state = line["result"]
-    assert state["generation"] == 2 and state["marking_version"] == 1
+    assert state["generation"] == 2 and state["marking_version"] == 2
     assert state["marking"]["places"]["Input"]["tokens"] == [{"id": "1", "label": "1"}]  # same params, fresh ids
     assert state["progress"]["step_count"] == 0 and state["progress"]["last_fired"] is None
     lines = await h.send("load", {"net": "chain", "params": {"n": 2}})
-    assert lines[-1]["result"] == {"status": "loaded", "generation": 3, "marking_version": 1}
+    assert lines[-1]["result"] == {"status": "loaded", "generation": 3, "marking_version": 2}
     lines = await h.send("inject", {"place": "Input", "token": 4})
-    assert lines[0]["params"]["marking_version"] == 2
+    assert lines[0]["params"]["marking_version"] == 3
     [line] = await h.send("get_log")
     assert line["result"]["entries"] == []  # the log belongs to a generation
 
@@ -841,7 +893,7 @@ async def test_load_while_running_replaces_the_run():
     assert h.owner.running
     lines = await h.send("load", {"net": "chain"})
     assert lines[0]["params"]["running"] is True  # load_progress: the old net was still running
-    assert lines[1] == note("reloaded", 1, generation=2, reason="load")
+    assert lines[1] == note("reloaded", 2, generation=2, reason="load")
     assert not h.owner.running
 
 
@@ -918,7 +970,7 @@ async def test_set_param_sets_one_keyword_of_one_transition():
         {"id": "2", "result": {"marking_version": 1}},
     ]
     lines = await h.send("step")
-    assert lines[0]["params"]["produced"] == [["Out", "2", "12"]]
+    assert lines[1]["params"]["produced"] == [["Out", "2", "12"]]
     for params, code in [
         ({"param": "factor", "value": 4}, "invalid_params"),  # transition is required in Python
         ({"param": "factor", "transition": "Scale"}, "invalid_params"),
@@ -956,9 +1008,9 @@ async def test_a_body_that_resizes_a_place_is_reported_as_a_resync():
     h = Harness(grower)
     await h.loaded("grower")
     lines = await h.send("step")
-    assert methods(lines) == ["mutated", "fired", "reloaded", "fireable", "result"]
-    assert lines[2] == note("reloaded", 2, generation=1, reason="resync")  # does not move the version
-    assert lines[-1]["result"]["marking_version"] == 2
+    assert methods(lines) == ["launched", "mutated", "distributed", "reloaded", "fireable", "result"]
+    assert lines[3] == note("reloaded", 3, generation=1, reason="resync")  # does not move the version
+    assert lines[-1]["result"]["marking_version"] == 3
     [line] = await h.send("get_place_tokens", {"place": "Log"})
     assert [t["label"] for t in line["result"]["tokens"]] == ["0", "7"]
     assert len({t["id"] for t in line["result"]["tokens"]}) == 2
@@ -984,7 +1036,8 @@ async def test_an_async_body_fires_on_the_loop():
     h = Harness(async_body)
     await h.loaded("async-body")
     lines = await h.send("step")
-    assert lines[0]["params"]["produced"] == [["Out", "2", "4"]]
+    assert methods(lines) == ["launched", "distributed", "fireable", "result"]
+    assert lines[1]["params"]["produced"] == [["Out", "2", "4"]]
 
 
 # --- an example from examples/ ---------------------------------------------------------------
@@ -1009,6 +1062,6 @@ async def test_the_quickstart_net_runs_to_the_readme_marking():
     h = Harness(quickstart_net)
     await h.loaded("quickstart")
     lines = await h.send("start")
-    assert methods(lines) == ["result", "fired", "fired", "fired", "fireable", "execution_stopped"]
+    assert methods(lines) == ["result"] + ["launched", "distributed"] * 3 + ["fireable", "execution_stopped"]
     [line] = await h.send("get_place_tokens", {"place": "Output"})
     assert [t["label"] for t in line["result"]["tokens"]] == ["2", "4", "6"]

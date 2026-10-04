@@ -20,8 +20,8 @@ the same to both:
 - A ``launched`` immediately followed by its ``distributed`` (same transition) is
   folded into one ``fired {transition, consumed, produced, duration_ms}`` stamped
   with the ``distributed``'s ``marking_version`` and ``running`` before comparing.
-  The Python runner never splits a firing, so for it this is a no-op; it is here
-  so that a transcript reads the same for either runtime.
+  Both runners split every firing (the Python one since 2026-10-04); the fold is
+  what lets a transcript read the same for any runtime, one-piece ones included.
 
 Three additions over the Rust harness, each needed for a transcript that holds
 against both runtimes:

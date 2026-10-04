@@ -306,6 +306,10 @@ class Notification(Wire):
 
 
 class Fired(Notification):
+    """A firing in one piece: legal in version 1 for a runtime that cannot
+    observe a body part-way. Neither runner sends it; the Python runner sent it
+    until 2026-10-04 and now sends ``Launched`` then ``Distributed``."""
+
     method: ClassVar[str] = "fired"
     moves_version: ClassVar[bool] = True
 
@@ -316,8 +320,7 @@ class Fired(Notification):
 
 
 class Launched(Notification):
-    """Never sent by the Python runner (a Python firing is one ``fired``); here so
-    the module covers the whole protocol."""
+    """The first piece of a firing: inputs taken, body started."""
 
     method: ClassVar[str] = "launched"
     moves_version: ClassVar[bool] = True
@@ -327,7 +330,7 @@ class Launched(Notification):
 
 
 class Distributed(Notification):
-    """Never sent by the Python runner; see ``Launched``."""
+    """The second piece of a firing: body returned, outputs placed."""
 
     method: ClassVar[str] = "distributed"
     moves_version: ClassVar[bool] = True

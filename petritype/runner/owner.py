@@ -4,9 +4,11 @@
 lines the protocol says to write, in order, as plain dicts. It creates no tasks
 or threads, reads no clock but the ``now`` it is handed, and writes nothing, so
 every behaviour can be tested by feeding it inputs and reading what comes out.
-It mirrors the Rust runner's ``Owner`` (petritype-rs DESIGN §19.3) with Python's
-firing shape: every firing is reported once, as ``fired`` (or ``failed``), when
-it lands.
+It mirrors the Rust runner's ``Owner`` (petritype-rs DESIGN §19.3) and its
+firing shape: every firing is reported in two pieces, ``launched`` (inputs
+taken, body started) when it is launched and ``distributed`` (outputs placed)
+or ``failed`` when it lands, a fast body's two lines in the same batch. Before
+2026-10-04 this runner reported a firing once, as ``fired``, when it landed.
 
 A firing is handed to the caller, not run here. ``handle`` for ``step`` or
 ``start`` (and ``completed`` or ``tick`` while running) may return an
@@ -29,17 +31,25 @@ place's live list through a ``list[...]`` mutate edge, can change it while a
 read is iterating it. The marking mid-firing is also inconsistent by definition
 (inputs taken, outputs not yet placed).
 
-So every launch first captures a ``_Snapshot`` of the marking as of the current
-``marking_version``: per place, a shallow copy of the token and id lists (pointer
-copies, cheap), with the labels of the tokens this firing will hand to its body
-(its argument and mutate edges' tokens) rendered at once, before the body can
-touch them; the transition states, with the airborne one ``in_flight``; and the
-progress. While the body runs, ``get_state`` and ``get_place_tokens`` are served
-from that snapshot: counts are the true counts at that version, any page can be
-served (labels of untouched tokens are rendered on demand from objects no one
-else is changing), and the response says which version it reflects. A
-``get_token`` for one of the tokens handed to the body is the one read that
-waits for the landing: its full value is exactly what the body may be changing.
+So every launch writes ``launched`` and then captures a ``_Snapshot`` of the
+marking as of that ``launched``'s ``marking_version``: per place, a shallow copy
+of the token and id lists (pointer copies, cheap) without the tokens the firing
+takes (predicted from the edges exactly as stage 1 will take them, and the same
+ones ``launched`` names), with the labels of the tokens it hands to its body
+through mutate edges rendered at once, before the body can touch them; the
+transition states as of that marking, with the airborne one ``in_flight``; and
+the progress. While the body runs, ``get_state`` and ``get_place_tokens`` are
+served from that snapshot: counts are the true counts at that version, any page
+can be served (labels of untouched tokens are rendered on demand from objects no
+one else is changing), and the response says which version it reflects. A
+taken token is in no place, so ``get_token`` for it answers ``unknown_token``,
+as the Rust runner does. A ``get_token`` for a token handed to the body through
+a mutate edge is the one read that waits for the landing: its full value is
+exactly what the body may be changing.
+
+The prediction is checked on landing against the engine's own ``Fired`` or
+``Failed``; a difference would be a bug, and is reported on stderr (the one
+place the owner writes anything itself).
 This differs from the server's approach (a capped snapshot refreshed after
 every mutation, and a complete one kept while wanted), which paid for labels on
 every change whether or not a read came; here the cost is paid per firing and
@@ -50,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -173,6 +184,21 @@ class _InFlight:
     # The ``step`` request waiting for this firing, if a step launched it.
     step_id: Optional[str]
     snapshot: _Snapshot
+    # What ``launched`` said the firing takes, in the order taken.
+    consumed: list[tuple[str, int]] = field(default_factory=list)
+
+
+@dataclass
+class _Handover:
+    """What stage 1 will do to the marking as it stands: ``consumed``, the
+    ``(place, id)`` pairs its argument edges take, in the order taken; ``taken``,
+    per place, how many tokens leave from the front; ``mutated``, per place, the
+    indices (in the place as it stands) of the tokens handed to the body through
+    mutate edges. Snapshot edges hand over deep copies and appear in none."""
+
+    consumed: list[tuple[str, int]]
+    taken: dict[str, int]
+    mutated: dict[str, set[int]]
 
 
 @dataclass
@@ -514,20 +540,30 @@ class Owner:
             tokens=list(place.tokens),
         )
 
-    def _capture(self, airborne: Optional[FunctionTransitionNode] = None) -> _Snapshot:
+    def _capture(
+        self, airborne: Optional[FunctionTransitionNode] = None, handover: _Handover | None = None,
+    ) -> _Snapshot:
         """The marking, transition states and progress as of now. With
-        ``airborne``, the transition about to fire: its body's tokens are rendered
-        at once and it is shown ``in_flight``."""
+        ``airborne``, the transition about to fire, and its ``handover``: the
+        tokens it takes are left out (and the transition states are those of the
+        marking without them), the tokens its mutate edges hand over are rendered
+        at once, and it is shown ``in_flight``."""
         loaded = self._loaded
         graph = loaded.graph
         places = {place.name: self._view(place) for place in graph.places}
-        transitions = self._transition_states()
-        if airborne is not None:
-            for place_name, takes_all in self._handed_over(airborne):
+        if airborne is None:
+            transitions = self._transition_states()
+        else:
+            for place_name, indices in handover.mutated.items():
                 view = places[place_name]
-                indices = range(view.count) if takes_all else range(min(1, view.count))
                 for index in indices:
-                    view.eager[index] = view.entry(index)
+                    if index < view.count:
+                        view.eager[index] = view.entry(index)
+            for place_name, count in handover.taken.items():
+                view = places[place_name]
+                view.ids, view.tokens = view.ids[count:], view.tokens[count:]
+                view.eager = {index - count: entry for index, entry in view.eager.items() if index >= count}
+            transitions = self._states_without(handover.taken)
             transitions[airborne.name] = transitions[airborne.name].model_copy(
                 update={"in_flight": True, "fireable": False}
             )
@@ -543,20 +579,55 @@ class Owner:
             ),
         )
 
-    def _handed_over(self, transition: FunctionTransitionNode) -> list[tuple[str, bool]]:
-        """``(place, takes_all)`` for each argument and mutate edge of ``transition``:
-        the tokens its body will hold. Snapshot edges hand over deep copies."""
+    def _handed_over(self, transition: FunctionTransitionNode) -> _Handover:
+        """What firing ``transition`` now will take and hand over, by stage 1's own
+        rules: argument edges in order, each taking the oldest remaining token of
+        its place, or every remaining one for a ``list[...]`` argument; then the
+        mutate edges, which take nothing and hand over the oldest remaining token
+        (or all of them) where they are."""
         loaded = self._loaded
-        edges = list(loaded.incoming.get(transition.name, ())) + [
-            edge for edge in loaded.graph.mutate_edges if edge.transition_node_name == transition.name
-        ]
-        return [
-            (
-                edge.place_node_name,
-                Topologies.takes_all(transition.function, edge.argument, loaded.place_nodes[edge.place_node_name]),
-            )
-            for edge in edges
-        ]
+        consumed: list[tuple[str, int]] = []
+        taken: dict[str, int] = {}
+        for edge in loaded.incoming.get(transition.name, ()):
+            place = loaded.place_nodes[edge.place_node_name]
+            ids = place.token_ids
+            start = taken.get(place.name, 0)
+            takes_all = Topologies.takes_all(transition.function, edge.argument, place)
+            end = len(ids) if takes_all else min(start + 1, len(ids))
+            consumed.extend((place.name, token_id) for token_id in ids[start:end])
+            taken[place.name] = max(start, end)
+        mutated: dict[str, set[int]] = {}
+        for edge in loaded.graph.mutate_edges:
+            if edge.transition_node_name != transition.name:
+                continue
+            place = loaded.place_nodes[edge.place_node_name]
+            count = len(place.token_ids)
+            start = taken.get(place.name, 0)
+            takes_all = Topologies.takes_all(transition.function, edge.argument, place)
+            end = count if takes_all else min(start + 1, count)
+            mutated.setdefault(place.name, set()).update(range(start, end))
+        return _Handover(consumed=consumed, taken=taken, mutated=mutated)
+
+    def _states_without(self, taken: dict[str, int]) -> dict[str, wire.TransitionState]:
+        """The transition states of the marking with ``taken`` tokens gone from
+        the front of their places: the marking the body runs against. The live
+        lists are cut and put back in place (nothing else runs on them meanwhile,
+        as the body has not started), so guards and priorities see exactly what
+        they will see once stage 1 has run."""
+        place_nodes = self._loaded.place_nodes
+        removed = []
+        try:
+            for place_name, count in taken.items():
+                place = place_nodes[place_name]
+                tokens, ids = place.tokens[:count], place._token_ids[:count]
+                del place.tokens[:count]
+                del place._token_ids[:count]
+                removed.append((place, tokens, ids))
+            return self._transition_states()
+        finally:
+            for place, tokens, ids in removed:
+                place.tokens[:0] = tokens
+                place._token_ids[:0] = ids
 
     # --- transition states and selection ---
 
@@ -637,9 +708,23 @@ class Owner:
 
     def _launch(self, transition: FunctionTransitionNode, step_id: Optional[str], now: datetime,
                 out: Outgoing) -> None:
+        """Write ``launched`` for ``transition`` and hand its firing out. The
+        fireable set is compared when the firing lands, not now: the launch's own
+        change is transient, and a ``fireable`` between ``launched`` and
+        ``distributed`` would split the pair a viewer folds into ``fired``."""
         loaded = self._loaded
-        snapshot = self._capture(airborne=transition)
-        loaded.in_flight = _InFlight(transition.name, now, step_id, snapshot)
+        # The engine resyncs ids before it takes anything; do it first, so the
+        # ids ``launched`` names are the ones it will take.
+        TokenIds.resync(loaded.graph)
+        self._flush(now, out)
+        handover = self._handed_over(transition)
+        self._marking_version += 1
+        out.lines.append(wire.Launched(
+            transition=transition.name, consumed=_pairs(handover.consumed),
+            marking_version=self._marking_version, running=loaded.running,
+        ).line())
+        snapshot = self._capture(airborne=transition, handover=handover)
+        loaded.in_flight = _InFlight(transition.name, now, step_id, snapshot, handover.consumed)
         loaded.idle = False
         out.launch = Launch(transition.name, _fire(loaded, transition, self.generation))
 
@@ -655,6 +740,16 @@ class Owner:
         events = self._flush(now, out)
         fired = next((e for e in events if isinstance(e, core_events.Fired) and e.transition == flight.name), None)
         failed = next((e for e in events if isinstance(e, core_events.Failed) and e.transition == flight.name), None)
+        if fired is not None or failed is not None:
+            announced, landed = _pairs(flight.consumed), _pairs((fired or failed).consumed)
+            if announced != landed:
+                print(
+                    f"petritype runner: {flight.name} was launched as consuming {announced} "
+                    f"but the engine took {landed}",
+                    file=sys.stderr, flush=True,
+                )
+        else:
+            self._never_took(flight, landing, out)
 
         if fired is not None or failed is not None:
             loaded.log_seq += 1
@@ -702,6 +797,33 @@ class Owner:
             marking_version=self._marking_version,
             running=loaded.running,
         )))
+
+    def _never_took(self, flight: _InFlight, landing: Landing, out: Outgoing) -> None:
+        """Close a ``launched`` whose firing landed without the engine reporting
+        one: it raised before taking anything (a guard or selector inside the
+        engine), or found the transition no longer fireable. The viewer is told
+        ``failed``, ``restored`` when every announced token is where it was; the
+        rest of the landing (no log entry, the ``step`` answer) goes on as for
+        a firing that never happened."""
+        loaded = self._loaded
+        restored = all(
+            token_id in loaded.place_nodes[place].token_ids for place, token_id in flight.consumed
+        )
+        error = (
+            f"{type(landing.error).__name__}: {landing.error}" if landing.error is not None
+            else f"{flight.name} was no longer fireable when its firing ran"
+        )
+        self._marking_version += 1
+        notification = self._notification(core_events.Failed(
+            transition=flight.name, consumed=tuple(flight.consumed), restored=restored, error=error,
+        ))
+        notification.marking_version = self._marking_version
+        out.lines.append(notification.line())
+        if not restored:
+            out.lines.append(wire.Reloaded(
+                generation=self.generation, reason="resync",
+                marking_version=self._marking_version, running=loaded.running,
+            ).line())
 
     def _drive(self, now: datetime, out: Outgoing) -> None:
         """Keep a running net going: launch the next firing if nothing is
@@ -867,9 +989,9 @@ class Owner:
         caller raises it for a state notification)."""
         stamp = {"marking_version": self._marking_version, "running": self._loaded.running}
         if isinstance(event, core_events.Fired):
-            return wire.Fired(
+            # The second piece: ``launched`` already named what it consumed.
+            return wire.Distributed(
                 transition=event.transition,
-                consumed=_pairs(event.consumed),
                 produced=[self._produced(place, token_id) for place, token_id in event.produced],
                 duration_ms=event.duration_ms,
                 **stamp,

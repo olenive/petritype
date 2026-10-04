@@ -169,9 +169,16 @@ def test_a_session_answers_in_order_with_notifications_first(spawn):
 
     step = runner.request("step")
     assert kinds(step)[-1] == "result"
-    assert "fired" in kinds(step)[:-1]
+    # The firing in two pieces, nothing between them but heartbeats.
+    pieces = [line for line in step[:-1] if line.get("method") != "heartbeat"]
+    assert kinds(pieces)[:2] == ["launched", "distributed"]
+    launched, distributed = pieces[0]["params"], pieces[1]["params"]
+    assert launched["transition"] == distributed["transition"] == "Greet"
+    assert launched["consumed"] == [["In", "1"]]
+    assert distributed["marking_version"] == launched["marking_version"] + 1
     assert step[-1]["result"]["fired"] is True
     assert step[-1]["result"]["transition"] == "Greet"
+    assert step[-1]["result"]["marking_version"] == distributed["marking_version"]
 
     state = runner.request("get_state")
     assert kinds(state) == ["result"]
@@ -405,7 +412,7 @@ class Recording(io.BytesIO):
 def test_a_batch_is_one_write_and_one_flush():
     sink = Recording()
     stream = ProtocolStream(sink)
-    lines = [{"method": "fired", "params": {"text": "a\nb", "name": "café"}}, {"id": "1", "result": {}}]
+    lines = [{"method": "distributed", "params": {"text": "a\nb", "name": "café"}}, {"id": "1", "result": {}}]
     assert stream.write(lines)
     assert (sink.writes, sink.flushes) == (1, 1)
     written = sink.getvalue()
