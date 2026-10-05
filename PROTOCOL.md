@@ -410,6 +410,14 @@ A host that serves the net to remote viewers relays the same shapes:
   `marking_version`, `running`) and may add events of its own, such as
   `subprocess_output {text}` for a stderr line and `stream_gap` when its
   buffer overflowed. A viewer treats `stream_gap` as a gap: refetch state.
+- The relay does not keep §3's order between a response and the
+  notifications its request caused: the HTTP answer and the event stream
+  are two connections, and either may arrive first. A viewer that depends
+  on that order restores it itself, by holding the answer to a
+  state-changing request until the stream has reached the answer's
+  `marking_version` (with a time limit, so a dead stream cannot wedge it)
+  and by treating a state notification at or below the version it holds
+  as already reflected rather than as a gap. petritype-bevy does both.
 
 ## 10. Versioning
 
