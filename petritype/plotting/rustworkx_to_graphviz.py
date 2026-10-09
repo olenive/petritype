@@ -1,4 +1,4 @@
-from typing import Callable, Sequence, Union
+from typing import Any, Callable, Optional, Sequence, Union
 from petritype._optional import require
 
 require("rustworkx", "viz")
@@ -11,6 +11,7 @@ from petritype.core.data_structures import (
 from petritype.core.executable_graph_components import (
     ExecutableGraph, FunctionTransitionNode, ListPlaceNode, NestedNets,
 )
+from petritype.core.keys import Filter
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
@@ -44,9 +45,25 @@ class NodeLabel:
         like any other net."""
         return NestedNets.of(token)
 
-    def default_place(node: ListPlaceNode, token_summariser=default_token_summariser) -> str:
-        label = f"{node.name}\n({node.type.__name__})"
-        value_strings = [token_summariser(x) for x in node.tokens]
+    def default_place(
+        node: ListPlaceNode, token_summariser=default_token_summariser,
+        filter: Optional[Filter] = None, params: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """A place's label: its name and type, then one line per token. With a
+        ``filter`` (``petritype.core.keys``) only the tokens it keeps are listed,
+        the header reads ``matching / count`` and a last line says how many the
+        filter hides, so a hidden token is never mistaken for an absent one;
+        ``params`` are the net's, for a clause that names one."""
+        if filter is None:
+            label = f"{node.name}\n({node.type.__name__})"
+            value_strings = [token_summariser(x) for x in node.tokens]
+        else:
+            kept = [x for x in node.tokens if filter.keeps(node, x, params or {})]
+            label = f"{node.name}\n({node.type.__name__}) {len(kept)} / {len(node.tokens)}"
+            value_strings = [token_summariser(x) for x in kept]
+            hidden = len(node.tokens) - len(kept)
+            if hidden:
+                value_strings.append(f"({hidden} hidden by filter)")
         tokens_string = "\n".join(value_strings)
         return f"{label}\n{tokens_string}"
 
@@ -155,6 +172,7 @@ class RustworkxToGraphviz:
     def activation_coloured_attr_functions(
         graph: ExecutableGraph,
         token_summariser=NodeLabel.default_token_summariser,
+        filter: Optional[Filter] = None,
     ) -> tuple[
         Callable[[Union[ListPlaceNode, FunctionTransitionNode]], dict[str, Union[str, int, float, bool]]],
         Callable[[str], dict[str, Union[str, int, float, bool]]]
@@ -162,6 +180,8 @@ class RustworkxToGraphviz:
         """Generate a function that returns node attributes for the flow graph.
 
         This is used to colour nodes depending on recent graph activation history stored in the ExecutableGraph.
+        With a ``filter`` every place lists only the tokens it keeps and says how many it hides
+        (``NodeLabel.default_place``).
         """
 
         # Extract the last entry from each kind of history
@@ -187,7 +207,7 @@ class RustworkxToGraphviz:
         def node_attr_fn(node):
             if isinstance(node, ListPlaceNode):
                 attrs = {
-                    "label": NodeLabel.default_place(node, token_summariser),
+                    "label": NodeLabel.default_place(node, token_summariser, filter, graph.params),
                     'fillcolor': 'deepskyblue',
                     'style': 'filled',
                     'shape': 'oval',

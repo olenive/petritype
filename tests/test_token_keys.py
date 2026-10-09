@@ -126,6 +126,30 @@ class TestFilters:
         assert not seasonal.matches(graph, forest, robin), "a missing parameter accepts nothing"
 
 
+# --- the visualiser: a place label that honours a filter ------------------------------------------
+
+
+class TestFilteredLabel:
+
+    def test_the_label_lists_kept_tokens_and_counts_the_hidden(self):
+        pytest.importorskip("rustworkx")
+        from petritype.plotting.rustworkx_to_graphviz import NodeLabel, RustworkxToGraphviz
+        graph = build_wildlife()
+        forest = graph.place_named("Forest")
+        summarise = lambda s: s.name
+        assert NodeLabel.default_place(forest, summarise).splitlines() == ["Forest", "(Species)", "Robin", "Fox"]
+        assert NodeLabel.default_place(forest, summarise, Filter.where(class_="Bird"), graph.params).splitlines() == [
+            "Forest", "(Species) 1 / 2", "Robin", "(1 hidden by filter)",
+        ]
+        assert NodeLabel.default_place(forest, summarise, Filter(), graph.params).splitlines() == [
+            "Forest", "(Species) 2 / 2", "Robin", "Fox",
+        ]
+        node_attrs, _ = RustworkxToGraphviz.activation_coloured_attr_functions(
+            graph, summarise, filter=Filter.where(class_="Bird"),
+        )
+        assert node_attrs(graph.place_named("Savanna"))["label"].splitlines()[-1] == "(2 hidden by filter)"
+
+
 # --- R2: queries ----------------------------------------------------------------------------------
 
 

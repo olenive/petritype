@@ -541,4 +541,14 @@ the one token, never a list. A failed firing restores a keyed take to the front 
 its `filter` (§13.5); the runner's `launched.consumed` names the token actually taken, and
 its snapshot leaves that token out wherever it stood. `Migrate` in `examples/wildlife.py`
 is now one keyed edge; section 6's "only events" (one token out, one in, per firing, the fox
-untouched) is `tests/test_keyed_edges.py`. Phase 4 (the visualiser) follows.
+untouched) is `tests/test_keyed_edges.py`.
+
+## As built, 2026-10-09 (phase 4: the visualiser)
+
+`NodeLabel.default_place(node, summariser, filter=None, params=None)` and
+`RustworkxToGraphviz.activation_coloured_attr_functions(graph, summariser, filter=None)`
+(`petritype/plotting/rustworkx_to_graphviz.py`): with a filter a place lists only the tokens
+it keeps, its header reads `matching / count` and a last line says `(n hidden by filter)`, so
+a hidden token is never mistaken for an absent one (the design's R4 rule for the Bevy viewer,
+applied to the Graphviz renderer). The tabs and the filter bar of R4 are the Bevy viewer's;
+a notebook builds its own controls from `Query.distinct`.
