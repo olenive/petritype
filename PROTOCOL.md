@@ -500,24 +500,28 @@ runner's state machine, or over pipes against the binary.
 - `send` is a request without its `id`; the harness assigns `"1"`, `"2"`,
   ... in order. `expect` is every line the runner must write for that
   request, responses and notifications alike, in order.
-- Masks stand in any value position: `"<label>"`, `"<time>"` and `"<id>"`
-  match any string; `"<ms>"` and `"<version>"` match any number (a boolean
-  is not a number); `"<any>"` matches any value, objects and arrays
-  included; `{"<unordered>": [...]}` matches an array holding the same
-  elements in any order (for `edges[]`, §5.1); `"<id:NAME>"` matches any
-  string and binds it for the rest of the transcript, so a later `expect`
-  must show the same string and a later `send` has it substituted, which is
-  how a transcript names a runtime-assigned token id. Numbers compare by
-  value (`0` matches `0.0`); an object must have exactly the expected keys;
-  arrays must have the same length and match element by element.
-- A transcript shared across runtimes masks every token id and every
-  `marking_version` (§2, §4), every `type_name` and `label`, `runtime` and
-  `runtime_version`, every `duration_ms` and time, sets every `detail` to
-  `"<any>"`, and uses no `color`.
+- Masks stand in any value position: `"<label>"`, `"<time>"`, `"<id>"` and
+  `"<path>"` match any string; `"<ms>"` and `"<version>"` match any number
+  (a boolean is not a number); `"<any>"` matches any value, objects and
+  arrays included; `{"<unordered>": [...]}` matches an array holding the
+  same elements in any order (for `edges[]`, §5.1); `"<id:NAME>"` matches
+  any string and binds it for the rest of the transcript, so a later
+  `expect` must show the same string and a later `send` has it substituted,
+  whole or inside a longer string (`"transit/Depot/#<id:bus>/cabin"`),
+  which is how a transcript names a runtime-assigned token id or nested id
+  and spells a path (§12.1). Numbers compare by value (`0` matches `0.0`);
+  an object must have exactly the expected keys; arrays must have the same
+  length and match element by element.
+- A transcript shared across runtimes masks every token id, nested id and
+  path, and every `marking_version` (§2, §4, §12.1), every `type_name` and
+  `label`, `runtime` and `runtime_version`, every `duration_ms` and time,
+  sets every `detail` to `"<any>"`, and uses no `color`.
 - Before comparing, the harness folds a `launched` immediately followed by
   its `distributed` into one `fired {transition, consumed, produced,
   duration_ms}`, so a transcript recorded against either runtime reads the
-  same (§6.3).
+  same (§6.3); likewise a `nested` wrapping a `launched` followed at once by
+  a `nested` wrapping its `distributed`, for the same path and nested id,
+  into a `nested` wrapping a `fired` (§12.4).
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
@@ -747,6 +751,14 @@ there is one wrapper, and `path` is the full path. A reader that does not
 know `nested` skips it and is untouched by nesting. Before each outer firing
 that consumes a nested token, the driver drains the inner net's events into
 the outer log, so none are lost when the token is dropped (§12.6).
+
+Order within an outer firing: what its body did inside the tokens it holds
+(the `nested` lines for the inner `added`, `removed` and `param_changed`)
+comes after its `launched` and before its own `mutated`s and `distributed`
+(or `failed`); the path on those lines is the token's place once the firing
+has placed it (`In Transit` for a `Depart`), since that is where the net is
+when the lines are written. The `fireable` of the outer net, if it changed,
+precedes the `nested` `fireable` of each inner net the firing touched.
 
 ### 12.5 Nested tokens as JSON
 

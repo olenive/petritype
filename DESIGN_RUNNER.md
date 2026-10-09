@@ -287,3 +287,67 @@ A minor version (0.2.0): everything above is additive for library users.
 `record_events` off and ids kept beside the tokens mean an existing program
 sees no change. The protocol transcripts under `tests/protocol/`
 (`PROTOCOL.md` §11) are the runner's acceptance tests.
+
+## As built, 2026-10-09: nested nets (PROTOCOL.md §12)
+
+The owner serves a tree of nets, not one: the outer net the host loaded and,
+inside the tokens of its `nested` places, inner nets at any depth
+(`PROPOSED_DESIGN_GOALS.md`, "Nets as tokens"). `petritype/runner/owner.py`
+was reworked so that every method takes the net it acts on, a `_Net` record
+(`_Loaded.outer`, and `_Loaded.inner` by `net_id`, built when an inner net is
+first addressed or fired); nothing is duplicated per level.
+
+Settlements:
+
+- **Addressing.** `path` or `nested_id` on `get_state`, `get_place_tokens`,
+  `get_token`, `get_log` and `inject`; both is `invalid_params`, neither is
+  the outer net. A path is the loaded net's name then `place/#id/net` per
+  level; a path or id that names no live net is `unknown_net` naming the
+  failing segment. The library resolves paths (`NestedNets.resolve`) and
+  finds nets by id (`NestedNets.find`); the owner only adds the net name in
+  front. `enable`, `disable`, `set_param`, `start`, `stop`, `reset` and
+  `step` refuse a path with `invalid_params`: they act on the outer net.
+- **Versions are per net.** Each `_Net` carries its own `marking_version`,
+  raised by its own state notifications, stamped on its reads. An inner
+  notification is the line the inner net would write, wrapped in `nested
+  {path, nested_id, event}` with the outer version, unmoved, on the wrapper
+  (`Owner._wrap`). The engine delivers inner events to the outer log already
+  wrapped (`Nested` records with the path as it stood), so `_flush` is one
+  loop; `fireable` goes out for the outer net and then for each inner net
+  the batch touched.
+- **Driving.** `_select` asks the outer net's selector first and, when it
+  picks nothing, descends in the library driver's order (place, token, net; a
+  net's own inner nets before the next token), each net by its own selector.
+  A firing in an inner net goes through `fire_one_transition` on that net
+  with a pinned selector and `descend=False`. On landing the outer net counts
+  it under its path (`step_count`, `fired_counts["Depot/#17/cabin/Sit"]`,
+  `last_fired`), as the library driver does, so `progress` means the same
+  whichever drove the net. `execution_stopped {no_fireable_transitions}` now
+  means nothing fireable anywhere.
+- **Reads during a body** keep the snapshot rule and add two cases. An outer
+  body may reach into the inner nets of the tokens it took or holds through a
+  mutate edge, so a read addressed to one of those waits for the landing
+  (`_InFlight.held_nets`, `held_tokens`, computed at launch by walking those
+  tokens); every other inner net is read live, since nothing else can change
+  it. During an inner body, the firing net is read from its snapshot and each
+  net on the path above it from a snapshot with the holding token rendered
+  eagerly (its label embeds the inner marking the body is changing), so a
+  `get_token` on that token waits too.
+- **Log.** One ring; an inner firing's entry carries `path` and `nested_id`
+  and, internally, the chain of nested ids down to it, so `get_log` with a
+  path or id filters to that net and the nets inside it.
+- **`set_param` without `transition`** now sets a net parameter
+  (`graph.params`, through the new `SetNetParam` command): it must be
+  declared, and keeps the JSON type of its current value. Before 2026-10-09
+  this was `invalid_params`; the Rust runner's net-wide `set_param` and the
+  saved form's `params` now mean the same in both.
+- **Inner nets' sync bodies** are moved to a thread when the owner first sees
+  the net, as the outer net's are at load.
+
+The shared transcript `tests/protocol/05_nested_nets.json` runs the design's
+acceptance script over the wire on the `transit` conformance net
+(`tests/protocol_nets/transit.py`, the example itself) and replays through the
+owner and over pipes; `tests/test_runner_nested.py` covers what a transcript
+cannot show (the waits and the snapshots). The harness gained the `<path>`
+mask, captures inside longer strings and the nested fold, and replays each
+transcript against a registry reduced to its own net (PROTOCOL.md §11).

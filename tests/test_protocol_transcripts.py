@@ -33,8 +33,18 @@ against both runtimes:
   promises an order for ``topology.edges`` and they list them differently.
 - ``"<id:NAME>"`` matches any string and binds it to ``NAME`` for the rest of the
   transcript; a later ``"<id:NAME>"`` in an ``expect`` must be the same string,
-  and one in a ``send`` is replaced by it. Token ids are the runtime's (§2), so
-  a request about a token (``get_token``) must name the id the runner handed out.
+  and one in a ``send`` is replaced by it, also inside a longer string
+  (``"transit/Depot/#<id:bus>/cabin"``), which is how a ``send`` spells a path
+  (§12.1). Token ids are the runtime's (§2), so a request about a token
+  (``get_token``) must name the id the runner handed out.
+
+With nested nets (§12) two more: ``"<path>"`` matches any string, for a path
+that embeds a token id; and a ``nested`` wrapping a ``launched`` followed at
+once by a ``nested`` wrapping its ``distributed`` (same path and nested id) is
+folded into a ``nested`` wrapping a ``fired``, as the outer pair is.
+
+A transcript is replayed against a registry reduced to the net it names
+(§11), so each may pin ``describe`` in full.
 
 A mismatch is reported with the file, the exchange index and method, the line
 index, and both lines pretty-printed; a line count mismatch lists every actual
@@ -46,6 +56,7 @@ import importlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -59,15 +70,20 @@ from petritype.runner.registry import Registry
 
 ROOT = Path(__file__).resolve().parent.parent
 TRANSCRIPTS = sorted((ROOT / "tests" / "protocol").glob("*.json"))
-NET_MODULES = ("tests.protocol_nets.parcel_distribution",)
-# The process-mode transcript: a running net, so its lines arrive after the response.
-OVER_PIPES = "04_start_run.json"
+# The module carrying each conformance net; a transcript replays against its own net alone.
+NET_MODULES = {
+    "parcel-distribution": "tests.protocol_nets.parcel_distribution",
+    "transit": "tests.protocol_nets.transit",
+}
+# The process-mode transcripts: a running net, whose lines arrive after the response,
+# and the nested-net one, whose example module and templates must import in the process.
+OVER_PIPES = ("04_start_run.json", "05_nested_nets.json")
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
 STEP = timedelta(seconds=1)  # ``now`` moves on by this much per exchange
 PROCESS_TIMEOUT = 60.0
 
-STRING_MASKS = frozenset({"<label>", "<time>", "<id>"})
+STRING_MASKS = frozenset({"<label>", "<time>", "<id>", "<path>"})
 NUMBER_MASKS = frozenset({"<ms>", "<version>"})
 ANY = "<any>"
 UNORDERED = "<unordered>"
@@ -162,11 +178,17 @@ def _match_unordered(expected: list, actual, bindings: dict) -> bool:
 
 
 def substitute(value, bindings: dict, where: str):
-    """``value`` with every ``"<id:NAME>"`` replaced by its binding."""
+    """``value`` with every ``"<id:NAME>"`` replaced by its binding, whole or
+    inside a longer string."""
     name = _capture_name(value)
     if name is not None:
         assert name in bindings, f"{where}: {value} is sent before any line bound it"
         return bindings[name]
+    if isinstance(value, str) and CAPTURE_PREFIX in value:
+        def bound(match):
+            assert match.group(1) in bindings, f"{where}: {match.group(0)} is sent before any line bound it"
+            return bindings[match.group(1)]
+        return re.sub(r"<id:([^>]+)>", bound, value)
     if isinstance(value, list):
         return [substitute(item, bindings, where) for item in value]
     if isinstance(value, dict):
@@ -174,8 +196,24 @@ def substitute(value, bindings: dict, where: str):
     return value
 
 
+def _fired(launched: dict, distributed: dict) -> dict:
+    return {"method": "fired", "params": {
+        "transition": distributed.get("transition"),
+        "consumed": launched.get("consumed"),
+        "produced": distributed.get("produced"),
+        "duration_ms": distributed.get("duration_ms"),
+        "marking_version": distributed.get("marking_version"),
+        "running": distributed.get("running"),
+    }}
+
+
+def _same_inner_net(a: dict, b: dict) -> bool:
+    return a["params"].get("path") == b["params"].get("path") and a["params"].get("nested_id") == b["params"].get("nested_id")
+
+
 def fold(lines: list[dict]) -> list[dict]:
-    """``launched`` + its ``distributed`` as one ``fired``."""
+    """``launched`` + its ``distributed`` as one ``fired``; the same inside a pair
+    of ``nested`` wrappers for one inner net (§12.4)."""
     folded: list[dict] = []
     for line in lines:
         previous = folded[-1] if folded else None
@@ -185,14 +223,20 @@ def fold(lines: list[dict]) -> list[dict]:
             and previous.get("method") == "launched"
             and previous["params"].get("transition") == line["params"].get("transition")
         ):
-            launched, distributed = folded.pop()["params"], line["params"]
-            folded.append({"method": "fired", "params": {
-                "transition": distributed.get("transition"),
-                "consumed": launched.get("consumed"),
-                "produced": distributed.get("produced"),
-                "duration_ms": distributed.get("duration_ms"),
-                "marking_version": distributed.get("marking_version"),
-                "running": distributed.get("running"),
+            folded.append(_fired(folded.pop()["params"], line["params"]))
+            continue
+        if (
+            line.get("method") == "nested"
+            and previous is not None
+            and previous.get("method") == "nested"
+            and _same_inner_net(previous, line)
+            and line["params"]["event"].get("method") == "distributed"
+            and previous["params"]["event"].get("method") == "launched"
+            and previous["params"]["event"]["params"].get("transition") == line["params"]["event"]["params"].get("transition")
+        ):
+            launched = folded.pop()
+            folded.append({"method": "nested", "params": {
+                **line["params"], "event": _fired(launched["params"]["event"]["params"], line["params"]["event"]["params"]),
             }})
             continue
         folded.append(line)
@@ -238,10 +282,12 @@ def request(exchange: dict, index: int, bindings: dict, where: str) -> dict:
     }
 
 
-def registry() -> Registry:
+def registry(net: str) -> Registry:
+    """A registry carrying the transcript's net alone."""
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    return Registry.from_modules([importlib.import_module(name) for name in NET_MODULES])
+    assert net in NET_MODULES, f"no conformance module carries {net!r}"
+    return Registry.from_modules([importlib.import_module(NET_MODULES[net])])
 
 
 async def run(owner: Owner, line: dict, now: datetime) -> list[dict]:
@@ -264,7 +310,7 @@ def test_the_transcripts_are_there():
 @pytest.mark.parametrize("path", TRANSCRIPTS, ids=[path.stem for path in TRANSCRIPTS])
 async def test_transcript_holds(path: Path):
     transcript = load_transcript(path)
-    owner = Owner(registry())
+    owner = Owner(registry(transcript["net"]))
     bindings: dict = {}
     for index, exchange in enumerate(transcript["exchanges"]):
         where = f"{path.name}, exchange {index}"
@@ -277,6 +323,7 @@ async def test_transcript_holds(path: Path):
 
 # Keys whose value is the runtime's own and so must be masked in a shared transcript.
 MASKED_KEYS = {
+    "path": {"<path>"},
     "marking_version": NUMBER_MASKS,
     "duration_ms": NUMBER_MASKS,
     "type_name": STRING_MASKS,
@@ -301,8 +348,8 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
                 problems.append(f"{here}: a shared transcript uses no color")
             elif key in MASKED_KEYS and item not in MASKED_KEYS[key]:
                 problems.append(f"{here}: {item!r} must be one of {sorted(MASKED_KEYS[key])}")
-            elif key == "id" and not top and not (item == "<id>" or _capture_name(item)):
-                problems.append(f"{here}: token id {item!r} must be masked")
+            elif key in ("id", "nested_id") and not top and not (item == "<id>" or _capture_name(item)):
+                problems.append(f"{here}: {key} {item!r} must be masked")
             elif key in ("consumed", "produced") and isinstance(item, list):
                 for n, pair in enumerate(item):
                     if not (isinstance(pair, list) and len(pair) >= 2
@@ -357,6 +404,23 @@ def test_captures():
     assert substitute({"id": "<id:x>", "n": ["<id:x>"]}, b, "here") == {"id": "7", "n": ["7"]}
 
 
+def test_the_nested_fold():
+    wrap = lambda event, path="n/P/#1/c", nid="3": {"method": "nested", "params": {
+        "path": path, "nested_id": nid, "event": event, "marking_version": 9, "running": False}}
+    launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
+    distributed = {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 2.0, "marking_version": 2, "running": False}}
+    folded = fold([wrap(launched), wrap(distributed)])
+    assert folded == [wrap({"method": "fired", "params": {
+        "transition": "T", "consumed": [["A", "1"]], "produced": [], "duration_ms": 2.0, "marking_version": 2, "running": False,
+    }})]
+    assert len(fold([wrap(launched), wrap(distributed, nid="4")])) == 2, "another inner net's distributed"
+
+
+def test_embedded_captures():
+    b = {"bus": "7"}
+    assert substitute({"path": "transit/Depot/#<id:bus>/cabin"}, b, "here") == {"path": "transit/Depot/#7/cabin"}
+
+
 def test_the_fold():
     folded = fold([
         {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]],
@@ -380,12 +444,12 @@ class Process:
     """``python -m petritype.runner`` on the conformance nets, with the heartbeat
     pushed out of the way (heartbeat lines are skipped anyway)."""
 
-    def __init__(self):
+    def __init__(self, net: str):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(ROOT), env.get("PYTHONPATH")]))
         env["PETRITYPE_RUNNER_HEARTBEAT_MS"] = "3600000"
         env["PYTHONUNBUFFERED"] = "1"
-        modules = [arg for name in NET_MODULES for arg in ("--module", name)]
+        modules = ["--module", NET_MODULES[net]]
         self.process = subprocess.Popen(
             [sys.executable, "-m", "petritype.runner", *modules],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT, env=env,
@@ -438,12 +502,13 @@ class Process:
         return rest
 
 
-def test_a_transcript_over_pipes():
+@pytest.mark.parametrize("name", OVER_PIPES)
+def test_a_transcript_over_pipes(name: str):
     """The owner-level replay and the real process agree, on a transcript whose
-    firings arrive after the response that set them off."""
-    path = ROOT / "tests" / "protocol" / OVER_PIPES
+    firings arrive after the response that set them off, and on the nested one."""
+    path = ROOT / "tests" / "protocol" / name
     transcript = load_transcript(path)
-    runner = Process()
+    runner = Process(transcript["net"])
     try:
         bindings: dict = {}
         for index, exchange in enumerate(transcript["exchanges"]):

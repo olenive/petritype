@@ -125,16 +125,34 @@ class Colors:
 class Tokens:
     """Functions that put a token on the wire."""
 
-    def entry(token_id: int, token: Any, place_type_name: str) -> wire.Token:
-        """``{id, label, color?, type_name?}``; ``type_name`` only when the token's
-        own type name differs from its place's."""
+    def entry(
+        token_id: int, token: Any, place_type_name: str, nets: Optional[list[wire.NestedNet]] = None,
+    ) -> wire.Token:
+        """``{id, label, color?, type_name?, nets?}``; ``type_name`` only when the
+        token's own type name differs from its place's; ``nets`` as given (§12.2)."""
         own = type(token).__name__
         return wire.Token(
             id=str(token_id),
             label=Labels.of(token),
             color=Colors.of(token),
             type_name=own if own != place_type_name else None,
+            nets=nets or None,
         )
+
+    def nets(token: Any, prefix: str, place: str, token_id: int) -> list[wire.NestedNet]:
+        """The ``nets`` of a nested token: one entry per inner net, with its path
+        under ``prefix`` (the wire path of the net the token is in)."""
+        from petritype.core.executable_graph_components import NestedNets
+        entries = []
+        for name, inner in NestedNets.of(token).items():
+            entries.append(wire.NestedNet(
+                name=name,
+                nested_id=str(inner.net_id),
+                path=f"{prefix}/{place}/#{token_id}/{name}",
+                template=inner.template,
+                count=sum(len(node.tokens) for node in inner.places),
+            ))
+        return entries
 
     def produced(place: str, token_id: int, token: Any) -> list[str]:
         """A ``fired.produced`` element: ``[place, id, label, color?]``."""
@@ -259,6 +277,8 @@ class Topologies:
                     name=place.name,
                     type_name=TypeNames.of(place.type),
                     serializable=Serializable.place_type(place.type),
+                    nested=True if place.nested else None,
+                    passive=True if place.passive else None,
                 )
                 for place in graph.places
             ],

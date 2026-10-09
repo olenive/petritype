@@ -171,6 +171,8 @@ class Place(Wire):
     name: str
     type_name: str
     serializable: bool
+    nested: Optional[bool] = None
+    passive: Optional[bool] = None
 
 
 class Transition(Wire):
@@ -200,11 +202,24 @@ class TransitionState(Wire):
     priority: Optional[float] = None
 
 
+class NestedNet(Wire):
+    """One inner net a token holds (§12.2): its name within the token, its stable
+    id, its path as of now, the template that built it, and how many tokens it
+    holds in all its places."""
+
+    name: str
+    nested_id: str
+    path: str
+    template: Optional[str] = None
+    count: int
+
+
 class Token(Wire):
     id: str
     label: str
     color: Optional[str] = None
     type_name: Optional[str] = None
+    nets: Optional[list[NestedNet]] = None
 
 
 class PlaceMarking(Wire):
@@ -226,6 +241,8 @@ class Progress(Wire):
 
 
 class State(Wire):
+    """``get_state``; ``path``, ``nested_id`` and ``template`` for an inner net (§12.3)."""
+
     protocol_version: int = PROTOCOL_VERSION
     runtime: str = RUNTIME
     net: str
@@ -236,6 +253,9 @@ class State(Wire):
     transitions: dict[str, TransitionState]
     marking: Marking
     progress: Progress
+    path: Optional[str] = None
+    nested_id: Optional[str] = None
+    template: Optional[str] = None
 
 
 # --- other results (§6) ---------------------------------------------------------------------
@@ -249,6 +269,8 @@ class PlaceTokens(Wire):
     limit: int
     tokens: list[Token]
     has_more: bool
+    path: Optional[str] = None
+    nested_id: Optional[str] = None
 
 
 class TokenValue(Wire):
@@ -263,12 +285,19 @@ class TokenValue(Wire):
     kind: Literal["json", "text"]
     value: Any = None
     text: Optional[str] = None
+    path: Optional[str] = None
+    nested_id: Optional[str] = None
+    nets: Optional[list[NestedNet]] = None
 
 
 class StepResult(Wire):
+    """``step``; ``path`` and ``nested_id`` when the firing was in an inner net."""
+
     fired: bool
     transition: Optional[str] = None
     failed: Optional[bool] = None
+    path: Optional[str] = None
+    nested_id: Optional[str] = None
     marking_version: int
     running: bool
 
@@ -285,6 +314,8 @@ class LogEntry(Wire):
     produced: list[list[str]]
     error: Optional[str] = None
     restored: Optional[bool] = None
+    path: Optional[str] = None
+    nested_id: Optional[str] = None
 
 
 # --- notifications (§7) ---------------------------------------------------------------------
@@ -437,3 +468,15 @@ class LoadProgress(Notification):
 
     step: str
     message: str
+
+
+class NestedEvent(Notification):
+    """An event in an inner net (§12.4): ``event`` is the line that net would
+    have written on its own, ``{method, params}``, with the inner net's own
+    ``marking_version`` inside; the wrapper carries the outer net's, unmoved."""
+
+    method: ClassVar[str] = "nested"
+
+    path: str
+    nested_id: str
+    event: dict[str, Any]
