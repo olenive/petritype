@@ -30,14 +30,20 @@ Layers built so far:
   adjacency maps once at entry (both modes), then fires on those maps — per-firing cost
   no longer grows with net size. Mid-run tokens are validated at their own gates:
   deposits by the engine, inbox commands as they are applied.
+- **Nested tokens:** a token of a ``nested`` place holds nets of its own (``NestedNets``),
+  which every loop here runs as part of running the outer net: sequential firing descends
+  through ``fire_one_transition`` (outer first, then inner nets in place, token, net order);
+  the concurrent loops give one inner net the turn when nothing outer can launch and
+  nothing is in flight. Inner firings count as firings of the outer net under their path.
 
 Design notes realised here:
 - **Functional, no `__init__`:** `Runner` is a namespace class of functions (matching
   `ExecutableGraphOperations`); run-state lives in the `ExecutableGraph` (mutated in place)
   plus a passive `RunContext` the caller owns.
-- **Commands target places or transitions.** Places: `Extend` (append a list of tokens) /
-  `SetTokens` (replace; `[]` clears). Transitions: `SetParam` (merge kwargs), `Enable` /
-  `Disable`. Bad commands are dropped-and-logged, or raise under `RunContext.strict`.
+- **Commands target places, transitions or the net.** Places: `Extend` (append a list of
+  tokens) / `SetTokens` (replace; `[]` clears). Transitions: `SetParam` (merge kwargs),
+  `Enable` / `Disable`. The net: `SetNetParam` (one of ``graph.params``). Bad commands are
+  dropped-and-logged, or raise under `RunContext.strict`.
 """
 
 from __future__ import annotations
@@ -62,6 +68,8 @@ from petritype.core.executable_graph_components import (
     GraphEvents,
     MapPlaceNames,
     MapTransitionNames,
+    NestedNets,
+    NetParams,
     TokenIds,
     default_transition_selector,
 )
@@ -172,7 +180,16 @@ class Disable:
     transition: str
 
 
-Command = Union[Extend, SetTokens, SetParam, Enable, Disable]
+@dataclass
+class SetNetParam:
+    """Set one of the net's own parameters (``graph.params``), which must have been
+    declared at construction."""
+
+    param: str
+    value: Any
+
+
+Command = Union[Extend, SetTokens, SetParam, Enable, Disable, SetNetParam]
 
 
 @dataclass
@@ -275,8 +292,9 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
 
     Token ids and events: ``Extend`` gives each new token a fresh id (``Added``);
     ``SetTokens`` retires every old id (``Removed``) and gives every new token a
-    fresh one (``Added``); ``SetParam`` records one ``ParamChanged`` per keyword;
-    ``Enable``/``Disable`` record ``Toggled`` only when the switch changed."""
+    fresh one (``Added``); ``SetParam`` records one ``ParamChanged`` per keyword,
+    ``SetNetParam`` one with no transition; ``Enable``/``Disable`` record
+    ``Toggled`` only when the switch changed."""
     graph = ctx.graph
     TokenIds.resync(graph)
 
@@ -293,6 +311,11 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
                 return _reject(
                     ctx, f"token {token!r} does not match place {place.name!r} type {place.type!r}"
                 )
+            if place.nested:
+                try:
+                    NestedNets.ensure_nested_token(token, place)
+                except TypeError as error:
+                    return _reject(ctx, str(error))
         if isinstance(cmd, SetTokens):
             for token_id in place.token_ids:
                 GraphEvents.record(graph, Removed(place.name, token_id))
@@ -311,6 +334,12 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
         transition.kwargs = {**(transition.kwargs or {}), **cmd.kwargs}
         for param in cmd.kwargs:
             GraphEvents.record(graph, ParamChanged(cmd.transition, param))
+        return True
+
+    if isinstance(cmd, SetNetParam):
+        if not isinstance(cmd.param, str) or cmd.param not in graph.params:
+            return _reject(ctx, f"the net declares no parameter {cmd.param!r}")
+        NetParams.set(graph, cmd.param, cmd.value)
         return True
 
     if isinstance(cmd, (Enable, Disable)):
@@ -453,6 +482,7 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
             transition_names_to_outgoing_edges=outgoing,
             place_names_to_nodes=place_nodes,
             executor=ctx.thread_pool,
+            net_params=ctx.graph.params,
         )
         return outputs, (time.perf_counter() - started) * 1000.0
 
@@ -492,6 +522,27 @@ def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransit
     # Convenience only: names *one* completion of this batch. Observers
     # that need every firing should diff fired_counts via fired_since.
     graph.last_fired = name
+
+
+async def _fire_inner(ctx: RunContext) -> bool:
+    """Concurrent-mode turn for the inner nets of nested tokens, taken only when
+    nothing outer can launch and nothing is in flight (so no outer body holds a
+    token whose inner net this could touch): one inner firing, sequentially, by
+    the order ``NestedNets.fire_one_inner`` defines. Counted and tallied as the
+    sequential path counts an inner firing. Returns True iff something fired."""
+    graph = ctx.graph
+    if not NestedNets.any_nested(graph):
+        return False
+    if _fuse_spent(ctx) and NestedNets.any_fireable(graph):
+        _blow_fuse(ctx, "an inner net")
+    fired = await NestedNets.fire_one_inner(graph, executor=ctx.thread_pool)
+    if fired is None:
+        return False
+    graph.step_count += 1
+    graph.last_fired = fired
+    graph.fired_counts[fired] = graph.fired_counts.get(fired, 0) + 1
+    ctx.n_fired += 1
+    return True
 
 
 def _summarise(previous: dict[str, int], graph: ExecutableGraph, quiesced: bool) -> RunSummary:
@@ -702,8 +753,14 @@ class Runner:
                     await _notify(ctx)  # newly in-flight transitions light up as "working"
 
                 if not in_flight:
-                    # Nothing airborne and nothing launchable: either the net quiesced,
-                    # or the pacing cap stopped the launch sweep (work may remain).
+                    # Nothing airborne and nothing launchable in the outer net: an
+                    # inner net may still have a move (nested tokens).
+                    if not capped and await _fire_inner(ctx):
+                        launched_this_call += 1
+                        await _notify(ctx)
+                        continue
+                    # Either the net quiesced, or the pacing cap stopped the launch
+                    # sweep (work may remain).
                     return not capped
 
                 done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
@@ -778,6 +835,9 @@ class Runner:
                     # Raises TransitionFailedError carrying the consumed tokens if the
                     # body failed; restores them first when graph.restore_tokens_on_failure is set.
                     _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
+                    changed = True
+
+                if not in_flight and await _fire_inner(ctx):
                     changed = True
 
                 graph.in_flight = set(in_flight.values())

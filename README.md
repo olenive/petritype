@@ -208,6 +208,28 @@ MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in p
 
 Read arcs render dashed, distinct from the solid consuming / producing arrows.
 
+### Nets as tokens
+
+A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself (outer transitions first, then inner nets in place, token and net order), gathers their events into its own log as `Nested` records carrying the path to the net they happened in, and lets its bodies reach inside the tokens they hold:
+
+```python
+from petritype.core.nested import NestedNets
+
+class Vehicle(BaseModel):
+    name: str
+    cabin: ExecutableGraph                       # an inner net, built from a template
+    def __petritype_nets__(self):
+        return {"cabin": self.cabin}
+
+def board(passenger: str, vehicle: Vehicle) -> None:
+    NestedNets.put(vehicle.cabin, "Door", [passenger])   # the only way in: through the token
+
+ListPlaceNode("Depot", Vehicle, [bus], nested=True)
+MutateEdge("Depot", "Board Depot", "vehicle")
+```
+
+Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/transit.py` is the worked example: buses and ferries whose cabins are nets.
+
 ### Decorator for registration
 
 Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.

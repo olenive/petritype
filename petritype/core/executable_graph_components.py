@@ -7,11 +7,14 @@ from pydantic import BaseModel, PrivateAttr, model_validator
 import asyncio
 import functools
 import inspect
+import itertools
 import time
 import warnings
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
-from petritype.core.events import Added, Event, Failed, Fired, Mutated, PlaceTokenId, Resynced
+from petritype.core.events import (
+    Added, Event, Failed, Fired, Mutated, Nested, ParamChanged, PlaceTokenId, Removed, Resynced,
+)
 from petritype.core.type_comparisons import CompareTypes
 from petritype.helpers.structures import SafeMerge
 
@@ -21,6 +24,13 @@ type TransitionName = str
 # Distinguishes "argument not passed" from an explicit None (which means unlimited)
 # while `max_transitions` remains a deprecated alias of `stop_after_n_firings`.
 _UNSET: Any = object()
+
+# The protocol method a token type implements to hold inner nets (``NestedNets``).
+NESTED_NETS_METHOD = "__petritype_nets__"
+
+# Every graph built in this process gets the next id: the stable identity of an
+# inner net across the moves of the token that holds it (``ExecutableGraph.net_id``).
+_net_ids = itertools.count(1)
 
 
 class TransitionFailedError(RuntimeError):
@@ -37,6 +47,13 @@ class TransitionFailedError(RuntimeError):
             were put back (best effort) into their source places.
 
     The original exception is chained as __cause__.
+
+    Restoring is conservation of the consumed tokens, not a rollback of the
+    firing: what the body did before failing stays done. In particular a body
+    that reached inside a nested token (``NestedNets``) and put tokens into, or
+    took them out of, an inner net leaves the inner net as it changed it; only
+    the outer tokens go back. A body that reaches inside should do so last, once
+    it can no longer fail.
     """
 
     def __init__(self, transition_name: str, consumed: dict, restored: bool = False):
@@ -74,9 +91,19 @@ class PositionalArgsBaseModel(BaseModel):
 
 
 class ListPlaceNode(PositionalArgsBaseModel):
+    """A place: a typed, FIFO list of tokens.
+
+    ``nested`` declares that its tokens hold inner nets (``NestedNets``): every
+    token must be an ``ExecutableGraph`` or implement ``__petritype_nets__``, which
+    is checked when tokens are seeded, deposited or injected. The engine then runs
+    the inner nets as part of running the outer one, unless the place is also
+    ``passive``, in which case they fire only when an outer body steps them.
+    """
     name: PlaceNodeName
     type: Any  # Temporarily accept any value  
     tokens: list[Any] = []
+    nested: bool = False
+    passive: bool = False
     # TODO: Add validation to check that type matches tokens
     # Stable ids of the tokens, parallel to ``tokens`` (same length, same order). Assigned
     # by the graph that holds the place (``TokenIds``); empty until then. Private so that
@@ -121,16 +148,20 @@ class ListPlaceNode(PositionalArgsBaseModel):
 
     @model_validator(mode="after")
     def check_type_matches_tokens(self):
+        if self.passive and not self.nested:
+            raise ValueError(f"Place {self.name!r} is passive but not nested; passive applies to nested places.")
         for token in self.tokens:
             if not CompareTypes.between_value_and_type(token, self.type):
                 raise TypeError(
                     f"Expected token to be of type {self.type} in {self.name}, got {type(token)}."
                     f"\nToken: {token}"
                 )
+            if self.nested:
+                NestedNets.ensure_nested_token(token, self)
         return self
 
     def copy_sans_tokens(self) -> "ListPlaceNode":
-        return ListPlaceNode(self.name, self.type)
+        return ListPlaceNode(self.name, self.type, nested=self.nested, passive=self.passive)
 
 
 # An alias to ListPlaceNode just called PlaceNode.
@@ -276,7 +307,25 @@ class ExecutableGraph(BaseModel):
         record_events: When True the engine and the runtime append event records
             (``petritype.core.events``) to the graph, read with ``drain_events()``.
             Off by default, so a program that never drains does not grow a list
-            for ever. Id bookkeeping happens either way.
+            for ever. Id bookkeeping happens either way. Inner nets (``NestedNets``)
+            follow the outer graph's setting, and their events are drained into
+            the outer log wrapped as ``Nested`` records.
+        params: Net-level parameters by name, declared at construction (through
+            ``construct_graph(params=...)``) and read by guards, priorities and
+            selectors through the graph. A body receives a net parameter as a
+            keyword argument when it declares a parameter of that name that no
+            edge and no ``kwargs`` entry supplies. Set them with ``NetParams.set``,
+            which records ``ParamChanged``; the runtime's ``SetNetParam`` command
+            and the protocol's ``set_param`` without a transition go through it.
+            The inner nets of nested tokens use them for what the outer net
+            reaches in to change (a stopped flag, a capacity).
+        net_id: This graph's own id, minted from a counter shared by every graph
+            built in the process. It is what names an inner net stably across the
+            moves of the token that holds it (``Nested.nested_id``): an outer token
+            that is taken and put back gets a new token id, the net inside it keeps
+            its ``net_id``. A copy of a graph shares its id until re-minted.
+        template: The name of the template (``Templates``) that built this graph,
+            if one did; what a saved nested token records so the net can be rebuilt.
     """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
@@ -333,23 +382,34 @@ class ExecutableGraph(BaseModel):
     # the tokens before failing, and silently restoring possibly-corrupt tokens
     # to a place is worse than a visible loss. Enable only when tokens are
     # immutable or bodies do not mutate them before they can fail. Either way
-    # the raised TransitionFailedError carries the consumed tokens.
+    # the raised TransitionFailedError carries the consumed tokens. Restoring
+    # is not a rollback: what a body did inside a nested token's inner nets
+    # (NestedNets.put / take / set_param) before failing stays done.
     restore_tokens_on_failure: bool = False
     # Monotonic token-id counter; see the class docstring. Never reset except by
     # constructing a new graph.
     next_token_id: int = 1
     record_events: bool = False
+    params: dict[str, Any] = {}
+    net_id: int = 0
+    template: Optional[str] = None
     # Event records waiting to be drained; never dumped with the model.
     _events: list[Event] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, context: Any, /) -> None:
         # Seed tokens get their ids here, in place order. Runs once per construction
         # (not on model_copy), after pydantic has initialised the private attributes.
+        self.net_id = next(_net_ids)
         TokenIds.seed(self)
+        NestedNets.sync_recording(self)
 
     def drain_events(self) -> list[Event]:
         """Return the recorded events, oldest first, and clear them. Empty unless
-        ``record_events`` was on while they happened."""
+        ``record_events`` was on while they happened. The events of inner nets
+        (``NestedNets``) that have not yet reached this log are gathered first,
+        wrapped as ``Nested``, so the result is complete; they come after whatever
+        this graph recorded before they were gathered."""
+        NestedNets.drain(self)
         events, self._events = self._events, []
         return events
 
@@ -358,6 +418,16 @@ class ExecutableGraph(BaseModel):
         if len(set(place_names_to_nodes.keys())) != len(place_names_to_nodes.keys()):
             raise ValueError("Duplicate place names found!")
         return place_names_to_nodes.get(name)
+
+    def transition_named(self, name: str) -> Optional[FunctionTransitionNode]:
+        for transition in self.transitions:
+            if transition.name == name:
+                return transition
+        return None
+
+    def __petritype_nets__(self) -> dict[str, "ExecutableGraph"]:
+        """A graph used as a token holds itself as its one inner net, unnamed."""
+        return {"": self}
 
     @model_validator(mode='before')
     def check_unique_names(cls, values):
@@ -630,9 +700,11 @@ class GraphEvents:
         place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
         duration_ms: float,
     ) -> None:
-        """A firing completed: its ``Mutated`` records, then its ``Fired``."""
+        """A firing completed: the inner events its body caused (``NestedNets``),
+        its ``Mutated`` records, then its ``Fired``."""
         if not executable_graph.record_events:
             return
+        NestedNets.drain(executable_graph)
         GraphEvents.record_mutations(executable_graph, firing_ids, place_names_to_nodes)
         GraphEvents.record(executable_graph, Fired(
             transition=transition_name,
@@ -649,10 +721,12 @@ class GraphEvents:
         restored: bool,
         exception: BaseException,
     ) -> None:
-        """A firing failed: its ``Mutated`` records, ``Added`` for anything a failed
-        deposit had already placed, then its ``Failed``."""
+        """A firing failed: the inner events its body caused, its ``Mutated``
+        records, ``Added`` for anything a failed deposit had already placed, then
+        its ``Failed``."""
         if not executable_graph.record_events:
             return
+        NestedNets.drain(executable_graph)
         GraphEvents.record_mutations(executable_graph, firing_ids, place_names_to_nodes)
         for place_name, token_id in firing_ids.produced:
             GraphEvents.record(executable_graph, Added(place_name, token_id))
@@ -662,6 +736,223 @@ class GraphEvents:
             restored=restored,
             error=f"{type(exception).__name__}: {exception}",
         ))
+
+
+class NetParams:
+    """Functions over a graph's net-level parameters (``ExecutableGraph.params``)."""
+
+    def set(executable_graph: ExecutableGraph, name: str, value: Any) -> None:
+        """Set a declared parameter and record ``ParamChanged(None, name)``. A name
+        the net did not declare at construction is a ``KeyError``: parameters are
+        part of what a net is, not a free store."""
+        if name not in executable_graph.params:
+            raise KeyError(f"the net declares no parameter {name!r}")
+        executable_graph.params[name] = value
+        GraphEvents.record(executable_graph, ParamChanged(None, name))
+
+
+class NestedNets:
+    """Functions over tokens that hold Petri nets of their own (nets as tokens).
+
+    A token of a place declared ``nested=True`` must be an ``ExecutableGraph`` (its
+    one inner net is unnamed, ``""``) or implement ``__petritype_nets__(self) ->
+    dict[str, ExecutableGraph]`` naming the nets it holds. The outer net then:
+
+    - runs the inner nets as part of running itself (``fire_one_inner``, which
+      ``fire_one_transition`` falls back to when the outer net has nothing to fire:
+      place order, then token order, then net order, descending before moving on),
+      unless the place is ``passive``;
+    - gathers their events into its own log as ``Nested`` records (``drain``), with
+      the path to the net they happened in and the net's stable ``net_id``;
+    - lets an outer body reach inside the tokens it holds (``put``, ``take``,
+      ``set_param``), which is the only coupling: no place is shared, no inner
+      transition sees the outer net.
+
+    Paths are tuples of segments, three per level: the place, the holding token's
+    id as ``#<id>``, the net's name within the token.
+    """
+
+    def of(token: Any) -> dict[str, ExecutableGraph]:
+        """The inner nets of ``token`` by name, or ``TypeError`` if it holds none."""
+        method = getattr(token, NESTED_NETS_METHOD, None)
+        if method is None:
+            raise TypeError(
+                f"{type(token).__name__} holds no nets: a token of a nested place must be an "
+                f"ExecutableGraph or implement {NESTED_NETS_METHOD}()"
+            )
+        nets = method()
+        if not isinstance(nets, dict) or not all(
+            isinstance(name, str) and isinstance(net, ExecutableGraph) for name, net in nets.items()
+        ):
+            raise TypeError(
+                f"{type(token).__name__}.{NESTED_NETS_METHOD}() must return a dict of str to ExecutableGraph"
+            )
+        return nets
+
+    def ensure_nested_token(token: Any, place: ListPlaceNode) -> None:
+        """Raise ``TypeError`` naming the place if ``token`` cannot sit in the nested ``place``."""
+        try:
+            NestedNets.of(token)
+        except TypeError as error:
+            raise TypeError(f"Place {place.name!r} is nested but its token cannot hold nets: {error}") from error
+
+    def any_nested(executable_graph: ExecutableGraph) -> bool:
+        return any(place.nested for place in executable_graph.places)
+
+    def walk(executable_graph: ExecutableGraph, passive: bool = True):
+        """Yield ``(path, token, name, inner)`` for every inner net one level down,
+        in place order, token order, net order; ``passive=False`` skips passive
+        places. The path is as the marking stands now."""
+        for place in executable_graph.places:
+            if not place.nested or (place.passive and not passive):
+                continue
+            ids = place._token_ids
+            for index, token in enumerate(list(place.tokens)):
+                token_id = f"#{ids[index]}" if index < len(ids) else "#?"
+                for name, inner in NestedNets.of(token).items():
+                    yield (place.name, token_id, name), token, name, inner
+
+    def sync_recording(executable_graph: ExecutableGraph) -> None:
+        """Make every inner net record events exactly when the outer one does."""
+        if not NestedNets.any_nested(executable_graph):
+            return
+        for _path, _token, _name, inner in NestedNets.walk(executable_graph):
+            if inner.record_events != executable_graph.record_events:
+                inner.record_events = executable_graph.record_events
+                NestedNets.sync_recording(inner)
+
+    def drain(executable_graph: ExecutableGraph) -> None:
+        """Gather the undrained events of every inner net into this graph's log,
+        each wrapped as ``Nested`` with the path to the net it happened in. An
+        inner net's own ``Nested`` records (from nets inside it) are re-based onto
+        the longer path, so there is one wrapper whatever the depth. Called by
+        ``drain_events`` and before a firing is recorded, so inner events land in
+        the outer log in the order they happened."""
+        if not NestedNets.any_nested(executable_graph):
+            return
+        for path, _token, _name, inner in NestedNets.walk(executable_graph):
+            inner.record_events = executable_graph.record_events
+            for event in inner.drain_events():
+                if isinstance(event, Nested):
+                    event = Nested(path + event.path, event.nested_id, event.event)
+                else:
+                    event = Nested(path, inner.net_id, event)
+                GraphEvents.record(executable_graph, event)
+
+    def resolve(executable_graph: ExecutableGraph, path: Sequence[str]) -> ExecutableGraph:
+        """The inner net at ``path`` (segments as ``walk`` yields them), or
+        ``LookupError`` naming the segment that failed."""
+        graph = executable_graph
+        segments = list(path)
+        if len(segments) % 3 != 0:
+            raise LookupError(f"a nested path has three segments per level, not {len(segments)}")
+        for level in range(0, len(segments), 3):
+            place_name, token_segment, name = segments[level:level + 3]
+            place = graph.place_named(place_name)
+            if place is None or not place.nested:
+                raise LookupError(f"no nested place {place_name!r}")
+            if not token_segment.startswith("#"):
+                raise LookupError(f"a token segment is spelt #<id>, not {token_segment!r}")
+            TokenIds.resync(graph)
+            try:
+                index = list(place._token_ids).index(int(token_segment[1:]))
+            except ValueError:
+                raise LookupError(f"no token {token_segment} in {place_name!r}") from None
+            nets = NestedNets.of(place.tokens[index])
+            if name not in nets:
+                raise LookupError(f"token {token_segment} in {place_name!r} holds no net named {name!r}")
+            graph = nets[name]
+        return graph
+
+    def find(executable_graph: ExecutableGraph, net_id: int) -> Optional[tuple[tuple[str, ...], ExecutableGraph]]:
+        """``(path, inner)`` for the inner net with this ``net_id``, at any depth, or
+        ``None``; the path is as the marking stands now."""
+        for path, _token, _name, inner in NestedNets.walk(executable_graph):
+            if inner.net_id == net_id:
+                return path, inner
+            found = NestedNets.find(inner, net_id)
+            if found is not None:
+                return path + found[0], found[1]
+        return None
+
+    def any_fireable(executable_graph: ExecutableGraph) -> bool:
+        """Whether any transition of any non-passive inner net, at any depth, can fire now."""
+        for _path, _token, _name, inner in NestedNets.walk(executable_graph, passive=False):
+            place_nodes, incoming, _outgoing, read = ExecutableGraphOperations.maps(inner)
+            if any(
+                ExecutableGraphCheck.transition_is_fireable(t, inner, incoming, place_nodes, read)
+                for t in inner.transitions
+            ) or NestedNets.any_fireable(inner):
+                return True
+        return False
+
+    async def fire_one_inner(
+        executable_graph: ExecutableGraph,
+        executor=None,
+        allow_token_copying: Optional[bool] = None,
+        restore_tokens_on_failure: Optional[bool] = None,
+    ) -> Optional[str]:
+        """Fire at most one transition of one inner net: the first that fires, in
+        place order, token order, net order, each net by its own selector and
+        descending into its own inner nets before the next token is tried. Passive
+        places are skipped. Returns the firing's path and transition joined by
+        ``/`` (``"Depot/#17/cabin/Sit"``), which the outer graph counts as a firing
+        of its own under that name, or ``None``. The inner net's events are drained
+        into the outer log at once."""
+        for path, _token, _name, inner in NestedNets.walk(executable_graph, passive=False):
+            inner.record_events = executable_graph.record_events
+            place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(inner)
+            fired = await ExecutableGraphOperations.fire_one_transition(
+                executable_graph=inner,
+                place_names_to_nodes=place_nodes,
+                transition_names_to_incoming_edges=incoming,
+                transition_names_to_outgoing_edges=outgoing,
+                transition_names_to_read_edges=read,
+                allow_token_copying=allow_token_copying,
+                restore_tokens_on_failure=restore_tokens_on_failure,
+                executor=executor,
+            )
+            if fired is not None:
+                NestedNets.drain(executable_graph)
+                return "/".join((*path, fired))
+        return None
+
+    # --- reaching inside, for outer bodies ---
+
+    def put(inner: ExecutableGraph, place_name: str, tokens: list) -> list[int]:
+        """Append ``tokens`` to a place of an inner net, type-checked, with fresh
+        ids, recording ``Added`` for each; returns the ids."""
+        place = inner.place_named(place_name)
+        if place is None:
+            raise KeyError(f"the inner net has no place {place_name!r}")
+        TokenIds.resync(inner)
+        for token in tokens:
+            ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
+        ids = TokenIds.append(inner, place, list(tokens))
+        for token_id in ids:
+            GraphEvents.record(inner, Added(place.name, token_id))
+        return ids
+
+    def take(inner: ExecutableGraph, place_name: str, count: int = 1) -> list:
+        """Remove and return the ``count`` oldest tokens of a place of an inner net,
+        recording ``Removed`` for each. Fewer than ``count`` present is an error
+        (nothing is taken)."""
+        place = inner.place_named(place_name)
+        if place is None:
+            raise KeyError(f"the inner net has no place {place_name!r}")
+        TokenIds.resync(inner)
+        if len(place.tokens) < count:
+            raise ValueError(f"{place_name!r} holds {len(place.tokens)} tokens, not {count}")
+        taken, ids = place.tokens[:count], place._token_ids[:count]
+        del place.tokens[:count]
+        del place._token_ids[:count]
+        for token_id in ids:
+            GraphEvents.record(inner, Removed(place.name, token_id))
+        return taken
+
+    def set_param(inner: ExecutableGraph, name: str, value: Any) -> None:
+        """``NetParams.set`` on an inner net."""
+        NetParams.set(inner, name, value)
 
 
 # This is intended as shorthand for the common case when adding a transition with output(s) to a graph.
@@ -904,12 +1195,16 @@ class ExecutableGraphCheck:
                         f"Expected token item to be of type {place.type} in {place.name}, got {type(item)}."
                         f"\nToken item: {item}"
                     )
+                if place.nested:
+                    NestedNets.ensure_nested_token(item, place)
         elif disposition == "token":
             if not CompareTypes.between_value_and_type(token, place.type):
                 raise TypeError(
                     f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
                     f"\nToken: {token}"
                 )
+            if place.nested:
+                NestedNets.ensure_nested_token(token, place)
         # "nothing" (an empty batch) is always acceptable — it deposits no tokens.
 
     def ensure_resident_token_type_matches_place_type(token: any, place: ListPlaceNode):
@@ -927,6 +1222,8 @@ class ExecutableGraphCheck:
                 f"Expected token to be of type {place.type} in {place.name}, got {type(token)}."
                 f"\nToken: {token}"
             )
+        if place.nested:
+            NestedNets.ensure_nested_token(token, place)
 
     def ensure_all_token_types_match_place_types(executable_graph: ExecutableGraph):
         for place in executable_graph.places:
@@ -1077,6 +1374,8 @@ class ExecutableGraphOperations:
         expect_acyclic: bool = False,
         tie_break: Literal["first_declared", "last_declared"] = "first_declared",
         record_events: bool = False,
+        params: Optional[dict[str, Any]] = None,
+        template: Optional[str] = None,
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -1099,13 +1398,23 @@ class ExecutableGraphOperations:
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
-            record_events=record_events,
+            record_events=record_events, params=dict(params or {}), template=template,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
         if expect_acyclic:
             ExecutableGraphCheck.assert_acyclic(graph)
         return graph
+
+    def maps(executable_graph: ExecutableGraph) -> tuple[dict, dict, dict, dict]:
+        """The four adjacency maps ``fire_one_transition`` fires on:
+        ``(place_nodes, incoming, outgoing, read)``. No validation."""
+        return (
+            MapPlaceNames.to_list_place_nodes(executable_graph),
+            MapTransitionNames.to_incoming_edges(executable_graph),
+            MapTransitionNames.to_outgoing_edges(executable_graph),
+            MapTransitionNames.to_read_edges(executable_graph),
+        )
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
         """Update the given place by appending the result token to its tokens list."""
@@ -1281,6 +1590,7 @@ class ExecutableGraphOperations:
         place_names_to_nodes: dict[str, ListPlaceNode],
         allow_token_copying: bool = False,
         executor=None,
+        net_params: Optional[dict[str, Any]] = None,
     ) -> dict[ListPlaceNode, Any]:
         """Call the transition function and match output tokens to destination places.
 
@@ -1289,11 +1599,21 @@ class ExecutableGraphOperations:
         A synchronous body marked ``execution="thread"`` is run via ``executor`` (a thread pool;
         ``None`` uses the default) so it does not block the event loop. Async bodies already
         yield and run inline regardless.
+
+        ``net_params`` (the graph's ``params``) are passed as keyword arguments to a
+        body that declares a parameter of the same name that neither an edge nor
+        the transition's own ``kwargs`` supplies. A transition with no output edge
+        is a sink: its body must return ``None`` and nothing is deposited.
         """
         if transition.kwargs is not None:
             merged_kwargs = SafeMerge.dictionaries(tokens_kwargs, transition.kwargs)
         else:
-            merged_kwargs = tokens_kwargs
+            merged_kwargs = dict(tokens_kwargs)
+        if net_params:
+            wanted = ExecutableGraphOperations._net_params_wanted(transition.function, net_params)
+            for name in wanted:
+                if name not in merged_kwargs:
+                    merged_kwargs[name] = net_params[name]
         if inspect.iscoroutinefunction(transition.function):
             # Async bodies already yield; "execution" does not apply.
             result = await transition.function(**merged_kwargs)
@@ -1307,8 +1627,17 @@ class ExecutableGraphOperations:
         else:
             result = transition.function(**merged_kwargs)
         output_place_names_to_tokens: dict[PlaceNodeName, Any] = dict()
-        outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges[transition.name]
-        if (
+        outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges.get(
+            transition.name, ()
+        )
+        if not outgoing_edges and transition.output_distribution_function is None:
+            # A sink: the body consumes (or reads) and produces nothing.
+            if result is not None:
+                raise ValueError(
+                    f"Transition \"{transition.name}\" has no output edge but returned {type(result).__name__}; "
+                    f"a transition without output edges must return None."
+                )
+        elif (
             transition.output_distribution_function is None
             and outgoing_edges
             and ExecutableGraphCheck.all_return_indices_are_integers(outgoing_edges)
@@ -1391,6 +1720,14 @@ class ExecutableGraphOperations:
                 if token is not None:
                     output_place_names_to_tokens[destination_place.name] = token
         return output_place_names_to_tokens
+
+    def _net_params_wanted(function: Callable, net_params: dict[str, Any]) -> tuple[str, ...]:
+        """The net parameters ``function`` declares a parameter for (by name)."""
+        try:
+            parameters = inspect.signature(function).parameters
+        except (TypeError, ValueError):
+            return ()
+        return tuple(name for name in net_params if name in parameters)
 
     def add_tokens_to_places(  # Stage 3
         output_place_names_to_tokens: dict[PlaceNodeName, Any],
@@ -1516,6 +1853,7 @@ class ExecutableGraphOperations:
         transition_history_length=1,
         place_history_length=1,
         token_history_length=0,
+        descend: bool = True,
     ) -> Optional[TransitionName]:
         """Fire at most one fireable transition, using prebuilt adjacency maps.
 
@@ -1538,8 +1876,18 @@ class ExecutableGraphOperations:
         Token ids move with the tokens (``TokenIds``); places whose tokens were
         assigned directly are resynced first. With ``record_events`` on, a firing
         records its ``Mutated`` events then one ``Fired`` (or ``Failed``).
+
+        Nested tokens (``NestedNets``): the undrained events of every inner net are
+        gathered into this graph's log first, so a firing that consumes a token
+        loses none of them. When no outer transition fires and ``descend`` is on,
+        one inner net is given the turn (``NestedNets.fire_one_inner``, place
+        order then token order then net order, passive places skipped); an inner
+        firing counts as a firing of this graph under its path,
+        ``"Depot/#17/cabin/Sit"``, which is what ``last_fired``, ``fired_counts``
+        and the return value then say.
         """
         TokenIds.resync(executable_graph)
+        NestedNets.drain(executable_graph)
         if allow_token_copying is None:
             allow_token_copying = executable_graph.allow_token_copying
         if restore_tokens_on_failure is None:
@@ -1566,7 +1914,18 @@ class ExecutableGraphOperations:
         # Let selector choose which transition to fire
         transition = selector(executable_graph, fireable_transitions)
         if transition is None:
-            return None
+            if not descend or not NestedNets.any_nested(executable_graph):
+                return None
+            fired_inside = await NestedNets.fire_one_inner(
+                executable_graph, executor=executor,
+                allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
+            )
+            if fired_inside is None:
+                return None
+            executable_graph.step_count += 1
+            executable_graph.last_fired = fired_inside
+            executable_graph.fired_counts[fired_inside] = executable_graph.fired_counts.get(fired_inside, 0) + 1
+            return fired_inside
 
         firing_ids = FiringTokenIds()
         input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
@@ -1593,6 +1952,7 @@ class ExecutableGraphOperations:
                 place_names_to_nodes=place_names_to_nodes,
                 allow_token_copying=allow_token_copying,
                 executor=executor,
+                net_params=executable_graph.params,
             )
         except Exception as exception:
             # Raises TransitionFailedError carrying the consumed tokens;

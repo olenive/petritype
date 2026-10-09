@@ -552,23 +552,30 @@ runner's state machine, or over pipes against the binary.
   name or `null`, and `cabin` its one inner net (named `cabin` whatever the
   kind), in the form of §12.5. Templates: `Cabin` (Bus, Tram: places
   `Door`, `Seats`, `Standing`, `Announcements`, all `str`; transitions
-  `Sit` (Door to Seats, guard: `Seats` holds fewer than `seats`), `Stand`
-  (Door to Standing, guard: `Seats` holds `seats` or more), `Go To Door`
-  (Seats to Door) and `Go To Door From Standing` (Standing to Door), both
-  guarded by `stopped` being true and `Announcements` non-empty, and
-  `Clear Announcement` (consumes one announcement, guard: `Seats` and
-  `Standing` both empty); parameters `stopped` (`true`), `seats` (`2`),
+  `Sit` (Door to Seats, guard: `Seats` holds fewer than `seats` and
+  `Announcements` is empty), `Stand` (Door to Standing, guard: `Seats`
+  holds `seats` or more and `Announcements` is empty), `Go To Door` (Seats
+  to Door) and `Go To Door From Standing` (Standing to Door), both guarded
+  by `stopped` being true and `Announcements` non-empty, and `Clear
+  Announcement` (consumes one announcement, guard: `Door`, `Seats` and
+  `Standing` all empty); parameters `stopped` (`true`), `seats` (`2`),
   `capacity` (`6`)); `Deck` (Ferry: places `Door`, `Lower Deck`,
   `Upper Deck`, `Announcements`; transitions `Go Below` (Door to Lower
-  Deck), `Go Up` (Lower Deck to Upper Deck), `Go To Door` (Lower Deck to
-  Door) and `Go To Door From Upper Deck` (Upper Deck to Door), the last two
-  guarded as the Cabin's, `Clear Announcement` guarded by both decks empty;
-  parameters `stopped` (`true`), `capacity` (`40`)); `Pod` (Shuttle: places
-  `Door`, `Seats`, `Announcements`; transitions `Sit`, `Go To Door`,
-  `Clear Announcement`; parameters `stopped` (`true`), `seats` (`4`),
-  `capacity` (`4`)). Where the design names one `Go To Door` drawing from
-  either of two places, there are two transitions, since an input edge
-  draws from one place. Seed: `Depot` holds one `Vehicle {name: "Bus 1",
+  Deck, guard: `Announcements` empty), `Go Up` (Lower Deck to Upper Deck),
+  `Go To Door` (Lower Deck to Door) and `Go To Door From Upper Deck` (Upper
+  Deck to Door), the last two guarded as the Cabin's, `Clear Announcement`
+  guarded by `Door` and both decks empty; parameters `stopped` (`true`),
+  `capacity` (`40`)); `Pod` (Shuttle: places `Door`, `Seats`,
+  `Announcements`; transitions `Sit`, `Go To Door`, `Clear Announcement`,
+  guarded as the Cabin's; parameters `stopped` (`true`), `seats` (`4`),
+  `capacity` (`4`)). Two guards differ from the design document, which has
+  `Sit` guarded by seats alone and the announcement cleared once nobody is
+  seated or standing: built so, a cabin re-seats the passengers at its door
+  the moment the announcement clears and can never hold them there, so
+  nobody sits or stands while an announcement stands and it is cleared only
+  once nobody is aboard at all. Where the design names one `Go To Door`
+  drawing from either of two places, there are two transitions, since an
+  input edge draws from one place. Seed: `Depot` holds one `Vehicle {name: "Bus 1",
   kind: "Bus"}` with an empty `Cabin`; `Harbour` one `{name: "Ferry 1",
   kind: "Ferry"}` with an empty `Deck`; `Platform@Depot` holds `"Ada"`,
   `"Bram"`, `"Cato"` in that order; everything else is empty. Transitions,
@@ -588,9 +595,9 @@ runner's state machine, or over pipes against the binary.
   sets its inner `stopped` to `true`, puts `"Arrived at <destination>"` into
   its inner `Announcements`, clears its `destination` and produces it into
   the place its destination named. Net parameter `destination` (`"Central"`).
-  The transit transcript holds `Alight` and `Depart` back with `disable`
-  where the design's script fires by hand, so that the driver's order
-  (§12.3) reproduces the script.
+  The transit transcript holds `Alight`, `Depart` and `Arrive` back with
+  `disable` where the design's script fires them by hand, so that the
+  driver's order (§12.3) reproduces the script.
 
   **`wildlife`** ("Species migrate, spread and decline across habitats"),
   the net of `TOKEN_QUERYING_AND_FILTERING.md` §2. Places, in this order,

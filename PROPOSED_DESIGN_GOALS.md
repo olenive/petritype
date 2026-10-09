@@ -342,3 +342,89 @@ work, none blocking: **pixel-on-node** co-located controls (vs the current node-
 **operator / Tier-2** capabilities (force-fire, topology editing, snapshot / restore); the
 **serializing observer** for a cross-process / web frontend; and the fuller reserved-token
 in-flight model (the current cue is the gold transition highlight).
+
+---
+
+# Nets as tokens
+
+Decided and built 2026-10-09 from `Cyberpunk2020-Simulation/dev-docs/NETS_AS_TOKENS.md`
+(the consumer's proposal; its "As built (Python)" section records what differs). The wire
+side is PROTOCOL.md §12. A token may hold Petri nets of its own; the net holding the token
+runs them, observes them and (phase 2) saves them *through the boundary*.
+
+## The model
+
+- **Declaring.** `ListPlaceNode(..., nested=True)` says the place's tokens hold nets: each
+  token is an `ExecutableGraph` (one unnamed inner net, `""`) or implements
+  `__petritype_nets__(self) -> dict[str, ExecutableGraph]`. Checked at seed, deposit and
+  `Extend`/`SetTokens` time with an error naming the place. `passive=True` (nested only)
+  keeps the engine's hands off the inner nets: an outer body steps them.
+- **Running (R2).** Inner nets are live. `fire_one_transition` gives one inner net the turn
+  when the outer net's selector picks nothing: place order, then token order, then net order
+  within a token, descending into a net's own inner nets before the next token, each net by
+  its own selector (`NestedNets.fire_one_inner`). Both `execute_graph` and the sequential
+  `Runner` loops get this for free; the concurrent loops take the same turn when nothing
+  outer can launch and nothing is in flight (an inner net is never touched while an outer
+  body that could reach it runs). Quiescence means nothing fireable anywhere. An inner
+  firing counts as a firing of the outer net under its path, `"Depot/#17/cabin/Sit"`: that
+  is what `step_count`, `last_fired`, `fired_counts`, `RunSummary` and the pacing and fuse
+  limits see, so every existing driver and limit stays coherent without a second counter.
+- **Reaching inside (R3).** An outer body reaches into the tokens it holds (an argument or a
+  mutate edge) with `NestedNets.put(inner, place, tokens)`, `take(inner, place, n)` and
+  `set_param(inner, name, value)`, which type-check, move ids and record `Added`,
+  `Removed` and `ParamChanged` on the inner net. Guards read inner markings through the token
+  (`graph.place_named(...).tokens[0].cabin`). That is the whole coupling (R10): no shared
+  place, no inner transition sees the outer net.
+- **Net parameters.** New on `ExecutableGraph`: `params: dict[str, Any]`, declared at
+  construction (`construct_graph(params=...)`), read by guards, priorities and selectors as
+  `graph.params`, and handed to a body as a keyword argument when it declares a parameter of
+  that name that no edge and no `kwargs` entry supplies (`depart(vehicle, destination)`).
+  `NetParams.set` records `ParamChanged(None, name)`; the runtime gains the `SetNetParam`
+  command. Inner nets needed them (`stopped`, `seats`, `capacity`) and the Rust port already
+  has net-wide parameters, so the saved form of a net (phase 2) and `set_param` without a
+  transition can mean the same in both runtimes.
+- **Observability (R4, R7).** Inner events reach the outer log wrapped in one `Nested(path,
+  nested_id, event)` record, whatever the depth (an inner net's own `Nested` records are
+  re-based onto the longer path). The path is as the marking stood when the event was
+  gathered: the place the token stood in at the time. `nested_id` is the inner graph's
+  `net_id`, minted per graph from a process-wide counter, and stable across the moves of the
+  token that holds it. Gathering happens in `drain_events`, before a firing's own events are
+  recorded (so what a body did inside comes before its `Fired`), and at the start of every
+  firing, so a firing that drops a nested token loses none of its events. Inner nets record
+  exactly when the outer net does.
+- **Sink transitions.** A transition with no output edge now fires: its body must return
+  `None` and nothing is deposited. `Board` and `Clear Announcement` needed it; before, the
+  engine raised `KeyError` on such a transition.
+
+## Defaults taken from the design document (section 7)
+
+1. Driver policy: outer first, then inner nets in place, token and net order, repeated.
+2. Both token-id paths and the stable nested id on the wire (PROTOCOL.md §12.1).
+3. Inner events wrapped in a new `Nested` record, not a path field on every record.
+4. Inner changes made by a failing body are not rolled back; `restore_tokens_on_failure` is
+   conservation of the outer tokens only, and its docs say so.
+
+## What differs from the design document, and why
+
+- The cabin of the transit example (`examples/transit.py`) does not re-seat passengers who
+  came to the door to leave: `Sit` and `Stand` wait while an announcement stands, and the
+  announcement is cleared once nobody is aboard at all. Built as the document words it
+  (`Sit` guarded by seats alone, cleared once nobody is seated or standing), the net
+  ping-pongs between `Go To Door` and `Sit` and can never hold "three at the door,
+  announcement cleared". The document's expected result "Announcements emptied" after step 4
+  therefore does not hold; the announcement stands until the last passenger alights.
+- One `Go To Door` drawing from either of two places is two transitions (`Go To Door`,
+  `Go To Door From Standing`): an input edge draws from one place.
+- The acceptance script's "run to quiet" holds `Alight`, `Depart` and `Arrive` back
+  (`RunContext.disabled`): the design fires them by hand, and the driver would otherwise fire
+  `Arrive` the moment a vehicle is in transit and `Alight` the moment someone is at the door.
+
+## As built, 2026-10-09 (phase 1: core)
+
+`petritype/core/executable_graph_components.py` (`NestedNets`, `NetParams`, the nested
+checks, the descent in `fire_one_transition`, sinks), `petritype/core/events.py`
+(`Nested`; `ParamChanged.transition` may be `None`), `petritype/core/nested.py` (the short
+import), `petritype/runtime.py` (`SetNetParam`, nested checks on commands, the inner turn in
+concurrent mode), `examples/transit.py` (the design's §2 net, its acceptance script as
+`main`), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests, depth two included).
+Phases 2 to 4 (saving and templates; the protocol runner; the visualiser) follow.

@@ -13,10 +13,15 @@ stable integer id the graph gave the token when it entered a place (see
 A firing is reported once, when it completes: any ``Mutated`` records for the
 tokens it touched through mutate edges come first, then exactly one ``Fired`` or
 ``Failed``. Python emits no launched/distributed pair.
+
+An event inside an inner net (a net held by a token of a ``nested`` place, see
+``NestedNets``) reaches the outer graph's log wrapped in a ``Nested`` record
+carrying the path to the net it happened in and that net's stable id, so a
+reader that knows nothing of nesting sees only records it already knows.
 """
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 
 
 type PlaceTokenId = tuple[str, int]
@@ -86,9 +91,11 @@ class Toggled:
 
 @dataclass(frozen=True)
 class ParamChanged:
-    """``SetParam`` set keyword argument ``param`` of ``transition``."""
+    """``SetParam`` set keyword argument ``param`` of ``transition``, or, with
+    ``transition`` ``None``, ``NetParams.set`` set the net parameter ``param``
+    (``ExecutableGraph.params``)."""
 
-    transition: str
+    transition: Optional[str]
     param: str
 
 
@@ -101,4 +108,20 @@ class Resynced:
     place: str
 
 
-Event = Union[Fired, Failed, Added, Removed, Mutated, Toggled, ParamChanged, Resynced]
+@dataclass(frozen=True)
+class Nested:
+    """``event`` happened inside an inner net. ``path`` leads to that net from the
+    graph this record was drained from: per level, the place, the holding token's
+    id spelt ``#<id>`` and the net's name within the token, so
+    ``("Depot", "#17", "cabin")`` for the cabin of token 17 standing in Depot, and
+    six segments for a net one level further down. The path is as it stood when
+    the event was recorded (the place the token was in at the time); ``nested_id``
+    is the inner net's ``net_id``, which does not change when the token moves.
+    One wrapper whatever the depth: ``event`` is never itself a ``Nested``."""
+
+    path: tuple[str, ...]
+    nested_id: int
+    event: "Event"
+
+
+Event = Union[Fired, Failed, Added, Removed, Mutated, Toggled, ParamChanged, Resynced, Nested]
