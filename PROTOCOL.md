@@ -1,8 +1,13 @@
 # The petritype net protocol
 
 Status: **protocol version 1.** Written 2026-10-03 and amended the same day
-after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11), and on
-2026-10-04 when the Python runner moved to two-piece firings (§6.3, §7.1). Both
+after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11), on
+2026-10-04 when the Python runner moved to two-piece firings (§6.3, §7.1), and
+on 2026-10-09 for nested nets (§12) and token keys, queries and filters (§13),
+with what they add to §3, §5, §6, §7, §8 and §11; those additions are the
+agreed wire form of `NETS_AS_TOKENS.md` R8 and `TOKEN_QUERYING_AND_FILTERING.md`
+R3 (both in `Cyberpunk2020-Simulation/dev-docs/`), written before either
+runtime implemented them so that both implement the same thing. Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -98,7 +103,7 @@ without parsing `message`:
 | `unknown_method` | no such method |
 | `invalid_params` | params missing or of the wrong shape |
 | `not_loaded` | the method needs a loaded net |
-| `unknown_net` | `load` named a net this process does not carry |
+| `unknown_net` | `load` named a net this process does not carry, or a `path` or `nested_id` (§12.1) names no live inner net |
 | `load_failed` | the factory raised or the net did not build |
 | `unknown_place`, `unknown_transition`, `unknown_token` | a name or id that does not exist now |
 | `not_serializable` | the place has no JSON form, so a token cannot be injected or shown as JSON |
@@ -172,16 +177,21 @@ once per generation and lays it out.
 - `places[]`: `name`; `type_name`, the runtime's own spelling of the token
   type, for display only; `serializable`, whether tokens of this place have a
   JSON form (decides whether `inject` and `get_token` with `kind: "json"` can
-  work).
+  work); `nested?`, `true` when tokens of this place may hold nets of their
+  own (§12), and `passive?`, `true` when such a place's inner nets are
+  stepped only by an outer body (§12.3); `key_names?`, the names of the keys
+  the place derives from its tokens, in declaration order, present only when
+  the place declares keys (§13.1).
 - `transitions[]`: `name`; `detail?`, a free object of runtime-specific
   introspection (Python: `function_name`, `signature`, `docstring`; Rust:
   `params`, the parameter type names, and `detachable`). A viewer may show
   `detail`; it must not depend on any key in it.
 - `edges[]`: `place`, `transition`, `direction` (`"in"` place to transition,
   `"out"` transition to place); `kind?` for input edges, one of `"take"`,
-  `"take_all"`, `"snapshot"`, `"mutate"` (a reader that meets another value
-  draws a plain edge); `slot?` for output edges of a transition with more
-  than one output. Read edges (`snapshot`, `mutate`) are listed: they move no
+  `"take_all"`, `"snapshot"`, `"mutate"`, `"take_where"`, `"mutate_where"`
+  (a reader that meets another value draws a plain edge), the last two
+  carrying `filter` (§13.5); `slot?` for output edges of a transition with
+  more than one output. Read edges (`snapshot`, `mutate`) are listed: they move no
   tokens but they are part of the net. The order of `edges[]` is not
   significant; a reader keys an edge by its endpoints.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
@@ -210,9 +220,11 @@ Kept apart from the topology because it changes on every firing.
 `marking.places` maps each place name to `count` (the true number of tokens)
 and `tokens`, the oldest tokens first, **capped** (default 200 per place;
 `get_state {token_limit}` changes it, `get_place_tokens` pages the rest). A
-viewer reads sizes from `count`, never from `tokens.length`.
+viewer reads sizes from `count`, never from `tokens.length`. Under a
+connection filter (§13.4) a place also reports `matching`, the number of its
+tokens the filter lets through, and `tokens` holds only those.
 
-A token is `{id, label, color?, type_name?}`:
+A token is `{id, label, color?, type_name?, keys?, nets?}`:
 
 - `label`: short display text chosen by the runtime, at most 1000
   characters counted as Unicode scalar values, *including* any truncation
@@ -224,6 +236,10 @@ A token is `{id, label, color?, type_name?}`:
   token (Python: a `.color` attribute).
 - `type_name?`: only when it differs from the place's `type_name` (a Python
   place may hold subclasses).
+- `keys?`: `{name: value}`, the token's keys, only when its place declares
+  keys (§13.1).
+- `nets?`: `[{name, nested_id, path, template?, count}]`, the nets the token
+  holds, only when it holds some (§12.2).
 
 ### 5.4 Progress
 
@@ -238,18 +254,25 @@ it.
 |---|---|---|---|
 | `describe` | `{}` | Describe (§6.1) | allowed before `load` |
 | `load` | `{net, params?}` | `{status: "loaded", generation, marking_version}` | emits `load_progress`; `reloaded` |
-| `get_state` | `{token_limit?}` | State (§5) | never waits for a running body |
-| `get_place_tokens` | `{place, offset?, limit?}` | `{place, marking_version, count, offset, limit, tokens, has_more}` | `limit` clamped to 1..1000, default 200 |
-| `get_token` | `{id}` | `{id, place, type_name, kind: "json", value}` or `{id, place, type_name, kind: "text", text}` | live tokens only |
-| `step` | `{}` | `{fired: bool, transition?, failed?, marking_version, running}` | one firing, sequential semantics (§6.3) |
+| `get_state` | `{token_limit?, path?, nested_id?}` | State (§5), plus `path`, `nested_id`, `template?` for an inner net | never waits for a running body |
+| `get_place_tokens` | `{place, offset?, limit?, path?, nested_id?}` | `{place, marking_version, count, matching?, offset, limit, tokens, has_more, path?, nested_id?}` | `limit` clamped to 1..1000, default 200 |
+| `get_token` | `{id, path?, nested_id?}` | `{id, place, type_name, kind: "json", value, path?, nested_id?, nets?}` or `{..., kind: "text", text, ...}` | live tokens only |
+| `step` | `{}` | `{fired: bool, transition?, failed?, path?, nested_id?, marking_version, running}` | one firing, sequential semantics (§6.3); `path` when it was in an inner net (§12.3) |
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
-| `inject` | `{place, token}` | `{status: "injected", id, marking_version}` | emits `added` |
+| `inject` | `{place, token, path?, nested_id?}` | `{status: "injected", id, marking_version}` | emits `added` |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
-| `get_log` | `{after?, limit?}` | `{entries}` (§8) | |
+| `get_log` | `{after?, limit?, path?, nested_id?}` | `{entries}` (§8) | |
+| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches}` (§13.3) | never waits for a running body |
+| `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values}` (§13.3) | |
+| `set_filter` | `{filter?, path?, nested_id?}` | `{marking_version}` | the connection's projection (§13.4) |
 | `shutdown` | `{}` | `{status: "ok"}` | then the process exits |
+
+`path` and `nested_id` name an inner net (§12.1); a method that takes them
+acts on that net instead of the outer one. Without either, a method acts on
+the outer net, as before.
 
 ### 6.1 `describe`
 
@@ -316,6 +339,10 @@ before it moves to `describe`.
   policy and is reported by `execution_stopped` when it stops, with
   `reason: "transition_failed"` and the failure's `error_type` and `message`
   (both runners stop).
+- When tokens hold nets, "one firing" may be a firing inside one of them:
+  `step` and a running net fire the outer net's choice first and an inner
+  net's only when the outer net has nothing fireable (§12.3), and
+  `no_fireable_transitions` means nothing fireable anywhere.
 
 ### 6.4 Input
 
@@ -358,9 +385,10 @@ one) and `running`.
 | `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (both runners, which run every body off their request thread): inputs taken, body started |
 | `distributed` | `{transition, produced: [[place, id, label, color?]], duration_ms}` | the second piece: body returned, outputs placed |
 | `failed` | `{transition, error, restored, consumed: [[place, id]]}` | a body failed; `restored` says whether the consumed tokens went back (same ids, front of their places) |
-| `added` | `{place, id, label, color?}` | a token arrived from outside (`inject`, a command) |
+| `added` | `{place, id, label, color?, keys?}` | a token arrived from outside (`inject`, a command) |
 | `removed` | `{place, id}` | a token was removed from outside (replacing a place's tokens) |
-| `mutated` | `{place, id, label?}` | a token changed in place (a mutate edge) |
+| `mutated` | `{place, id, label?, keys?}` | a token changed in place (a mutate edge) |
+| `hidden` | `{kind: "added" \| "removed" \| "mutated", place}` | stands in for an `added`, `removed` or `mutated` about a token the connection's filter hides (§13.4) |
 | `toggled` | `{transition, enabled}` | the switch changed |
 | `param_changed` | `{param, transition?}` | `set_param` took effect |
 
@@ -368,7 +396,12 @@ A firing that mutates through a read edge emits its `mutated`s before its
 `fired` (or `distributed`, or `failed`). `fired` carries consumed and
 produced so a viewer can animate tokens from place to transition to place
 without diffing markings. Produced entries carry the label so a viewer can
-draw a token without a fetch; `color` is a fourth element when present.
+draw a token without a fetch; `color` is a fourth element when present, and
+`keys` (§13.1) a fifth when the place declares keys, in which case a token
+without a colour has `null` as its fourth element (the one place the
+protocol writes `null` for an absent optional, so that the fifth keeps its
+position). `added` and `mutated` carry `keys` under the same condition, the
+keys as they stand after the change.
 
 ### 7.2 Other notifications (do not move `marking_version`)
 
@@ -380,6 +413,7 @@ draw a token without a fetch; `color` is a fourth element when present.
 | `execution_stopped` | `{reason, error_type?, message?}` | the net stopped running on its own |
 | `heartbeat` | `{step_started_at, executing_transition}` | periodic while loaded; both `null` when no body runs |
 | `load_progress` | `{step, message}` | during `load` |
+| `nested` | `{path, nested_id, event: {method, params}}` | an event in an inner net, wrapping the notification that net would send (§12.4); moves the inner net's version, carried inside `event`, not the outer net's |
 
 ## 8. Log
 
@@ -395,6 +429,13 @@ runner keeps (at least the last 1000 firings). An entry is:
 are keyed by **place names** and protocol token ids: no argument names, no
 runtime-specific id spellings. `after` returns entries with `seq` greater
 than it.
+
+The ring is one for the process: a firing inside an inner net (§12) is an
+entry too, in order with the outer firings, carrying `path` and `nested_id`
+(the path as it stood when the firing happened: the place the token stood in
+at the time) and the inner net's place names and token ids; `seq` is shared.
+`get_log` with a `path` or `nested_id` returns only the entries of that net
+and of nets inside it.
 
 ## 9. Relayed over HTTP and server-sent events
 
@@ -489,7 +530,360 @@ runner's state machine, or over pipes against the binary.
   transitions `Sort`, `Stage`, `Dispatch Truck`; eight seeded parcels; a
   deterministic copy of the Rust example `petritype/examples/parcel_distribution.rs`.
   Both runners carry it (Rust: the `petritype-runner` example binary) and
-  both replay the shared set. **The shared set is replayed against a runner
-  carrying the conformance net alone**, so a shared transcript may pin
-  `describe` in full; a runner that carries other nets too replays it with
-  a registry reduced to the conformance net.
+  both replay the shared set. **A shared transcript is replayed against a
+  runner carrying the transcript's own net alone**, so it may pin `describe`
+  in full; a runner that carries other nets too replays it with a registry
+  reduced to the net the transcript names.
+- Two more conformance nets came with §12 and §13 on 2026-10-09, each the
+  example net of its design document built deterministically, so that the
+  transcripts over them (`05_nested_nets.json`, `06_keys_query_filter.json`)
+  replay against both runtimes; the Python ones are
+  `tests/protocol_nets/transit.py` and `tests/protocol_nets/wildlife.py`.
+  Their names, places, transitions, seeds, parameters and the guards that
+  decide what fires are fixed here, since a transcript depends on them:
+
+  **`transit`** ("Vehicles board, carry and alight passengers"), the
+  `City` net of `NETS_AS_TOKENS.md` §2. Places, in this order: `Depot`,
+  `Central`, `Harbour`, `Airport` (type `Vehicle`, nested, serializable),
+  `Platform@Depot`, `Platform@Central`, `Platform@Harbour`,
+  `Platform@Airport` (type `str`), `In Transit` (type `Vehicle`, nested,
+  serializable). `Vehicle` is `{name, kind, destination, cabin}` with `kind`
+  one of `"Bus"`, `"Tram"`, `"Ferry"`, `"Shuttle"`, `destination` a place
+  name or `null`, and `cabin` its one inner net (named `cabin` whatever the
+  kind), in the form of §12.5. Templates: `Cabin` (Bus, Tram: places
+  `Door`, `Seats`, `Standing`, `Announcements`, all `str`; transitions
+  `Sit` (Door to Seats, guard: `Seats` holds fewer than `seats`), `Stand`
+  (Door to Standing, guard: `Seats` holds `seats` or more), `Go To Door`
+  (Seats to Door) and `Go To Door From Standing` (Standing to Door), both
+  guarded by `stopped` being true and `Announcements` non-empty, and
+  `Clear Announcement` (consumes one announcement, guard: `Seats` and
+  `Standing` both empty); parameters `stopped` (`true`), `seats` (`2`),
+  `capacity` (`6`)); `Deck` (Ferry: places `Door`, `Lower Deck`,
+  `Upper Deck`, `Announcements`; transitions `Go Below` (Door to Lower
+  Deck), `Go Up` (Lower Deck to Upper Deck), `Go To Door` (Lower Deck to
+  Door) and `Go To Door From Upper Deck` (Upper Deck to Door), the last two
+  guarded as the Cabin's, `Clear Announcement` guarded by both decks empty;
+  parameters `stopped` (`true`), `capacity` (`40`)); `Pod` (Shuttle: places
+  `Door`, `Seats`, `Announcements`; transitions `Sit`, `Go To Door`,
+  `Clear Announcement`; parameters `stopped` (`true`), `seats` (`4`),
+  `capacity` (`4`)). Where the design names one `Go To Door` drawing from
+  either of two places, there are two transitions, since an input edge
+  draws from one place. Seed: `Depot` holds one `Vehicle {name: "Bus 1",
+  kind: "Bus"}` with an empty `Cabin`; `Harbour` one `{name: "Ferry 1",
+  kind: "Ferry"}` with an empty `Deck`; `Platform@Depot` holds `"Ada"`,
+  `"Bram"`, `"Cato"` in that order; everything else is empty. Transitions,
+  in this order: `Board Depot`, `Board Central`, `Board Harbour`,
+  `Board Airport`, `Alight Depot`, `Alight Central`, `Alight Harbour`,
+  `Alight Airport`, `Depart Depot`, `Depart Central`, `Depart Harbour`,
+  `Depart Airport`, `Arrive`. `Board L` takes one passenger from
+  `Platform@L` and mutates the front vehicle at `L`, putting the passenger
+  into its inner `Door`; its guard is that the front vehicle at `L` has room
+  (the tokens in its inner places other than `Announcements` number fewer
+  than its `capacity`); it produces nothing. `Alight L` mutates the front
+  vehicle at `L`, taking the oldest passenger out of its inner `Door` and
+  producing it into `Platform@L`; guard: that `Door` is non-empty. `Depart
+  L` takes the front vehicle at `L`, sets its `destination` to the net
+  parameter `destination` and its inner `stopped` to `false`, and produces
+  it into `In Transit`. `Arrive` takes the front vehicle of `In Transit`,
+  sets its inner `stopped` to `true`, puts `"Arrived at <destination>"` into
+  its inner `Announcements`, clears its `destination` and produces it into
+  the place its destination named. Net parameter `destination` (`"Central"`).
+  The transit transcript holds `Alight` and `Depart` back with `disable`
+  where the design's script fires by hand, so that the driver's order
+  (§12.3) reproduces the script.
+
+  **`wildlife`** ("Species migrate, spread and decline across habitats"),
+  the net of `TOKEN_QUERYING_AND_FILTERING.md` §2. Places, in this order,
+  all of type `Species`, all serializable, each declaring the keys
+  `species` (from `name`), `class` and `diet`: `Forest`, `Wetland`,
+  `Savanna`, `Reef`, `Tundra`, `Migrating`. `Species` is `{name, class,
+  diet, population, destination}` with `class` one of `"Bird"`,
+  `"Mammal"`, `"Reptile"`, `"Fish"`, `diet` one of `"Herbivore"`,
+  `"Carnivore"`, `"Insectivore"`, `"Omnivore"`, `population` an integer
+  and `destination` a place name or `null` (set only while migrating). Seed,
+  in place order then token order: `Forest`: Robin (Bird, Insectivore, 120),
+  Fox (Mammal, Omnivore, 60); `Wetland`: Robin (Bird, Insectivore, 80),
+  Heron (Bird, Carnivore, 40); `Savanna`: Zebra (Mammal, Herbivore, 5000),
+  Gecko (Reptile, Insectivore, 200); `Reef`: Clownfish (Fish, Omnivore,
+  300); `Tundra`: Fox (Mammal, Omnivore, 30), Arctic Hare (Mammal,
+  Herbivore, 90). Net parameters `season` (`"Summer"`) and
+  `spread_threshold` (`1000`). Transitions, in this order:
+  `Migrate Forest Wetland`, which takes the oldest `Species` in `Forest`
+  whose `class` is `Bird` (a `take_where` edge with the filter
+  `class in {Bird}`; until a runtime has keyed edges, a `take_all` of
+  `Forest` that puts the others back, slot 0 to `Forest` and slot 1 to
+  `Migrating`), sets its `destination` to `"Wetland"` and produces it into
+  `Migrating`, guarded by `season` being `"Autumn"`; `Settle`, which takes
+  the front token of `Migrating`, clears its `destination` and produces it
+  into the place that destination named; `Spread Savanna Reef`, which
+  mutates the front token of `Savanna`, halving its population (rounding
+  down), and produces a copy with the other half into `Reef`, guarded by
+  that token's population exceeding `spread_threshold`; and
+  `Decline Forest`, which mutates the front token of `Forest`, halving its
+  population (rounding down), guarded by it being above zero. The design's
+  "at zero the token is removed" is not built: a mutate edge removes
+  nothing.
+
+## 12. Nested nets
+
+A token may hold Petri nets of its own: *inner nets*, held by a token of the
+*outer net*, which produces, stores, moves and drops such tokens like any
+other. The net process hosts the outer net; inner nets live inside its
+tokens and are reached through them, so a viewer can open a token and watch
+the net inside it. This is the wire side of `NETS_AS_TOKENS.md` (R8); both
+runners implement it.
+
+### 12.1 Addressing: paths and nested ids
+
+An inner net is named in two ways. Every method that takes one accepts
+either, as `path` or as `nested_id`; giving both is `invalid_params`;
+giving neither names the outer net.
+
+- A **path** is a string: the outer net's name, then, per level of nesting,
+  the place, the token (its id with `#` in front) and the inner net's name
+  within the token, joined by `/`: `City/Depot/#17/cabin`, and
+  `City/Depot/#17/cabin/Door/#3/luggage` one level further down. The first
+  segment must be the loaded net's name. A token that is itself a net holds
+  one inner net whose name is the empty string, so its path ends in `/`. A
+  place or net name containing `/`, or a place name beginning with `#`,
+  cannot be spelt in a path; such a net is reached by its nested id. A path
+  names a net *as the marking stands*: an outer token that is taken and put
+  back gets a new token id (§2), so the paths to its inner nets change,
+  while their nested ids do not.
+- A **nested id** is a string the runtime mints for each inner net when it
+  comes into being, unique within a generation of the outer net and never
+  reused in it, opaque to a reader (the runtimes spell it differently;
+  compare it as a string, never parse it). It is the stable name of an inner
+  net: it survives every move of the token that holds it. It stops resolving
+  when that token is consumed without being put back (§12.6), and when the
+  outer net is reloaded or reset, which mints new ids for every inner net.
+
+A `path` or `nested_id` that names no live inner net is answered
+`unknown_net`, and the message says which segment failed.
+
+### 12.2 Discovering inner nets
+
+- `topology.places[]` carries `nested: true` on a place whose tokens may hold
+  nets, and `passive: true` on such a place whose inner nets are stepped only
+  by an outer body (§12.3).
+- A token that holds nets carries `nets` wherever a token entry is given in
+  full (`get_state`, `get_place_tokens`, `get_token`, `query`): a list, in
+  the token's own order, of `{name, nested_id, path, template?, count}`: the
+  net's name within the token, its nested id, its path as of now, the
+  template that built it (§12.5) when the runtime knows one, and `count`,
+  the number of tokens in all its places, so a viewer can badge the token
+  without a further read. A token without nets has no `nets` field. The
+  positional `produced` entries and the `added` and `mutated` notifications
+  carry no `nets`: a viewer that wants them reads the token.
+- `describe` stays top level: it lists the nets a process can load, never
+  their inner nets, which exist only once a net is built.
+
+### 12.3 Reading and driving an inner net
+
+- `get_state`, `get_place_tokens`, `get_token`, `get_log`, `inject`,
+  `query`, `distinct` and `set_filter` take `path` or `nested_id` and then
+  act on that inner net exactly as on the outer one: its own topology,
+  transition states, marking (its own token ids, unique within the inner
+  net only, so a `get_token` on an inner token must name the net), progress
+  and log. A result about an inner net carries `path` and `nested_id`
+  (absent for the outer net); the `net` of an inner `get_state` is the net's
+  name within its token, `template?` the template that built it, and
+  `generation` the inner net's own, `1` for as long as it exists.
+- **Versions are per net.** Each inner net has its own `marking_version`,
+  stamped on its reads and raised by exactly one for each of its state
+  notifications, under §4's rules. An event inside an inner net does not
+  move the outer net's version; the outer `nets[].count` of a token is a
+  hint read with the outer state, not a versioned value.
+- **Driving.** Inner nets are live. Quiescence of the outer net means no
+  fireable transition in it *and none in any inner net* of a non-passive
+  place; `execution_stopped {reason: "no_fireable_transitions"}` means that.
+  Both runners' sequential drivers fire, at each `step` and at each firing of
+  a running net, one transition chosen in this order: the outer net's own
+  selector among the outer net's fireable transitions; if it picks none, the
+  inner nets in place order, then token order within a place, then net order
+  within a token, each by its own selector, descending into a net's own
+  inner nets before moving to the next token. The `step` result and the log
+  entry of an inner firing carry its `path` and `nested_id`; the
+  `marking_version` of a `step` result is the outer net's. An inner net in a
+  `passive` place is never fired by the driver; only an outer body steps it.
+- **Reads during a firing.** While an outer body runs, a read addressed to
+  an inner net of a token that firing took, or holds through a mutate edge,
+  is answered after the landing (it may wait, as `get_token` on such a token
+  does, §6.5); every other inner net is unchanged by that body, since an
+  outer body reaches only the tokens it holds and an inner body only its own
+  net, and is answered at once. While an inner body runs, reads of that inner
+  net follow §6.3 as for the outer net.
+- `enable`, `disable`, `set_param`, `start`, `stop` and `reset` act on the
+  outer net only. An inner net's switches and parameters are set by the
+  template that builds it or by an outer body reaching inside.
+
+### 12.4 Inner events
+
+An event inside an inner net reaches the host as one `nested` notification
+(§7.2) wrapping the notification the inner net would have sent on its own:
+
+```json
+{"method": "nested", "params": {
+  "path": "City/Depot/#17/cabin", "nested_id": "3",
+  "event": {"method": "launched", "params": {"transition": "Sit", "consumed": [["Door", "1"]],
+                                             "marking_version": 4, "running": false}},
+  "marking_version": 42, "running": false}}
+```
+
+`event` is the inner notification, any of §7, with the inner net's
+`marking_version` and the process's `running` in its `params`: a firing in
+an inner net is `nested` around `launched` then `nested` around
+`distributed` (or `failed`), and a harness folds the pair as it folds the
+outer one (§11). The wrapper carries the outer net's `marking_version`,
+which the inner event does not move, and `running`. Whatever the depth
+there is one wrapper, and `path` is the full path. A reader that does not
+know `nested` skips it and is untouched by nesting. Before each outer firing
+that consumes a nested token, the driver drains the inner net's events into
+the outer log, so none are lost when the token is dropped (§12.6).
+
+### 12.5 Nested tokens as JSON
+
+The JSON form of a token that holds nets (`get_token` with `kind: "json"`,
+`inject`, and a saved net) is the token's own fields plus, under the name of
+each inner net, that net's state:
+
+```json
+{"name": "Bus 1", "kind": "Bus", "destination": null,
+ "cabin": {"template": "Cabin",
+           "marking": {"Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": []},
+           "params": {"stopped": true, "seats": 2, "capacity": 6},
+           "enabled": {"Sit": true, "Stand": true, "Go To Door": true,
+                       "Go To Door From Standing": true, "Clear Announcement": true}}}
+```
+
+- `template` names the factory, registered by name with the runtime, that
+  built the inner net and rebuilds it on `inject` or load. `marking` lists
+  each place's tokens oldest first, each in the JSON form of its place, so
+  every place of the inner net must be `serializable` for the token to have
+  a JSON form (a nested place whose inner nets cannot be serialised is not
+  `serializable`). `params` are the inner net's parameters by name and
+  `enabled` its transition switches. Token ids are not preserved: a loaded
+  inner net numbers its tokens afresh. A place missing from `marking` loads
+  empty; an unknown place, an unknown template, a parameter the template
+  does not declare or a token that does not decode is `invalid_token`.
+- `inject` into a nested place takes this form, builds the inner nets from
+  their templates and imports their markings, parameters and switches, then
+  appends the token and emits `added` for it alone: the inner tokens arrived
+  with it and are read with it.
+
+### 12.6 Lifetime
+
+An inner net exists as long as the token that holds it. When an outer firing
+consumes the token without putting it back, the inner net and its undrained
+events are gone: `launched.consumed` names the token, its nested ids stop
+resolving (`unknown_net`), and a viewer attached to one detaches. An outer
+firing that takes the token and puts it back, the common move, keeps the
+inner net and its nested id and gives the token a new id. `reset` and `load`
+drop every inner net with the marking. No runtime changes an inner net's
+topology once built; no inner transition reads or writes the outer net; the
+outer net reaches inside only through its own bodies.
+
+## 13. Keys, queries and filters
+
+A token may carry *keys*: named attributes a place derives from each token's
+value by an extractor the net author declares. Keys are what a query filters
+on, what a viewer filters by, and what a host projects with when it serves
+one net to several clients that each see their own subset. This is the wire
+side of `TOKEN_QUERYING_AND_FILTERING.md` (R3); both runners implement it.
+
+### 13.1 Keys on the wire
+
+- `topology.places[].key_names` lists the keys a place derives, in
+  declaration order; it is absent for a place that declares none. (The
+  design asks `describe` for them; `describe` lists nets before they are
+  built, so they are in the topology, which is per built net.)
+- A token entry (§5.3) carries `keys: {name: value}` when its place
+  declares keys and no `keys` field otherwise. A value is a JSON string, an
+  integer or a boolean, nothing else. Keys are derived from the value, so a
+  mutated token may have new keys: `mutated` and `added` carry `keys` under
+  the same condition, as they stand after the change, and a `produced` entry
+  carries them as its fifth element (§7.1).
+
+### 13.2 Filters
+
+A filter is `{clauses?: [clause], places?: [name], prefix?: string}`; a
+clause is `{key, values: [value]}` or `{key, param}`.
+
+- A token matches a filter when it matches every clause (AND across
+  clauses) and lies in a place `places` names, if given, whose name begins
+  with `prefix`, if given. It matches a clause when it has that key with one
+  of the clause's `values` (OR within a clause), compared by JSON type and
+  value: `1` is not `"1"` and not `true`. A token in a place that does not
+  declare the clause's key matches no such clause. A `{key, param}` clause
+  accepts one value, the current value of the named net parameter (keyed
+  edges, §13.5).
+- A filter with no clauses and no restriction matches every token. A key no
+  place declares matches nothing and is not an error; a place in `places`
+  that does not exist is `unknown_place`.
+
+### 13.3 Queries
+
+| method | params | result |
+|---|---|---|
+| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches: [{place, token, json?}]}` |
+| `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values: [value]}` |
+
+- `query` returns the tokens matching `filter` (absent: the connection's
+  filter of §13.4, else every token), in place order then token order, each
+  as `{place, token, json?}`: `token` a full token entry (§5.3, keys
+  included) and `json` the token's JSON value where its place is
+  `serializable`. `count` is the number of matches and `matches` holds the
+  first `token_limit` of them (default 200, clamped to 1..1000, as
+  `get_state`). It reflects the marking at `marking_version` and never waits
+  for a running body: it is served from the same marking as `get_state`.
+- `distinct` returns the distinct values of `key` over the tokens of the
+  net, or of `places`, in order of first appearance in place order then
+  token order; a key no place declares gives `[]`.
+
+### 13.4 A filter on the connection
+
+| method | params | result |
+|---|---|---|
+| `set_filter` | `{filter?, path?, nested_id?}` | `{marking_version}` |
+
+A host serving one net to several clients may need each to see only some
+tokens (one character's view, fog of war). `set_filter` sets, for this
+connection and the net it names, the filter every later read and
+notification of that net is projected through; `set_filter` without
+`filter` clears it. A net process has one connection, so one filter per
+net; a relay (§9) that serves several clients keeps a filter per client and
+applies this same projection itself, which tokens carrying `keys` on the
+wire make possible. Under a filter:
+
+- `get_state` and `get_place_tokens` list only matching tokens. Each place
+  reports `count`, the true number of tokens, and `matching`, the number the
+  filter lets through (present only while a filter is set); `get_place_tokens`
+  pages the matching tokens and `has_more` is relative to them. `get_token`
+  on a token the filter hides is `unknown_token`.
+- `added`, `removed` and `mutated` are sent for matching tokens only. For a
+  token the filter hides the connection receives instead
+  `hidden {kind, place}` (§7.1), a state notification that moves the
+  version as the hidden one would have and names the place and what
+  happened, so counts can be kept while nothing of the token is told. A
+  mutation that makes a token start matching is reported as `added` and one
+  that makes it stop matching as `removed`, although the token did not move;
+  `count` in a read is the truth whenever a client doubts its own tally.
+- `launched.consumed`, `distributed.produced` and `fired`'s lists hold only
+  matching tokens; the notification is sent even when a list comes out
+  empty, since it moves the version.
+- `query` without a `filter` uses the connection's; `query` with one uses
+  that alone and leaves the connection's as it was.
+- Ids and versions are unchanged by a filter: a token has the same id on
+  every connection, and the versions a filtered connection sees are the net's.
+
+### 13.5 Keyed edges
+
+An input edge may take, or hand over for mutation, the oldest token
+*matching a filter* rather than the front token. A transition with such an
+edge is fireable when the place holds a matching token (and its guard
+passes); its firing takes (or mutates) the oldest matching token and leaves
+every other token where it is, with its id, so no `removed` or `added` is
+emitted for them. On the wire such an edge is `kind: "take_where"` or
+`"mutate_where"` and carries `filter`, the filter of §13.2 as declared (a
+`{key, param}` clause is shown as declared, not evaluated).
+`launched.consumed` names the token taken.
