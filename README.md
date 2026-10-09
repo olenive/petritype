@@ -230,6 +230,8 @@ MutateEdge("Depot", "Board Depot", "vehicle")
 
 Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/transit.py` is the worked example: buses and ferries whose cabins are nets.
 
+Any net whose places all have a JSON form (pydantic models, scalars, nets) can be **saved and loaded**: `graph.export_marking()` / `graph.import_marking(...)` for the marking alone, `NetJson.save(graph)` / `NetJson.restore(saved)` for the whole net (`{template, marking, params, enabled}`), rebuilt through a template registered with `@Templates.template("Cabin")`. A nested token's JSON form carries its inner nets in that saved form, so a vehicle can be written to disk, injected over the protocol and restored, cabin and all.
+
 ### Decorator for registration
 
 Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.

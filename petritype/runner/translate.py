@@ -17,7 +17,9 @@ from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_a
 
 from pydantic import BaseModel, TypeAdapter
 
+from petritype.core import serialisation as _serialisation
 from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode
+from petritype.core.serialisation import JsonForm
 from petritype.core.type_comparisons import CompareTypes
 from petritype.runner import protocol as wire
 
@@ -40,7 +42,10 @@ COLOR_NAMES = {
     "gray": "#6b7280",
 }
 
-JSON_SCALARS = (bool, int, float, str)
+# The JSON-form rules live in the core now (``petritype.core.serialisation``), so
+# a token saved by the library is a token the runner can inject; these names stay
+# for the runner's own modules.
+JSON_SCALARS = _serialisation.JSON_SCALARS
 
 
 class TypeNames:
@@ -141,96 +146,28 @@ class Tokens:
 
     def json_value(token: Any) -> Any:
         """The token as plain JSON (for a serializable place). Raises if it has none."""
-        if isinstance(token, BaseModel):
-            return token.model_dump(mode="json")
-        return json.loads(json.dumps(token, allow_nan=False))
+        return JsonForm.encode(token)
 
 
 class StrictJson:
-    """Validate wire input as the JSON it arrived as, in pydantic's strict mode.
-
-    Pydantic's default lax mode coerces ``"9"`` to ``9``, ``1`` to ``True`` and
-    ``true`` to ``1``; a wire value must already be the type it claims. Strict
-    *JSON* mode rather than strict Python mode, because the wire is JSON: strict
-    Python mode refuses the only spellings JSON has for some types (an ISO 8601
-    string for a ``datetime``, an array for a ``tuple`` or a ``set``), strict JSON
-    mode takes them. It accepts a JSON integer for a ``float`` (JSON has one
-    number type) and makes it a ``float``. The value is re-serialised with
-    ``json.dumps`` (never ``NaN``), so a value that is not plain JSON raises
-    ``ValueError`` too."""
+    """Validate wire input as the JSON it arrived as, in pydantic's strict mode
+    (``JsonForm.validate``; the rationale is there)."""
 
     def validate(target: Any, value: Any) -> Any:
-        """``target`` is a pydantic model class or a ``TypeAdapter``. Raises
-        ``ValueError`` (pydantic's ``ValidationError`` is one) on a mismatch."""
-        try:
-            text = json.dumps(value, allow_nan=False)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"not plain JSON: {error}") from error
-        if isinstance(target, TypeAdapter):
-            return target.validate_json(text, strict=True)
-        return target.model_validate_json(text, strict=True)
+        return JsonForm.validate(target, value)
 
     def message(error: ValueError) -> str:
-        """Pydantic's first message for a ``ValidationError``, else the text."""
-        errors = getattr(error, "errors", None)
-        if callable(errors):
-            first = errors()
-            if first:
-                return first[0].get("msg", str(error))
-        return str(error)
+        return JsonForm.message(error)
 
 
 class Serializable:
-    """Functions that decide and use a place's JSON form."""
+    """Functions that decide and use a place's JSON form (``JsonForm``)."""
 
     def place_type(place_type: Any) -> bool:
-        """True for a pydantic model (whose JSON schema builds, so it has a JSON
-        form) or a JSON scalar type (``bool``, ``int``, ``float``, ``str``)."""
-        if not isinstance(place_type, type):
-            return False
-        if place_type in JSON_SCALARS:
-            return True
-        if issubclass(place_type, BaseModel):
-            try:
-                place_type.model_json_schema()
-            except Exception:
-                return False
-            return True
-        return False
+        return JsonForm.place_type(place_type)
 
     def decode(place_type: Any, payload: Any) -> Any:
-        """Build a token of ``place_type`` from plain JSON: ``StrictJson.validate``
-        for a pydantic model (strict all the way down), the constructor for a scalar. Raises ``ValueError`` (or
-        pydantic's ``ValidationError``, a subclass) when it does not decode.
-
-        Scalars are as strict as the models: the JSON type must be the
-        place's. An ``int`` place takes only an integer (never ``"9"``, never
-        ``2.0``), a ``str`` place only a string (never ``9``), a ``bool`` place
-        only ``true``/``false`` (``bool("false")`` is ``True``), and a ``float``
-        place a number, an integer included, as strict JSON mode does for a
-        model's float field. JSON's ``true`` is never ``1``."""
-        if isinstance(place_type, type) and issubclass(place_type, BaseModel):
-            return StrictJson.validate(place_type, payload)
-        if place_type not in JSON_SCALARS:
-            raise ValueError(f"{TypeNames.of(place_type)} has no JSON form")
-        if payload is None or not isinstance(payload, JSON_SCALARS):
-            raise ValueError(f"expected a JSON scalar for {place_type.__name__}, got {type(payload).__name__}")
-        if place_type is bool:
-            if not isinstance(payload, bool):
-                raise ValueError(f"expected true or false, got {payload!r}")
-            return payload
-        if isinstance(payload, bool):
-            raise ValueError(f"expected {place_type.__name__}, got a boolean")
-        if place_type is int and not isinstance(payload, int):
-            raise ValueError(f"expected an integer, got {payload!r}")
-        if place_type is float and not isinstance(payload, (int, float)):
-            raise ValueError(f"expected a number, got {payload!r}")
-        if place_type is str and not isinstance(payload, str):
-            raise ValueError(f"expected a string, got {payload!r}")
-        try:
-            return place_type(payload)
-        except (TypeError, ValueError) as error:
-            raise ValueError(str(error)) from error
+        return JsonForm.decode(place_type, payload)
 
 
 class Details:

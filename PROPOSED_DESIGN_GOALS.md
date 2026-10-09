@@ -427,4 +427,44 @@ checks, the descent in `fire_one_transition`, sinks), `petritype/core/events.py`
 import), `petritype/runtime.py` (`SetNetParam`, nested checks on commands, the inner turn in
 concurrent mode), `examples/transit.py` (the design's §2 net, its acceptance script as
 `main`), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests, depth two included).
-Phases 2 to 4 (saving and templates; the protocol runner; the visualiser) follow.
+
+## As built, 2026-10-09 (phase 2: saving and templates)
+
+`petritype/core/serialisation.py`, three namespaces:
+
+- **`JsonForm`** (R5a's ground): which place types have a JSON form (a pydantic model, a
+  JSON scalar, `ExecutableGraph`), `encode` (a model dumps by alias) and strict `decode`.
+  Moved here from the runner's `translate.py`, which now delegates, so a token the library
+  saves is a token the runner injects, by one rule.
+- **`Templates`** (R5b): a process-wide registry, `Templates.register("Cabin", factory)` or
+  `@Templates.template("Cabin")`, stamping `graph.template` on what the factory builds; a
+  factory is called with no arguments, so its own arguments need defaults. Python has no
+  builder to hang it on, and a token restored from JSON needs the template by name alone.
+- **`NetJson`** (R5, R5a): `export_marking` / `import_marking` (by place name, oldest first;
+  a place not listed loads empty, an unknown place is a `KeyError`, a token that does not
+  decode a `ValueError`, both before anything changes; ids are not preserved, each place
+  records `Resynced`), and the whole saved form `{template?, marking, params, enabled}` with
+  `save`, `load_into` (onto a net built the same way: the top-level case, where the
+  `@petri_net` factory is the template) and `restore` (build from the template, then load).
+  `ExecutableGraph.export_marking()` and `.import_marking()` are the short spellings.
+
+`ExecutableGraph` itself dumps in JSON mode as its saved form, validates from one (a wrap
+validator rebuilds through the template), and declares the saved form as its JSON schema,
+so a pydantic token type with an `ExecutableGraph` field (`Vehicle.cabin`) has the JSON form
+of PROTOCOL.md §12.5 with no further work and counts as serializable. Python-mode dumps
+keep the field form, which existing code reads.
+
+`enabled` needed a switch on the graph: inner nets run without a `RunContext`, so
+`ExecutableGraph.disabled` (honoured by `transition_is_fireable`) is the net's own switch,
+saved and loaded as the `enabled` map; the runtime's `Enable`/`Disable` stay the runner's
+switch on the net it drives.
+
+R6, forking: `NestedNets.fork(token)` is a deep copy, and `ExecutableGraph.__deepcopy__`
+mints a new `net_id`, so every copy of a graph is a new net (a snapshot-edge copy included)
+and a fork is told apart from its original. The design's "rebuild from the template and
+import the marking" is what `NetJson.restore(NetJson.save(net))` does when a copy must not
+share Python objects at all.
+
+Tests: `tests/test_nested_serialisation.py` (20), including step 6 of the acceptance script
+through JSON text at both save points. Phases 3 and 4 (the protocol runner; the visualiser)
+follow.

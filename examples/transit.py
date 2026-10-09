@@ -35,6 +35,7 @@ from petritype.core.executable_graph_components import (
     ReturnedEdgeFromTransition,
 )
 from petritype.core.nested import NestedNets
+from petritype.core.serialisation import Templates
 from petritype.runtime import RunContext, Runner
 
 LOCATIONS = ("Depot", "Central", "Harbour", "Airport")
@@ -42,7 +43,9 @@ Kind = Literal["Bus", "Tram", "Ferry", "Shuttle"]
 
 
 class Vehicle(BaseModel):
-    """A vehicle token: its cabin is an inner net, named ``cabin`` whatever the kind."""
+    """A vehicle token: its cabin is an inner net, named ``cabin`` whatever the kind.
+    Its JSON form is its fields with the cabin in its saved form (template,
+    marking, params, enabled), so a vehicle can be saved, injected and restored."""
 
     name: str
     kind: Kind
@@ -83,6 +86,7 @@ def _nobody_aboard(*places: str):
     return guard
 
 
+@Templates.template("Cabin")
 def build_cabin(seats: int = 2, capacity: int = 6) -> ExecutableGraph:
     """``Cabin`` (Bus, Tram): passengers at the door sit while there are seats,
     else stand; when the vehicle is stopped and an arrival has been announced
@@ -125,6 +129,7 @@ def build_cabin(seats: int = 2, capacity: int = 6) -> ExecutableGraph:
     ], params={"stopped": True, "seats": seats, "capacity": capacity}, template="Cabin")
 
 
+@Templates.template("Deck")
 def build_deck(capacity: int = 40) -> ExecutableGraph:
     """``Deck`` (Ferry): passengers go below from the door, may go up, and come back
     to the door from either deck once stopped and announced; the same two guards
@@ -154,6 +159,7 @@ def build_deck(capacity: int = 40) -> ExecutableGraph:
     ], params={"stopped": True, "capacity": capacity}, template="Deck")
 
 
+@Templates.template("Pod")
 def build_pod(seats: int = 4) -> ExecutableGraph:
     """``Pod`` (Shuttle): seats only, no standing."""
 
@@ -177,7 +183,8 @@ def build_pod(seats: int = 4) -> ExecutableGraph:
     ], params={"stopped": True, "seats": seats, "capacity": seats}, template="Pod")
 
 
-TEMPLATES = {"Cabin": build_cabin, "Deck": build_deck, "Pod": build_pod}
+# Registered by the decorators above: what rebuilds a cabin from a saved vehicle.
+TEMPLATES = {name: Templates.get(name) for name in ("Cabin", "Deck", "Pod")}
 
 
 # --- the outer net: bodies reach inside the vehicle they hold ------------------------------

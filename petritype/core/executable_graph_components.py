@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
 from typing import Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
-from pydantic import BaseModel, PrivateAttr, model_validator
+from pydantic import BaseModel, PrivateAttr, model_serializer, model_validator
 import asyncio
 import functools
 import inspect
@@ -326,6 +326,18 @@ class ExecutableGraph(BaseModel):
             its ``net_id``. A copy of a graph shares its id until re-minted.
         template: The name of the template (``Templates``) that built this graph,
             if one did; what a saved nested token records so the net can be rebuilt.
+        disabled: The graph's own transition switches: a transition named here is
+            not fireable. Loaded from and saved as the ``enabled`` map of the net's
+            JSON form, and the switch an inner net has (an inner net runs without a
+            ``RunContext``). The runtime's ``Enable``/``Disable`` commands are the
+            runner's switch on the net it drives, kept on ``RunContext.disabled``.
+
+    JSON form: a graph dumps (in JSON mode) as, and validates from, its saved form
+    ``{template, marking, params, enabled}`` (``petritype.core.serialisation``),
+    so a pydantic token type with an ``ExecutableGraph`` field has the JSON form
+    of a nested token (PROTOCOL.md §12.5) with no further work; validating one
+    needs the template registered. A deep copy of a graph is a new net with its
+    own ``net_id``.
     """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
@@ -393,8 +405,70 @@ class ExecutableGraph(BaseModel):
     params: dict[str, Any] = {}
     net_id: int = 0
     template: Optional[str] = None
+    disabled: set[str] = set()
     # Event records waiting to be drained; never dumped with the model.
     _events: list[Event] = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _from_saved_form(cls, value, handler):
+        """A saved form (``{template, marking, ...}``) validates to the net it
+        describes, rebuilt from its template; anything else validates as the
+        graph's own fields."""
+        from petritype.core.serialisation import NetJson  # the module imports this one
+        if NetJson.looks_saved(value):
+            try:
+                return NetJson.restore(value)
+            except (LookupError, KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"not a saved net: {error}") from error
+        return handler(value)
+
+    @model_serializer(mode="wrap")
+    def _as_saved_form(self, handler, info):
+        """In JSON mode (``model_dump_json``, ``model_dump(mode="json")``, a
+        pydantic token holding a graph) the saved form; in Python mode the fields,
+        as before."""
+        if info.mode == "json":
+            from petritype.core.serialisation import NetJson
+            return NetJson.save(self)
+        return handler(self)
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        """The schema of the saved form: the one JSON shape a graph has (its
+        fields hold callables, which have none)."""
+        return {
+            "title": cls.__name__,
+            "description": "A net in its saved form: the template that rebuilds it, its marking by "
+                           "place, its parameters and its transition switches (PROTOCOL.md §12.5).",
+            "type": "object",
+            "properties": {
+                "template": {"type": "string"},
+                "marking": {"type": "object", "additionalProperties": {"type": "array"}},
+                "params": {"type": "object"},
+                "enabled": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            },
+            "required": ["marking"],
+        }
+
+    def __deepcopy__(self, memo=None):
+        """A deep copy is a new net: it gets its own ``net_id``, so a forked nested
+        token is told apart from the original."""
+        copy = super().__deepcopy__(memo)
+        copy.net_id = next(_net_ids)
+        return copy
+
+    def export_marking(self) -> dict[str, list]:
+        """``{place: [tokens as JSON]}``, oldest first (``NetJson.export_marking``)."""
+        from petritype.core.serialisation import NetJson
+        return NetJson.export_marking(self)
+
+    def import_marking(self, marking: dict[str, list]) -> None:
+        """Replace the marking from ``{place: [tokens as JSON]}``; a place not
+        listed loads empty, an unknown place is an error, ids are not preserved
+        (``NetJson.import_marking``)."""
+        from petritype.core.serialisation import NetJson
+        NetJson.import_marking(self, marking)
 
     def model_post_init(self, context: Any, /) -> None:
         # Seed tokens get their ids here, in place order. Runs once per construction
@@ -954,6 +1028,14 @@ class NestedNets:
         """``NetParams.set`` on an inner net."""
         NetParams.set(inner, name, value)
 
+    def fork(token: Any) -> Any:
+        """A copy of a nested token whose inner nets are new nets: a deep copy,
+        which gives every graph in it its own ``net_id`` (same markings,
+        parameters and switches; nothing shared with the original). The clone of
+        a nested token the design asks for, done by copying rather than by
+        rebuilding from the template and importing the marking."""
+        return deepcopy(token)
+
 
 # This is intended as shorthand for the common case when adding a transition with output(s) to a graph.
 def function_transition_node_and_output_edges(
@@ -1096,13 +1178,16 @@ class ExecutableGraphCheck:
         place_names_to_nodes: dict[str, ListPlaceNode],
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
     ) -> bool:
-        """Can fire now: sufficient tokens plus the transition's guard, if any.
+        """Can fire now: not switched off on the graph (``disabled``), sufficient
+        tokens, and the transition's guard, if any.
 
         Every fireable-discovery sweep (sequential execution and both concurrent runner
         loops) must go through this, so a guard means the same thing in every execution
         mode. Guards run on every sweep — they should be cheap, side-effect-free
         predicates over the marking.
         """
+        if transition.name in executable_graph.disabled:
+            return False
         if not ExecutableGraphCheck.sufficient_tokens_are_available(
             transition=transition,
             transition_names_to_incoming_edges=transition_names_to_incoming_edges,
