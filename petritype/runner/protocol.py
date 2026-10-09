@@ -173,6 +173,7 @@ class Place(Wire):
     serializable: bool
     nested: Optional[bool] = None
     passive: Optional[bool] = None
+    key_names: Optional[list[str]] = None
 
 
 class Transition(Wire):
@@ -184,8 +185,9 @@ class Edge(Wire):
     place: str
     transition: str
     direction: Literal["in", "out"]
-    kind: Optional[Literal["take", "take_all", "snapshot", "mutate"]] = None
+    kind: Optional[Literal["take", "take_all", "snapshot", "mutate", "take_where", "mutate_where"]] = None
     slot: Optional[int] = None
+    filter: Optional[dict[str, Any]] = None
 
 
 class Topology(Wire):
@@ -219,11 +221,16 @@ class Token(Wire):
     label: str
     color: Optional[str] = None
     type_name: Optional[str] = None
+    keys: Optional[dict[str, Union[str, int, bool]]] = None
     nets: Optional[list[NestedNet]] = None
 
 
 class PlaceMarking(Wire):
+    """``count`` is every token; ``matching`` how many the connection's filter
+    keeps (§13.4), present only while a filter is set."""
+
     count: int
+    matching: Optional[int] = None
     tokens: list[Token]
 
 
@@ -265,6 +272,7 @@ class PlaceTokens(Wire):
     place: str
     marking_version: int
     count: int
+    matching: Optional[int] = None
     offset: int
     limit: int
     tokens: list[Token]
@@ -288,6 +296,22 @@ class TokenValue(Wire):
     path: Optional[str] = None
     nested_id: Optional[str] = None
     nets: Optional[list[NestedNet]] = None
+
+
+class QueryResult(Wire):
+    """``query`` (§13.3): ``matches`` are ``{place, token, json?}`` objects, the
+    token a full entry and ``json`` its JSON value where its place has one
+    (built as plain dicts, since ``json`` is a name pydantic reserves)."""
+
+    marking_version: int
+    count: int
+    matches: list[dict[str, Any]]
+
+
+class DistinctResult(Wire):
+    marking_version: int
+    key: str
+    values: list[Union[str, int, bool]]
 
 
 class StepResult(Wire):
@@ -346,7 +370,7 @@ class Fired(Notification):
 
     transition: str
     consumed: list[list[str]]
-    produced: list[list[str]]
+    produced: list[list[Any]]
     duration_ms: float
 
 
@@ -367,7 +391,7 @@ class Distributed(Notification):
     moves_version: ClassVar[bool] = True
 
     transition: str
-    produced: list[list[str]]
+    produced: list[list[Any]]
     duration_ms: float
 
 
@@ -389,6 +413,7 @@ class Added(Notification):
     id: str
     label: str
     color: Optional[str] = None
+    keys: Optional[dict[str, Union[str, int, bool]]] = None
 
 
 class Removed(Notification):
@@ -406,6 +431,19 @@ class Mutated(Notification):
     place: str
     id: str
     label: Optional[str] = None
+    keys: Optional[dict[str, Union[str, int, bool]]] = None
+
+
+class Hidden(Notification):
+    """Stands in for an ``added``, ``removed`` or ``mutated`` about a token the
+    connection's filter hides (§13.4): the version moves, the place is named,
+    nothing of the token is told."""
+
+    method: ClassVar[str] = "hidden"
+    moves_version: ClassVar[bool] = True
+
+    kind: Literal["added", "removed", "mutated"]
+    place: str
 
 
 class Toggled(Notification):

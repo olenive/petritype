@@ -519,5 +519,11 @@ keyed input edges.
 ## As built, 2026-10-09 (phase 1: core)
 
 `petritype/core/keys.py` (`Keys`, `Clause`, `Filter`, `Match`, `Query`), the `keys` field
-on `ListPlaceNode`, `examples/wildlife.py`, `tests/test_token_keys.py` (17). Phases 2 to 4
-(the protocol; keyed edges; the visualiser) follow.
+on `ListPlaceNode`, `examples/wildlife.py`, `tests/test_token_keys.py` (17).
+
+## As built, 2026-10-09 (phase 2: the protocol)
+
+`DESIGN_RUNNER.md`, "As built, 2026-10-09: keys, queries and the connection's projection",
+and PROTOCOL.md §13: keys on the wire, `query`, `distinct`, `set_filter`, `hidden`, the
+`wildlife` conformance net and transcript `06_keys_query_filter.json`. Phases 3 and 4 (keyed
+edges; the visualiser) follow.

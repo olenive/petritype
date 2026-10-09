@@ -19,7 +19,9 @@ from pydantic import BaseModel, TypeAdapter
 
 from petritype.core import serialisation as _serialisation
 from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode
+from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
+from petritype.runner.protocol import ErrorCode, ProtocolError
 from petritype.core.type_comparisons import CompareTypes
 from petritype.runner import protocol as wire
 
@@ -127,17 +129,30 @@ class Tokens:
 
     def entry(
         token_id: int, token: Any, place_type_name: str, nets: Optional[list[wire.NestedNet]] = None,
+        keys: Optional[dict] = None,
     ) -> wire.Token:
-        """``{id, label, color?, type_name?, nets?}``; ``type_name`` only when the
-        token's own type name differs from its place's; ``nets`` as given (§12.2)."""
+        """``{id, label, color?, type_name?, keys?, nets?}``; ``type_name`` only
+        when the token's own type name differs from its place's; ``keys`` (§13.1)
+        and ``nets`` (§12.2) as given."""
         own = type(token).__name__
         return wire.Token(
             id=str(token_id),
             label=Labels.of(token),
             color=Colors.of(token),
             type_name=own if own != place_type_name else None,
+            keys=keys if keys is not None else None,
             nets=nets or None,
         )
+
+    def keys(place: ListPlaceNode, token: Any) -> Optional[dict]:
+        """The token's keys when its place declares some, else ``None``; a key
+        that will not derive is left out rather than failing the read."""
+        if not place.keys:
+            return None
+        try:
+            return Keys.of(place, token)
+        except Exception:
+            return {}
 
     def nets(token: Any, prefix: str, place: str, token_id: int) -> list[wire.NestedNet]:
         """The ``nets`` of a nested token: one entry per inner net, with its path
@@ -154,11 +169,14 @@ class Tokens:
             ))
         return entries
 
-    def produced(place: str, token_id: int, token: Any) -> list[str]:
-        """A ``fired.produced`` element: ``[place, id, label, color?]``."""
-        element = [place, str(token_id), Labels.of(token)]
+    def produced(place: str, token_id: int, token: Any, keys: Optional[dict] = None) -> list[Any]:
+        """A ``fired.produced`` element: ``[place, id, label, color?]``, or with
+        ``keys`` ``[place, id, label, color | null, keys]`` (§7.1)."""
+        element: list[Any] = [place, str(token_id), Labels.of(token)]
         color = Colors.of(token)
-        if color is not None:
+        if keys is not None:
+            element.extend([color, keys])
+        elif color is not None:
             element.append(color)
         return element
 
@@ -186,6 +204,58 @@ class Serializable:
 
     def decode(place_type: Any, payload: Any) -> Any:
         return JsonForm.decode(place_type, payload)
+
+
+class Filters:
+    """Functions that read a filter off the wire and write one (§13.2)."""
+
+    def from_wire(raw: Any, place_names: Optional[set[str]] = None) -> Filter:
+        """A ``Filter`` from ``{clauses?, places?, prefix?}``; ``invalid_params``
+        for a shape that is not one, ``unknown_place`` for a place not of the net."""
+        if not isinstance(raw, dict):
+            raise ProtocolError(ErrorCode.INVALID_PARAMS, "a filter is an object")
+        unknown = set(raw) - {"clauses", "places", "prefix"}
+        if unknown:
+            raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a filter has no {', '.join(map(repr, sorted(unknown)))}")
+        clauses = []
+        for clause in raw.get("clauses", []) or []:
+            if not isinstance(clause, dict) or not isinstance(clause.get("key"), str):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, 'a clause is {"key", "values"} or {"key", "param"}')
+            if "param" in clause:
+                if not isinstance(clause["param"], str) or "values" in clause:
+                    raise ProtocolError(ErrorCode.INVALID_PARAMS, 'a clause has "values" or a string "param"')
+                clauses.append(Clause(clause["key"], param=clause["param"]))
+                continue
+            values = clause.get("values")
+            if not isinstance(values, list) or not values or not all(is_key_value(v) for v in values):
+                raise ProtocolError(
+                    ErrorCode.INVALID_PARAMS, 'a clause\'s "values" is a non-empty list of strings, integers or booleans',
+                )
+            clauses.append(Clause(clause["key"], tuple(values)))
+        places = raw.get("places")
+        if places is not None:
+            if not isinstance(places, list) or not all(isinstance(name, str) for name in places):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, '"places" is a list of place names')
+            if place_names is not None:
+                missing = [name for name in places if name not in place_names]
+                if missing:
+                    raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {missing[0]!r}")
+            places = tuple(places)
+        prefix = raw.get("prefix")
+        if prefix is not None and not isinstance(prefix, str):
+            raise ProtocolError(ErrorCode.INVALID_PARAMS, '"prefix" is a string')
+        return Filter(tuple(clauses), places, prefix)
+
+    def to_wire(filter: Filter) -> dict:
+        out: dict = {"clauses": [
+            {"key": c.key, "param": c.param} if c.param is not None else {"key": c.key, "values": list(c.values)}
+            for c in filter.clauses
+        ]}
+        if filter.places is not None:
+            out["places"] = list(filter.places)
+        if filter.prefix is not None:
+            out["prefix"] = filter.prefix
+        return out
 
 
 class Details:
@@ -279,6 +349,7 @@ class Topologies:
                     serializable=Serializable.place_type(place.type),
                     nested=True if place.nested else None,
                     passive=True if place.passive else None,
+                    key_names=list(place.key_names) if place.keys else None,
                 )
                 for place in graph.places
             ],

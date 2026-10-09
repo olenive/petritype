@@ -351,3 +351,44 @@ owner and over pipes; `tests/test_runner_nested.py` covers what a transcript
 cannot show (the waits and the snapshots). The harness gained the `<path>`
 mask, captures inside longer strings and the nested fold, and replays each
 transcript against a registry reduced to its own net (PROTOCOL.md §11).
+
+## As built, 2026-10-09: keys, queries and the connection's projection (PROTOCOL.md §13)
+
+Keys (`PROPOSED_DESIGN_GOALS.md`, "Token keys, queries and filters") reach the wire as
+`key_names` on a place and `keys` on a token entry, on `added` and `mutated`, and as the
+fifth element of a `produced` entry (with `null` in the colour's place when the token has
+none). `query`, `distinct` and `set_filter` are three more methods; `hidden` one more
+state notification. `Filters.from_wire` (`translate.py`) reads a filter off the wire into
+the library's `Filter`, answering `invalid_params` for a shape that is not one and
+`unknown_place` for a place not of the net.
+
+Settlements:
+
+- **One projection per net per connection.** `set_filter` sets `_Net.filter`; the owner
+  then serves that net through it: `_PlaceView` keeps the indices the filter lets through
+  (`kept`), so `get_state` and `get_place_tokens` list and page those alone and report
+  `matching` beside `count`; `get_token` on a hidden token is `unknown_token`; `query`
+  without a filter uses the connection's, with one uses that alone.
+- **What the connection has been shown.** `_Net.visible` holds the ids of the live tokens
+  the filter keeps. The token events of a batch keep it in step as they go (an `added` that
+  matches joins it, a `removed` leaves it, a `mutated` that crosses the boundary becomes an
+  `added` or a `removed`), and `hidden {kind, place}` goes out for what they hide, so the
+  version moves exactly as it would unfiltered. After each batch `_sync_visible` recomputes
+  the set from the live marking and announces any difference as `added` or `removed`: that
+  is how a change of a net parameter a `{key, param}` clause names brings tokens into or out
+  of view without any token event, right after its `param_changed`. `set_filter` itself
+  announces nothing: the client changed the projection and refetches.
+- **Firings** list only kept tokens: `launched.consumed` is filtered against the live tokens
+  before stage 1 takes them, `distributed.produced` against the tokens just placed.
+- **`query` and `distinct`** are reads: answered while a body runs, from the same snapshot
+  as `get_state`, so they say which version they reflect; a projection on an inner net is
+  set by naming it (`path` or `nested_id`), and the outer net's is unaffected.
+- **No index.** Keys are derived on demand (`Keys.of`), so a `mutated` token's keys are
+  whatever its value says now; `query` scans. The design's index per key and value is a
+  Rust-side performance measure; this runner's nets are small enough to scan.
+
+The shared transcript `tests/protocol/06_keys_query_filter.json` asks the design's five
+questions over the wire on the `wildlife` conformance net (`tests/protocol_nets/wildlife.py`,
+the example itself), sets a projection and watches a migration, a spread and two injections
+through it; `tests/test_runner_keys.py` covers the rest (the mutations that cross the
+boundary, the parameter-driven changes, a filter on an inner net).

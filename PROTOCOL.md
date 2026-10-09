@@ -884,9 +884,12 @@ wire make possible. Under a filter:
   `hidden {kind, place}` (§7.1), a state notification that moves the
   version as the hidden one would have and names the place and what
   happened, so counts can be kept while nothing of the token is told. A
-  mutation that makes a token start matching is reported as `added` and one
-  that makes it stop matching as `removed`, although the token did not move;
-  `count` in a read is the truth whenever a client doubts its own tally.
+  token that comes to match is reported as `added` and one that stops
+  matching as `removed`, although the token did not move: by a mutation
+  (in place of its `mutated`), or by a change of a net parameter a clause
+  names, which is followed by an `added` or `removed` for each token it
+  brings into or out of view (after its `param_changed`). `count` in a read
+  is the truth whenever a client doubts its own tally.
 - `launched.consumed`, `distributed.produced` and `fired`'s lists hold only
   matching tokens; the notification is sent even when a list comes out
   empty, since it moves the version.

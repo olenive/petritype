@@ -130,15 +130,20 @@ class Filter:
     def accepts(self, keys: Mapping[str, KeyValue], params: Mapping[str, Any]) -> bool:
         return all(clause.accepts(keys, params) for clause in self.clauses)
 
-    def matches(self, graph: ExecutableGraph, place: ListPlaceNode, token: Any) -> bool:
-        """Whether ``token``, resting in ``place`` of ``graph``, passes the filter."""
+    def keeps(self, place: ListPlaceNode, token: Any, params: Mapping[str, Any]) -> bool:
+        """Whether ``token``, resting in ``place``, passes the filter, with
+        ``params`` the net's parameters for a clause that names one."""
         if not self.covers(place.name):
             return False
         if not self.clauses:
             return True
         if not place.keys:
             return False
-        return self.accepts(Keys.of(place, token), graph.params)
+        return self.accepts(Keys.of(place, token), params)
+
+    def matches(self, graph: ExecutableGraph, place: ListPlaceNode, token: Any) -> bool:
+        """``keeps`` with the graph's own parameters."""
+        return self.keeps(place, token, graph.params)
 
 
 EVERYTHING = Filter()

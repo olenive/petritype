@@ -74,6 +74,7 @@ TRANSCRIPTS = sorted((ROOT / "tests" / "protocol").glob("*.json"))
 NET_MODULES = {
     "parcel-distribution": "tests.protocol_nets.parcel_distribution",
     "transit": "tests.protocol_nets.transit",
+    "wildlife": "tests.protocol_nets.wildlife",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response,
 # and the nested-net one, whose example module and templates must import in the process.
@@ -357,8 +358,10 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
                         problems.append(f"{here}[{n}]: token id must be masked")
                     elif len(pair) > 2 and pair[2] not in STRING_MASKS:
                         problems.append(f"{here}[{n}]: label must be masked")
-                    elif len(pair) > 3:
+                    elif len(pair) == 4 or (len(pair) == 5 and pair[3] is not None):
                         problems.append(f"{here}[{n}]: a shared transcript uses no color")
+                    elif len(pair) > 5:
+                        problems.append(f"{here}[{n}]: a produced entry has at most five elements")
             else:
                 problems.extend(_unsafe(item, here))
     elif isinstance(value, list):

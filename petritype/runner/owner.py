@@ -96,6 +96,7 @@ from petritype.core.executable_graph_components import (
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
+    ListPlaceNode,
     MapPlaceNames,
     MapTransitionNames,
     NestedNets,
@@ -103,10 +104,13 @@ from petritype.core.executable_graph_components import (
     TransitionFailedError,
     default_transition_selector,
 )
+from petritype.core.keys import Filter, Query
 from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
-from petritype.runner.translate import JSON_SCALARS, Serializable, StrictJson, Tokens, Topologies, TypeNames
+from petritype.runner.translate import (
+    JSON_SCALARS, Filters, Serializable, StrictJson, Tokens, Topologies, TypeNames,
+)
 from petritype.runtime import Disable, Enable, Extend, RunContext, Runner, SetNetParam, SetParam
 
 
@@ -119,13 +123,14 @@ MAX_TOKEN_LIMIT = 1000
 # Answered at once while a body is airborne; every other request waits for the
 # landing. ``shutdown`` abandons the body, ``describe`` reads nothing of the net.
 ANSWERED_WHILE_AIRBORNE = frozenset({
-    "get_state", "get_place_tokens", "get_token", "get_log", "stop", "shutdown", "describe",
+    "get_state", "get_place_tokens", "get_token", "get_log", "query", "distinct", "stop", "shutdown", "describe",
 })
-READS = frozenset({"get_state", "get_place_tokens", "get_token", "get_log"})
+READS = frozenset({"get_state", "get_place_tokens", "get_token", "get_log", "query", "distinct"})
 
 METHODS = frozenset({
     "describe", "load", "get_state", "get_place_tokens", "get_token", "step", "start", "stop",
     "reset", "inject", "enable", "disable", "set_param", "get_log", "shutdown",
+    "query", "distinct", "set_filter",
 })
 
 # Methods that act on the outer net alone (§12.3); a ``path`` or ``nested_id`` on them is refused.
@@ -177,7 +182,9 @@ class _PlaceView:
     """One place as of a snapshot. ``eager`` holds the entries rendered at capture
     (the tokens handed to an airborne body), ``at_risk`` their indices. ``nested``
     places render each token's ``nets`` under ``prefix``, the wire path of the net
-    the place belongs to."""
+    the place belongs to; ``place`` is the node itself, for the keys it derives;
+    ``filter`` and ``params`` the connection's projection (§13.4), under which
+    only the kept tokens are listed and ``matching`` counts them."""
 
     name: str
     type_name: str
@@ -186,10 +193,33 @@ class _PlaceView:
     eager: dict[int, wire.Token] = field(default_factory=dict)
     nested: bool = False
     prefix: str = ""
+    place: Optional[ListPlaceNode] = None
+    filter: Optional[Filter] = None
+    params: dict = field(default_factory=dict)
+    _kept: Optional[list[int]] = None
 
     @property
     def count(self) -> int:
         return len(self.tokens)
+
+    def kept(self) -> list[int]:
+        """The indices the filter keeps (every index without a filter)."""
+        if self._kept is None:
+            if self.filter is None or self.place is None:
+                self._kept = list(range(min(len(self.ids), len(self.tokens))))
+            else:
+                self._kept = [
+                    index for index in range(min(len(self.ids), len(self.tokens)))
+                    if self.filter.keeps(self.place, self.tokens[index], self.params)
+                ]
+        return self._kept
+
+    @property
+    def matching(self) -> Optional[int]:
+        return len(self.kept()) if self.filter is not None else None
+
+    def keeps(self, index: int) -> bool:
+        return self.filter is None or index in self.kept()
 
     def entry(self, index: int) -> wire.Token:
         cached = self.eager.get(index)
@@ -197,11 +227,16 @@ class _PlaceView:
             return cached
         token_id, token = self.ids[index], self.tokens[index]
         nets = Tokens.nets(token, self.prefix, self.name, token_id) if self.nested else None
-        return Tokens.entry(token_id, token, self.type_name, nets=nets)
+        keys = Tokens.keys(self.place, token) if self.place is not None else None
+        return Tokens.entry(token_id, token, self.type_name, nets=nets, keys=keys)
 
     def entries(self, offset: int, limit: int) -> list[wire.Token]:
-        end = min(offset + limit, len(self.ids), len(self.tokens))
-        return [self.entry(index) for index in range(offset, end)]
+        """A page of the kept tokens (all of them without a filter)."""
+        return [self.entry(index) for index in self.kept()[offset:offset + limit]]
+
+    def total(self) -> int:
+        """What a page is relative to: the kept tokens under a filter, else all."""
+        return len(self.kept()) if self.filter is not None else self.count
 
 
 @dataclass
@@ -234,10 +269,19 @@ class _Net:
     last_path: tuple[str, ...] = ()
     last_fired: Optional[str] = None
     last_progress_at: Optional[datetime] = None
+    # The connection's projection of this net (§13.4), and the ids it has been shown.
+    filter: Optional[Filter] = None
+    visible: set[int] = field(default_factory=set)
 
     @property
     def is_outer(self) -> bool:
         return self.nested_id is None
+
+    def keeps(self, place_name: str, token: Any) -> bool:
+        """Whether the connection's filter lets a live token through."""
+        if self.filter is None:
+            return True
+        return self.filter.keeps(self.place_nodes[place_name], token, self.graph.params)
 
 
 @dataclass
@@ -670,7 +714,7 @@ class Owner:
             topology=net.topology,
             transitions=snapshot.transitions,
             marking=wire.Marking(places={
-                name: wire.PlaceMarking(count=view.count, tokens=view.entries(0, limit))
+                name: wire.PlaceMarking(count=view.count, matching=view.matching, tokens=view.entries(0, limit))
                 for name, view in snapshot.places.items()
             }),
             progress=snapshot.progress,
@@ -692,8 +736,8 @@ class Owner:
             view, version = self._view(net, net.place_nodes[place]), net.marking_version
         tokens = view.entries(offset, limit)
         out.lines.append(Lines.result(request_id, self._stamp(net, wire.PlaceTokens(
-            place=place, marking_version=version, count=view.count, offset=offset, limit=limit,
-            tokens=tokens, has_more=offset + len(tokens) < view.count,
+            place=place, marking_version=version, count=view.count, matching=view.matching, offset=offset,
+            limit=limit, tokens=tokens, has_more=offset + len(tokens) < view.total(),
         ))))
 
     def _get_token(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
@@ -708,7 +752,7 @@ class Owner:
             else:
                 found = TokenIds.locate(net.graph, token_id)
                 self._flush(now, out)  # locate resyncs: report any repair first
-        if found is None:
+        if found is None or not net.keeps(found[0], found[1]):
             raise ProtocolError(ErrorCode.UNKNOWN_TOKEN, f"no live token {wanted!r}")
         place, token = found
         common = {"id": wanted, "place": place, "type_name": type(token).__name__}
@@ -734,6 +778,111 @@ class Owner:
             if entry.line.seq > after and (net.is_outer or net.nested_id in entry.chain)
         ][:limit]
         out.lines.append(Lines.result(request_id, {"entries": [entry.wire() for entry in entries]}))
+
+    def _query(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
+        """``query`` (§13.3): the tokens a filter keeps, from the same marking
+        ``get_state`` reads, in place order then token order."""
+        limit = _page_limit(params, "token_limit")
+        net = self._target(params)
+        if "filter" in params:
+            chosen: Optional[Filter] = Filters.from_wire(params["filter"], set(net.place_nodes))
+        else:
+            chosen = net.filter
+        snapshot = self._snapshot_of(net) or self._capture(net)
+        matches: list[dict] = []
+        for name, view in snapshot.places.items():
+            if chosen is not None and not chosen.covers(name):
+                continue
+            place = net.place_nodes[name]
+            for index in range(min(len(view.ids), len(view.tokens))):
+                token = view.tokens[index]
+                if chosen is not None and not chosen.keeps(place, token, net.graph.params):
+                    continue
+                if len(matches) < limit:
+                    match: dict = {"place": name, "token": view.entry(index).wire()}
+                    if net.serializable[name]:
+                        try:
+                            match["json"] = Tokens.json_value(token)
+                        except Exception:
+                            pass
+                    matches.append(match)
+                else:
+                    matches.append(None)  # counted, not listed
+        out.lines.append(Lines.result(request_id, wire.QueryResult(
+            marking_version=snapshot.marking_version, count=len(matches),
+            matches=[match for match in matches if match is not None],
+        )))
+
+    def _distinct(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
+        """``distinct`` (§13.3): the values of a key in order of first appearance."""
+        key = _string(params, "key")
+        net = self._target(params)
+        places = params.get("places")
+        if places is not None:
+            if not isinstance(places, list) or not all(isinstance(name, str) for name in places):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, '"places" is a list of place names')
+            for name in places:
+                if name not in net.place_nodes:
+                    raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {name!r}")
+        snapshot = self._snapshot_of(net)
+        if snapshot is None:
+            values = Query.distinct(net.graph, key, places)
+            version = net.marking_version
+        else:
+            from petritype.core.keys import Keys, same_value
+            values = []
+            for name, view in snapshot.places.items():
+                place = net.place_nodes[name]
+                if (places is not None and name not in places) or not place.keys or key not in place.keys:
+                    continue
+                for token in view.tokens:
+                    value = Keys.of(place, token)[key]
+                    if not any(same_value(value, known) for known in values):
+                        values.append(value)
+            version = snapshot.marking_version
+        out.lines.append(Lines.result(request_id, wire.DistinctResult(
+            marking_version=version, key=key, values=values,
+        )))
+
+    def _set_filter(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
+        """``set_filter`` (§13.4): the connection's projection of one net; without
+        ``filter`` it is cleared."""
+        net = self._target(params)
+        if "filter" in params and params["filter"] is not None:
+            net.filter = Filters.from_wire(params["filter"], set(net.place_nodes))
+        else:
+            net.filter = None
+        self._sync_visible(net)
+        out.lines.append(Lines.result(request_id, {"marking_version": net.marking_version}))
+
+    def _sync_visible(self, net: _Net, out: Optional[Outgoing] = None) -> None:
+        """Recompute the ids of the live tokens the connection's filter keeps.
+        With ``out``, announce the difference from what the connection was shown:
+        ``added`` for a token now kept that it did not have, ``removed`` for one
+        it had that is kept no more. The token events of a batch keep ``visible``
+        in step as they go, so what is left here is what no token event told of:
+        a net parameter a clause names has changed (§13.4)."""
+        if net.filter is None:
+            net.visible = set()
+            return
+        visible: dict[int, tuple[str, Any]] = {}
+        for place in net.graph.places:
+            if not net.filter.covers(place.name):
+                continue
+            ids = place.token_ids
+            for index, token in enumerate(place.tokens):
+                if index < len(ids) and net.filter.keeps(place, token, net.graph.params):
+                    visible[ids[index]] = (place.name, token)
+        if out is not None:
+            stamp = {"marking_version": net.marking_version, "running": self._loaded.running}
+            for token_id in sorted(net.visible - set(visible)):
+                found = TokenIds.locate(net.graph, token_id)
+                if found is not None:  # still live, just no longer kept
+                    self._emit(net, wire.Removed(place=found[0], id=str(token_id), **stamp), out)
+            for token_id in sorted(set(visible) - net.visible):
+                place_name, token = visible[token_id]
+                self._emit(net, self._added(net, place_name, token_id, token, stamp), out)
+        net.visible = set(visible)
 
     def _snapshot_of(self, net: _Net) -> Optional[_Snapshot]:
         flight = self._loaded.in_flight
@@ -764,6 +913,9 @@ class Owner:
             tokens=list(place.tokens),
             nested=place.name in net.nested_places,
             prefix=self._path_of(net) if place.name in net.nested_places else "",
+            place=place,
+            filter=net.filter,
+            params=dict(net.graph.params),
         )
 
     def _capture(
@@ -993,9 +1145,10 @@ class Owner:
         handover = self._handed_over(net, transition)
         net.marking_version += 1
         launched = wire.Launched(
-            transition=transition.name, consumed=_pairs(handover.consumed),
+            transition=transition.name, consumed=_pairs(self._shown(net, handover.consumed)),
             marking_version=net.marking_version, running=loaded.running,
         )
+        net.visible.difference_update(token_id for _place, token_id in handover.consumed)
         out.lines.append(self._wrap(net, launched.line()))
         snapshots = {net.nested_id: self._capture(net, airborne=transition, handover=handover)}
         held_nets: set[int] = set()
@@ -1011,6 +1164,18 @@ class Owner:
         )
         loaded.idle = False
         out.launch = Launch(transition.name, _fire(net, transition, self.generation))
+
+    def _shown(self, net: _Net, pairs: list[tuple[str, int]]) -> list[tuple[str, int]]:
+        """The ``(place, id)`` pairs of live tokens the connection's filter keeps
+        (all of them without a filter)."""
+        if net.filter is None:
+            return pairs
+        kept = []
+        for place_name, token_id in pairs:
+            token = self._live(net, place_name, token_id)
+            if token is not _MISSING and net.keeps(place_name, token):
+                kept.append((place_name, token_id))
+        return kept
 
     def _chain(self, net: _Net) -> list[tuple[_Net, str, int]]:
         """From the outer net down to the parent of ``net``: each ancestor with
@@ -1375,6 +1540,9 @@ class Owner:
                     notification.marking_version = outer.marking_version
                 out.lines.append(notification.line())
         if events:
+            for net in (outer, *touched):
+                if net.filter is not None:
+                    self._sync_visible(net, out)
             self._report_fireable(outer, out)
             for inner in touched:
                 self._report_fireable(inner, out)
@@ -1414,9 +1582,12 @@ class Owner:
         stamp = {"marking_version": version, "running": self._loaded.running}
         if isinstance(event, core_events.Fired):
             # The second piece: ``launched`` already named what it consumed.
+            produced = event.produced if net is None else self._shown(net, list(event.produced))
+            if net is not None and net.filter is not None:
+                net.visible.update(token_id for _place, token_id in produced)
             return wire.Distributed(
                 transition=event.transition,
-                produced=[self._produced(net, place, token_id) for place, token_id in event.produced],
+                produced=[self._produced(net, place, token_id) for place, token_id in produced],
                 duration_ms=event.duration_ms,
                 **stamp,
             )
@@ -1427,17 +1598,33 @@ class Owner:
             )
         if isinstance(event, core_events.Added):
             token = self._live(net, event.place, event.token_id)
-            entry = Tokens.entry(event.token_id, token, "") if token is not _MISSING else None
-            return wire.Added(
-                place=event.place, id=str(event.token_id),
-                label=entry.label if entry else "", color=entry.color if entry else None, **stamp,
-            )
+            if net is not None and net.filter is not None:
+                if token is _MISSING or not net.keeps(event.place, token):
+                    return wire.Hidden(kind="added", place=event.place, **stamp)
+                net.visible.add(event.token_id)
+            return self._added(net, event.place, event.token_id, token, stamp)
         if isinstance(event, core_events.Removed):
+            if net is not None and net.filter is not None:
+                if event.token_id not in net.visible:
+                    return wire.Hidden(kind="removed", place=event.place, **stamp)
+                net.visible.discard(event.token_id)
             return wire.Removed(place=event.place, id=str(event.token_id), **stamp)
         if isinstance(event, core_events.Mutated):
             token = self._live(net, event.place, event.token_id)
+            if net is not None and net.filter is not None:
+                kept = token is not _MISSING and net.keeps(event.place, token)
+                was_shown = event.token_id in net.visible
+                if kept and not was_shown:
+                    net.visible.add(event.token_id)
+                    return self._added(net, event.place, event.token_id, token, stamp)
+                if not kept and was_shown:
+                    net.visible.discard(event.token_id)
+                    return wire.Removed(place=event.place, id=str(event.token_id), **stamp)
+                if not kept:
+                    return wire.Hidden(kind="mutated", place=event.place, **stamp)
             label = Tokens.entry(event.token_id, token, "").label if token is not _MISSING else None
-            return wire.Mutated(place=event.place, id=str(event.token_id), label=label, **stamp)
+            keys = self._keys(net, event.place, token)
+            return wire.Mutated(place=event.place, id=str(event.token_id), label=label, keys=keys, **stamp)
         if isinstance(event, core_events.Toggled):
             return wire.Toggled(transition=event.transition, enabled=event.enabled, **stamp)
         if isinstance(event, core_events.ParamChanged):
@@ -1447,11 +1634,26 @@ class Owner:
         generation = self.generation if net is None or net.is_outer else 1
         return wire.Reloaded(generation=generation, reason="resync", **stamp)
 
-    def _produced(self, net: Optional[_Net], place: str, token_id: int) -> list[str]:
+    def _added(self, net: Optional[_Net], place: str, token_id: int, token: Any, stamp: dict) -> wire.Added:
+        entry = Tokens.entry(token_id, token, "") if token is not _MISSING else None
+        return wire.Added(
+            place=place, id=str(token_id),
+            label=entry.label if entry else "", color=entry.color if entry else None,
+            keys=self._keys(net, place, token), **stamp,
+        )
+
+    def _keys(self, net: Optional[_Net], place: str, token: Any) -> Optional[dict]:
+        """A live token's keys when its place declares some."""
+        if net is None or token is _MISSING:
+            return None
+        node = net.place_nodes.get(place)
+        return Tokens.keys(node, token) if node is not None else None
+
+    def _produced(self, net: Optional[_Net], place: str, token_id: int) -> list[Any]:
         token = self._live(net, place, token_id)
         if token is _MISSING:
             return [place, str(token_id), ""]
-        return Tokens.produced(place, token_id, token)
+        return Tokens.produced(place, token_id, token, keys=self._keys(net, place, token))
 
     def _live(self, net: Optional[_Net], place: str, token_id: int) -> Any:
         node = net.place_nodes.get(place) if net is not None else None
