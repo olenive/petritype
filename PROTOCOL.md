@@ -358,10 +358,11 @@ before it moves to `describe`.
   `set_param`) follow the same rule, answering `invalid_params`. The shared
   transcripts check it.
 - `enable` and `disable` set the switch. Both libraries have it.
-- `set_param` is optional. Python sets one keyword argument of one
-  transition (`transition` required); Rust sets a net-wide parameter by its
-  registered name (`transition` ignored). A runtime that cannot answers
-  `unsupported`.
+- `set_param` is optional. With `transition`, Python sets one keyword
+  argument of that transition; without, both runtimes set a net-wide
+  parameter by its declared name (Rust ignores `transition`; Python's net
+  parameters are `ExecutableGraph.params`, since 2026-10-09). A runtime
+  that cannot answers `unsupported`.
 
 ### 6.5 Reading one token
 
