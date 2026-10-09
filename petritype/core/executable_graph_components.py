@@ -257,6 +257,23 @@ class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
     return_index: Optional[ReturnIndex] = None
 
 
+class TakeWhereEdge(ArgumentEdgeToTransition):
+    """A consuming edge that takes the oldest token *matching a filter* rather
+    than the front token (``petritype.core.keys``, keyed edges). The transition
+    is fireable when the place holds a matching token; its firing takes that
+    token alone, leaving every other token where it is, with its id, so nothing
+    is removed and re-added around it. ``where`` is a ``Filter`` (a ``{key,
+    param}`` clause reads the net's parameters as they stand); the argument
+    receives the one token, never a list."""
+    where: Any
+
+    @model_validator(mode="after")
+    def _where_is_a_filter(self) -> "TakeWhereEdge":
+        if not callable(getattr(self.where, "keeps", None)):
+            raise TypeError("where must be a Filter (petritype.core.keys)")
+        return self
+
+
 class SnapshotEdge(PositionalArgsBaseModel):
     """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
     snapshot** of the place's tokens, so reading cannot disturb the place. Fireability requires
@@ -273,6 +290,19 @@ class MutateEdge(PositionalArgsBaseModel):
     place_node_name: PlaceNodeName
     transition_node_name: FunctionName
     argument: ArgumentName
+
+
+class MutateWhereEdge(MutateEdge):
+    """A mutate edge that hands the body the oldest token *matching a filter*,
+    live, rather than the front token (keyed edges); fireable when the place
+    holds a matching token. The argument receives the one token."""
+    where: Any
+
+    @model_validator(mode="after")
+    def _where_is_a_filter(self) -> "MutateWhereEdge":
+        if not callable(getattr(self.where, "keeps", None)):
+            raise TypeError("where must be a Filter (petritype.core.keys)")
+        return self
 
 
 class ExecutableGraph(BaseModel):
@@ -1205,6 +1235,17 @@ class MapTransitionNames:
         return read_edges
 
 
+class KeyedEdges:
+    """Functions over keyed edges (``TakeWhereEdge``, ``MutateWhereEdge``)."""
+
+    def first_kept(edge: Union[TakeWhereEdge, MutateWhereEdge], place: ListPlaceNode, params: dict) -> Optional[int]:
+        """The index of the oldest token of ``place`` the edge's filter keeps, or ``None``."""
+        for index, token in enumerate(place.tokens):
+            if edge.where.keeps(place, token, params):
+                return index
+        return None
+
+
 class ExecutableGraphCheck:
     """Functions that do not alter the executable graph."""
 
@@ -1213,21 +1254,34 @@ class ExecutableGraphCheck:
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
         place_names_to_nodes: dict[str, ListPlaceNode],
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
+        executable_graph: Optional[ExecutableGraph] = None,
     ) -> bool:
+        """Every input place non-empty, and, for a keyed edge (``TakeWhereEdge``,
+        ``MutateWhereEdge``), holding a token its filter keeps; ``executable_graph``
+        supplies the parameters a filter may name (without it a keyed edge is
+        judged by presence alone)."""
         # Transitions with no incoming edges (generators) are always ready to fire
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
             transition.name, tuple()
         )
+        params = executable_graph.params if executable_graph is not None else None
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
             if len(place.tokens) == 0:
                 return False
+            if params is not None and isinstance(edge, TakeWhereEdge):
+                if KeyedEdges.first_kept(edge, place, params) is None:
+                    return False
         # Read edges (snapshot/mutate) require presence too — there must be a token to read —
         # but firing does not consume them.
         if transition_names_to_read_edges:
             for edge in transition_names_to_read_edges.get(transition.name, ()):
-                if len(place_names_to_nodes[edge.place_node_name].tokens) == 0:
+                place = place_names_to_nodes[edge.place_node_name]
+                if len(place.tokens) == 0:
                     return False
+                if params is not None and isinstance(edge, MutateWhereEdge):
+                    if KeyedEdges.first_kept(edge, place, params) is None:
+                        return False
         return True
 
     def transition_is_fireable(
@@ -1252,6 +1306,7 @@ class ExecutableGraphCheck:
             transition_names_to_incoming_edges=transition_names_to_incoming_edges,
             place_names_to_nodes=place_names_to_nodes,
             transition_names_to_read_edges=transition_names_to_read_edges,
+            executable_graph=executable_graph,
         ):
             return False
         return transition.guard is None or bool(transition.guard(executable_graph))
@@ -1573,6 +1628,7 @@ class ExecutableGraphOperations:
         token_history_length: int = 0,
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
         firing_ids: Optional[FiringTokenIds] = None,
+        net_params: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[ArgumentName, any], Sequence[ListPlaceNode]]:
         """Remove input tokens from source places
         
@@ -1580,7 +1636,9 @@ class ExecutableGraphOperations:
 
         Token ids leave with their tokens. If ``firing_ids`` is given, the ids taken
         (per argument, in order) and the ids handed over through mutate edges are
-        recorded on it; snapshot edges touch no ids.
+        recorded on it; snapshot edges touch no ids. A keyed edge (``TakeWhereEdge``,
+        ``MutateWhereEdge``) takes or hands over the oldest token its filter keeps,
+        with ``net_params`` the parameters a clause may name.
 
         A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
         """
@@ -1596,6 +1654,20 @@ class ExecutableGraphOperations:
             input_places.append(place_copy)
             argument_type = get_type_hints(transition.function).get(edge.argument)
             place_type = place.type
+            if isinstance(edge, TakeWhereEdge):
+                # A keyed take: the oldest token the filter keeps, wherever it stands.
+                index = KeyedEdges.first_kept(edge, place, net_params if net_params is not None else {})
+                if index is None:
+                    raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
+                token = place.tokens.pop(index)
+                taken_ids = place._token_ids[index:index + 1]
+                del place._token_ids[index:index + 1]
+                if allow_token_copying and token_history_length >= 1:
+                    place_copy.tokens.append(deepcopy(token))
+                input_edge_names_to_tokens[edge.argument] = token
+                if firing_ids is not None:
+                    firing_ids.consumed[edge.argument] = (place.name, taken_ids)
+                continue
             # Two cases - passing a single token or passing all tokens as a list.
             argument_origin = get_origin(argument_type)
             if argument_origin is list and CompareTypes.between_annotations_where_one_maybe_in_list(
@@ -1628,6 +1700,15 @@ class ExecutableGraphOperations:
         for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
+            if isinstance(edge, MutateWhereEdge):
+                # A keyed mutate: the oldest token the filter keeps, live.
+                index = KeyedEdges.first_kept(edge, place, net_params if net_params is not None else {})
+                if index is None:
+                    raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
+                if firing_ids is not None and index < len(place._token_ids):
+                    firing_ids.mutated.append((place.name, place._token_ids[index]))
+                input_edge_names_to_tokens[edge.argument] = place.tokens[index]
+                continue
             if get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
                 annotation_not_in_list=place.type,
                 annotation_maybe_in_list=argument_type,
@@ -1672,8 +1753,8 @@ class ExecutableGraphOperations:
                 continue
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
-            # Mirror the two extraction cases of stage 1.
-            if get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
+            # Mirror the extraction cases of stage 1 (a keyed take goes back to the front).
+            if not isinstance(edge, TakeWhereEdge) and get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
                 annotation_not_in_list=place.type,
                 annotation_maybe_in_list=argument_type,
             ):  # All tokens were extracted as a list.
@@ -2080,6 +2161,7 @@ class ExecutableGraphOperations:
             token_history_length=token_history_length,
             transition_names_to_read_edges=transition_names_to_read_edges,
             firing_ids=firing_ids,
+            net_params=executable_graph.params,
         )
         # Mark the chosen transition as running while its body executes, as the
         # concurrent runner does, so an observer on another thread (a heartbeat

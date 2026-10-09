@@ -165,10 +165,13 @@ class TestQueries:
         assert answer(graph, Filter.where(class_="Bird")) == [("Wetland", "Robin"), ("Wetland", "Heron"), ("Wetland", "Robin")]
         assert graph.place_named("Wetland").tokens[2].destination is None
         fired = [e for e in graph.drain_events() if isinstance(e, Fired)]
-        # Take-all and put back: the fox left and came back with a new id (the cost keyed edges remove).
-        assert [p for p, _ in fired[0].consumed] == ["Forest", "Forest"]
-        assert [p for p, _ in fired[0].produced] == ["Forest", "Migrating"]
+        # The keyed edge moves the robin alone: one token consumed and one produced per firing,
+        # the fox untouched (section 6: one Removed, one Added, one Removed, one Added).
+        assert [p for p, _ in fired[0].consumed] == ["Forest"]
+        assert [p for p, _ in fired[0].produced] == ["Migrating"]
+        assert [p for p, _ in fired[1].consumed] == ["Migrating"]
         assert [p for p, _ in fired[1].produced] == ["Wetland"]
+        assert graph.place_named("Forest").token_ids == (2,), "the fox kept its id"
 
     def test_the_whole_run_to_quiet_also_settles(self):
         graph = build_wildlife()

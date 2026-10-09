@@ -18,7 +18,7 @@ from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_a
 from pydantic import BaseModel, TypeAdapter
 
 from petritype.core import serialisation as _serialisation
-from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode
+from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode, MutateWhereEdge, TakeWhereEdge
 from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
 from petritype.runner.protocol import ErrorCode, ProtocolError
@@ -315,6 +315,12 @@ class Topologies:
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
         for edge in graph.argument_edges:
+            if isinstance(edge, TakeWhereEdge):
+                edges.append(wire.Edge(
+                    place=edge.place_node_name, transition=edge.transition_node_name,
+                    direction="in", kind="take_where", filter=Filters.to_wire(edge.where),
+                ))
+                continue
             takes_all = Topologies.takes_all(
                 functions[edge.transition_node_name], edge.argument, places[edge.place_node_name]
             )
@@ -328,6 +334,12 @@ class Topologies:
                 direction="in", kind="snapshot",
             ))
         for edge in graph.mutate_edges:
+            if isinstance(edge, MutateWhereEdge):
+                edges.append(wire.Edge(
+                    place=edge.place_node_name, transition=edge.transition_node_name,
+                    direction="in", kind="mutate_where", filter=Filters.to_wire(edge.where),
+                ))
+                continue
             edges.append(wire.Edge(
                 place=edge.place_node_name, transition=edge.transition_node_name,
                 direction="in", kind="mutate",

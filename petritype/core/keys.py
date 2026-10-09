@@ -9,6 +9,12 @@ from the value, so a token mutated in place has new keys the next time they are
 read; there is no index to keep in step (Python's tokens are plain objects in
 plain lists, and a query over a net of this size costs a scan).
 
+A ``Filter`` is also what a *keyed edge* carries (R5): ``TakeWhereEdge(place,
+transition, argument, where=Filter.where(class_="Bird"))`` consumes the oldest
+matching token rather than the front one, and ``MutateWhereEdge`` hands the
+oldest matching token to the body live; every other token stays where it is,
+with its id. Both are re-exported here from the engine module.
+
 A ``Filter`` is what a query, a viewer and a projection (PROTOCOL.md §13) share:
 clauses ANDed together, each accepting one of a set of values for a key (OR
 within the clause) or the current value of a net parameter; and a restriction to
@@ -22,7 +28,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
-from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode, TokenIds
+from petritype.core.executable_graph_components import (
+    ExecutableGraph, ListPlaceNode, MutateWhereEdge, TakeWhereEdge, TokenIds,
+)
+
+__all__ = [
+    "KeyValue", "Keys", "Clause", "Filter", "Match", "Query", "TakeWhereEdge", "MutateWhereEdge",
+    "is_key_value", "same_value",
+]
 
 KeyValue = Union[str, int, bool]
 KEY_TYPES = (str, int, bool)

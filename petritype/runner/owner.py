@@ -96,10 +96,13 @@ from petritype.core.executable_graph_components import (
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
+    KeyedEdges,
     ListPlaceNode,
     MapPlaceNames,
     MapTransitionNames,
+    MutateWhereEdge,
     NestedNets,
+    TakeWhereEdge,
     TokenIds,
     TransitionFailedError,
     default_transition_selector,
@@ -313,6 +316,9 @@ class _Handover:
     consumed: list[tuple[str, int]]
     taken: dict[str, int]
     mutated: dict[str, set[int]]
+    # Per place, the indices (in the place as it stands) a keyed take removes, which
+    # need not be at the front.
+    keyed_taken: dict[str, list[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -948,7 +954,14 @@ class Owner:
                 view = places[place_name]
                 view.ids, view.tokens = view.ids[count:], view.tokens[count:]
                 view.eager = {index - count: entry for index, entry in view.eager.items() if index >= count}
-            transitions = self._states_without(net, handover.taken)
+            for place_name, indices in handover.keyed_taken.items():
+                view = places[place_name]
+                gone = set(indices)
+                view.ids = [token_id for index, token_id in enumerate(view.ids) if index not in gone]
+                view.tokens = [token for index, token in enumerate(view.tokens) if index not in gone]
+                view.eager = {}
+                view._kept = None
+            transitions = self._states_without(net, handover)
             transitions[airborne.name] = transitions[airborne.name].model_copy(
                 update={"in_flight": True, "fireable": False}
             )
@@ -972,9 +985,17 @@ class Owner:
         (or all of them) where they are."""
         consumed: list[tuple[str, int]] = []
         taken: dict[str, int] = {}
+        keyed_taken: dict[str, list[int]] = {}  # per place, the indices a keyed take removes
+        params = net.graph.params
         for edge in net.incoming.get(transition.name, ()):
             place = net.place_nodes[edge.place_node_name]
             ids = place.token_ids
+            if isinstance(edge, TakeWhereEdge):
+                index = KeyedEdges.first_kept(edge, place, params)
+                if index is not None:
+                    consumed.append((place.name, ids[index]))
+                    keyed_taken.setdefault(place.name, []).append(index)
+                continue
             start = taken.get(place.name, 0)
             takes_all = Topologies.takes_all(transition.function, edge.argument, place)
             end = len(ids) if takes_all else min(start + 1, len(ids))
@@ -985,12 +1006,17 @@ class Owner:
             if edge.transition_node_name != transition.name:
                 continue
             place = net.place_nodes[edge.place_node_name]
+            if isinstance(edge, MutateWhereEdge):
+                index = KeyedEdges.first_kept(edge, place, params)
+                if index is not None:
+                    mutated.setdefault(place.name, set()).add(index)
+                continue
             count = len(place.token_ids)
             start = taken.get(place.name, 0)
             takes_all = Topologies.takes_all(transition.function, edge.argument, place)
             end = count if takes_all else min(start + 1, count)
             mutated.setdefault(place.name, set()).update(range(start, end))
-        return _Handover(consumed=consumed, taken=taken, mutated=mutated)
+        return _Handover(consumed=consumed, taken=taken, mutated=mutated, keyed_taken=keyed_taken)
 
     def _held(self, net: _Net, handover: _Handover) -> tuple[set[int], set[tuple[str, int]]]:
         """The inner nets (at any depth) and the tokens an outer firing takes or
@@ -1011,25 +1037,27 @@ class Owner:
                 nets.update(_nets_within(place.tokens[ids.index(token_id)]))
         return nets, tokens
 
-    def _states_without(self, net: _Net, taken: dict[str, int]) -> dict[str, wire.TransitionState]:
-        """The transition states of the marking with ``taken`` tokens gone from
-        the front of their places: the marking the body runs against. The live
-        lists are cut and put back in place (nothing else runs on them meanwhile,
-        as the body has not started), so guards and priorities see exactly what
-        they will see once stage 1 has run."""
-        removed = []
+    def _states_without(self, net: _Net, handover: _Handover) -> dict[str, wire.TransitionState]:
+        """The transition states of the marking with the tokens the firing takes
+        gone from their places (from the front, or wherever a keyed take finds
+        them): the marking the body runs against. The live lists are cut and put
+        back in place (nothing else runs on them meanwhile, as the body has not
+        started), so guards and priorities see exactly what they will see once
+        stage 1 has run."""
+        saved = []
         try:
-            for place_name, count in taken.items():
+            for place_name in set(handover.taken) | set(handover.keyed_taken):
                 place = net.place_nodes[place_name]
-                tokens, ids = place.tokens[:count], place._token_ids[:count]
-                del place.tokens[:count]
-                del place._token_ids[:count]
-                removed.append((place, tokens, ids))
+                saved.append((place, list(place.tokens), list(place._token_ids)))
+                count = handover.taken.get(place_name, 0)
+                gone = set(range(count)) | set(handover.keyed_taken.get(place_name, ()))
+                place.tokens = [token for index, token in enumerate(place.tokens) if index not in gone]
+                place._token_ids = [token_id for index, token_id in enumerate(place._token_ids) if index not in gone]
             return self._transition_states(net)
         finally:
-            for place, tokens, ids in removed:
-                place.tokens[:0] = tokens
-                place._token_ids[:0] = ids
+            for place, tokens, ids in saved:
+                place.tokens = tokens
+                place._token_ids = ids
 
     # --- transition states and selection ---
 

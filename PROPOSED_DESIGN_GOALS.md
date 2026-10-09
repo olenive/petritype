@@ -525,5 +525,20 @@ on `ListPlaceNode`, `examples/wildlife.py`, `tests/test_token_keys.py` (17).
 
 `DESIGN_RUNNER.md`, "As built, 2026-10-09: keys, queries and the connection's projection",
 and PROTOCOL.md §13: keys on the wire, `query`, `distinct`, `set_filter`, `hidden`, the
-`wildlife` conformance net and transcript `06_keys_query_filter.json`. Phases 3 and 4 (keyed
-edges; the visualiser) follow.
+`wildlife` conformance net and transcript `06_keys_query_filter.json`.
+
+## As built, 2026-10-09 (phase 3: keyed input edges)
+
+`TakeWhereEdge(place, transition, argument, where=Filter)` and `MutateWhereEdge(...)`,
+subclasses of `ArgumentEdgeToTransition` and `MutateEdge` (so `construct_graph`, the edge
+validators and the adjacency maps take them as they are), re-exported from
+`petritype.core.keys`. A transition with one is fireable when the place holds a token the
+filter keeps (`KeyedEdges.first_kept`; the filter's `{key, param}` clauses read the net's
+parameters); its firing takes, or hands over live, the oldest such token and nothing else,
+so the other tokens are never removed and re-added and keep their ids. The argument receives
+the one token, never a list. A failed firing restores a keyed take to the front of its place
+(best effort, like a plain take). On the wire the edge is `take_where` / `mutate_where` with
+its `filter` (§13.5); the runner's `launched.consumed` names the token actually taken, and
+its snapshot leaves that token out wherever it stood. `Migrate` in `examples/wildlife.py`
+is now one keyed edge; section 6's "only events" (one token out, one in, per firing, the fox
+untouched) is `tests/test_keyed_edges.py`. Phase 4 (the visualiser) follows.

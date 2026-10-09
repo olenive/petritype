@@ -162,7 +162,17 @@
           "place": "Forest",
           "transition": "Migrate Forest Wetland",
           "direction": "in",
-          "kind": "take_all"
+          "kind": "take_where",
+          "filter": {
+           "clauses": [
+            {
+             "key": "class",
+             "values": [
+              "Bird"
+             ]
+            }
+           ]
+          }
          },
          {
           "place": "Migrating",
@@ -183,16 +193,9 @@
           "kind": "mutate"
          },
          {
-          "place": "Forest",
-          "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 0
-         },
-         {
           "place": "Migrating",
           "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 1
+          "direction": "out"
          },
          {
           "place": "Forest",
@@ -1051,7 +1054,17 @@
           "place": "Forest",
           "transition": "Migrate Forest Wetland",
           "direction": "in",
-          "kind": "take_all"
+          "kind": "take_where",
+          "filter": {
+           "clauses": [
+            {
+             "key": "class",
+             "values": [
+              "Bird"
+             ]
+            }
+           ]
+          }
          },
          {
           "place": "Migrating",
@@ -1072,16 +1085,9 @@
           "kind": "mutate"
          },
          {
-          "place": "Forest",
-          "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 0
-         },
-         {
           "place": "Migrating",
           "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 1
+          "direction": "out"
          },
          {
           "place": "Forest",
@@ -1841,7 +1847,17 @@
           "place": "Forest",
           "transition": "Migrate Forest Wetland",
           "direction": "in",
-          "kind": "take_all"
+          "kind": "take_where",
+          "filter": {
+           "clauses": [
+            {
+             "key": "class",
+             "values": [
+              "Bird"
+             ]
+            }
+           ]
+          }
          },
          {
           "place": "Migrating",
@@ -1862,16 +1878,9 @@
           "kind": "mutate"
          },
          {
-          "place": "Forest",
-          "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 0
-         },
-         {
           "place": "Migrating",
           "transition": "Migrate Forest Wetland",
-          "direction": "out",
-          "slot": 1
+          "direction": "out"
          },
          {
           "place": "Forest",
@@ -1938,7 +1947,7 @@
          "count": 3,
          "tokens": [
           {
-           "id": "<id>",
+           "id": "<id:fox>",
            "label": "<label>",
            "keys": {
             "species": "Fox",
@@ -2037,39 +2046,9 @@
        [
         "Forest",
         "<id>"
-       ],
-       [
-        "Forest",
-        "<id>"
-       ],
-       [
-        "Forest",
-        "<id>"
        ]
       ],
       "produced": [
-       [
-        "Forest",
-        "<id>",
-        "<label>",
-        null,
-        {
-         "species": "Fox",
-         "class": "Mammal",
-         "diet": "Omnivore"
-        }
-       ],
-       [
-        "Forest",
-        "<id>",
-        "<label>",
-        null,
-        {
-         "species": "Gecko",
-         "class": "Reptile",
-         "diet": "Insectivore"
-        }
-       ],
        [
         "Migrating",
         "<id>",

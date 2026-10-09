@@ -248,7 +248,7 @@ Query.matches(graph, Filter.where(class_="Mammal").in_places("Tundra"))  # AND a
 Query.distinct(graph, "class")                                           # ['Bird', 'Mammal', ...]
 ```
 
-Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`). `examples/wildlife.py` is the worked example.
+Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live), instead of taking a whole place out and putting the rest back. `examples/wildlife.py` is the worked example.
 
 ### Decorator for registration
 

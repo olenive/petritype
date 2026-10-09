@@ -4,7 +4,8 @@ The example of ``TOKEN_QUERYING_AND_FILTERING.md`` §2, and the conformance net
 ``wildlife`` of PROTOCOL.md §11. Places are habitats; a token is one species
 occurring in one habitat, and carries its own category (``class``), so "all
 birds" is a question about keys the tokens carry, never something derived from
-names. Every place declares the keys ``species``, ``class`` and ``diet``.
+names. Every place declares the keys ``species``, ``class`` and ``diet``, and
+``Migrate`` consumes through a keyed edge: the oldest bird, wherever it stands.
 
 Run it to see the five filters of the design document answered on the seed::
 
@@ -27,7 +28,7 @@ from petritype.core.executable_graph_components import (
     MutateEdge,
     ReturnedEdgeFromTransition,
 )
-from petritype.core.keys import Filter, Query
+from petritype.core.keys import Filter, Query, TakeWhereEdge
 
 HABITATS = ("Forest", "Wetland", "Savanna", "Reef", "Tundra")
 Class = Literal["Bird", "Mammal", "Reptile", "Fish"]
@@ -57,14 +58,11 @@ KEYS = {
 # --- bodies ---------------------------------------------------------------------------------
 
 
-def migrate(species: list[Species]) -> tuple[list[Species], list[Species]]:
-    """Until keyed edges: take every token of the habitat, send the oldest bird
-    on its way, put the others back (slot 0 stays, slot 1 migrates)."""
-    for index, candidate in enumerate(species):
-        if candidate.class_ == "Bird":
-            candidate.destination = "Wetland"
-            return species[:index] + species[index + 1:], [candidate]
-    return species, []
+def migrate(species: Species) -> Species:
+    """The keyed edge hands over the oldest bird of the habitat and nothing else;
+    the other tokens stay where they are, with their ids."""
+    species.destination = "Wetland"
+    return species
 
 
 def settle(species: Species) -> Species:
@@ -96,8 +94,8 @@ def _front(graph: ExecutableGraph, place: str) -> Species:
     return graph.place_named(place).tokens[0]
 
 
-def autumn_and_a_bird_in_forest(graph: ExecutableGraph) -> bool:
-    return graph.params["season"] == "Autumn" and any(s.class_ == "Bird" for s in graph.place_named("Forest").tokens)
+def autumn(graph: ExecutableGraph) -> bool:
+    return graph.params["season"] == "Autumn"
 
 
 def savanna_front_above_threshold(graph: ExecutableGraph) -> bool:
@@ -128,10 +126,9 @@ def build_wildlife(record_events: bool = True) -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
         *[ListPlaceNode(habitat, Species, tokens[habitat], keys=KEYS) for habitat in HABITATS],
         ListPlaceNode("Migrating", Species, keys=KEYS),
-        FunctionTransitionNode("Migrate Forest Wetland", migrate, guard=autumn_and_a_bird_in_forest),
-        ArgumentEdgeToTransition("Forest", "Migrate Forest Wetland", "species"),
-        ReturnedEdgeFromTransition("Migrate Forest Wetland", "Forest", 0),
-        ReturnedEdgeFromTransition("Migrate Forest Wetland", "Migrating", 1),
+        FunctionTransitionNode("Migrate Forest Wetland", migrate, guard=autumn),
+        TakeWhereEdge("Forest", "Migrate Forest Wetland", "species", where=Filter.where(class_="Bird")),
+        ReturnedEdgeFromTransition("Migrate Forest Wetland", "Migrating"),
         FunctionTransitionNode("Settle", settle, output_distribution_function=route_settlement),
         ArgumentEdgeToTransition("Migrating", "Settle", "species"),
         *[ReturnedEdgeFromTransition("Settle", habitat) for habitat in HABITATS],
