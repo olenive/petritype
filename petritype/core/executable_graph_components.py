@@ -1028,6 +1028,36 @@ class NestedNets:
         """``NetParams.set`` on an inner net."""
         NetParams.set(inner, name, value)
 
+    def holds_nets(token: Any) -> bool:
+        """Whether ``token`` is a net or implements the nested-nets protocol."""
+        return callable(getattr(token, NESTED_NETS_METHOD, None))
+
+    def summary(token: Any, maximum_length: int = 100) -> str:
+        """A one-line summary of a nested token for a label: its own fields, with
+        each inner net reduced to its name and token count (``Vehicle(name='Bus
+        1', kind='Bus', destination=None) ⊂ cabin: 3``), so a renderer can mark
+        a token that contains a net without printing the net. A token that is a
+        net itself reads ``net: 3``. Cut at ``maximum_length`` with ``...``."""
+        nets = NestedNets.of(token)
+        counts = ", ".join(
+            f"{name or 'net'}: {sum(len(place.tokens) for place in inner.places)}" for name, inner in nets.items()
+        )
+        if isinstance(token, ExecutableGraph):
+            text = counts
+        else:
+            if isinstance(token, BaseModel):
+                fields = ", ".join(
+                    f"{name}={value!r}" for name, value in token
+                    if not isinstance(value, ExecutableGraph)
+                )
+                own = f"{type(token).__name__}({fields})"
+            else:
+                own = type(token).__name__
+            text = f"{own} \u2282 {counts}"
+        if len(text) > maximum_length:
+            text = text[:maximum_length] + "..."
+        return text
+
     def fork(token: Any) -> Any:
         """A copy of a nested token whose inner nets are new nets: a deep copy,
         which gives every graph in it its own ``net_id`` (same markings,

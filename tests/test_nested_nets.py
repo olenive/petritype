@@ -464,6 +464,32 @@ class TestObservability:
         assert shelf.drain_events() == []
 
 
+# --- the visualiser: marking tokens that hold nets ------------------------------------------
+
+
+class TestSummary:
+
+    def test_a_nested_token_is_summarised_by_its_fields_and_inner_counts(self):
+        city = build_city()
+        bus = tokens(city, "Depot")[0]
+        NestedNets.put(bus.cabin, "Door", ["Ada", "Bram"])
+        assert NestedNets.summary(bus) == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 2"
+        assert NestedNets.summary(bus, maximum_length=20) == "Vehicle(name='Bus 1'..."
+        assert NestedNets.summary(build_counter([1, 2])) == "net: 2"
+        assert NestedNets.summary(Crate(left=build_counter([1]), right=build_counter([]))) == "Crate() \u2282 left: 1, right: 0"
+        assert NestedNets.holds_nets(bus) and not NestedNets.holds_nets("Ada")
+
+    def test_the_graphviz_label_marks_nested_tokens(self):
+        pytest.importorskip("rustworkx")
+        from petritype.plotting.rustworkx_to_graphviz import NodeLabel
+        city = build_city()
+        bus = tokens(city, "Depot")[0]
+        label = NodeLabel.default_place(city.place_named("Depot"))
+        assert label.splitlines()[2] == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 0"
+        assert NodeLabel.default_token_summariser("Ada") == "Ada"
+        assert NodeLabel.inner_nets(bus) == {"cabin": bus.cabin}
+
+
 # --- R10: depth two ---------------------------------------------------------------------
 
 

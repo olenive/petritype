@@ -466,5 +466,16 @@ import the marking" is what `NetJson.restore(NetJson.save(net))` does when a cop
 share Python objects at all.
 
 Tests: `tests/test_nested_serialisation.py` (20), including step 6 of the acceptance script
-through JSON text at both save points. Phases 3 and 4 (the protocol runner; the visualiser)
-follow.
+through JSON text at both save points.
+
+## As built, 2026-10-09 (phases 3 and 4: the protocol runner; the visualiser)
+
+The runner is `DESIGN_RUNNER.md`, "As built, 2026-10-09: nested nets", and the wire form
+PROTOCOL.md §12. The visualiser: `NodeLabel.default_token_summariser`
+(`petritype/plotting/rustworkx_to_graphviz.py`) marks a token that holds nets by printing
+its own fields and each inner net's name and token count in place of the net
+(`NestedNets.summary`: `Vehicle(name='Bus 1', kind='Bus', destination=None) ⊂ cabin: 3`),
+so a place of vehicles reads at a glance and the label never embeds a whole net. A descend
+view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
+is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
+so a notebook draws the city and, beside it, the cabin of the vehicle it is following.

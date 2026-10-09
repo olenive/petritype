@@ -8,7 +8,9 @@ from rustworkx import NodeIndices, PyDiGraph
 from petritype.core.data_structures import (
     FunctionFullName, FunctionWithAnnotations, NodeIndex, TypeName, TypeRelationship, TypeVariableWithAnnotations
 )
-from petritype.core.executable_graph_components import ExecutableGraph, FunctionTransitionNode, ListPlaceNode
+from petritype.core.executable_graph_components import (
+    ExecutableGraph, FunctionTransitionNode, ListPlaceNode, NestedNets,
+)
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
@@ -26,10 +28,21 @@ type FunctionNamesToNodeIndices = dict[FunctionFullName, int]
 class NodeLabel:
 
     def default_token_summariser(token: any, maximum_length=100) -> str:
+        """One line per token in a place's label. A token that holds nets is
+        marked as such, with each inner net's name and token count in place of
+        the net itself (``NestedNets.summary``); any other token is ``str``, cut."""
+        if NestedNets.holds_nets(token):
+            return NestedNets.summary(token, maximum_length)
         token_info = str(token)
         if len(token_info) > maximum_length:
             token_info = token_info[:maximum_length] + "..."
         return token_info
+
+    def inner_nets(token: any) -> dict[str, ExecutableGraph]:
+        """The nets a token holds, by name, for a descend view: each is an
+        ``ExecutableGraph`` that ``RustworkxGraph.from_executable_graph`` renders
+        like any other net."""
+        return NestedNets.of(token)
 
     def default_place(node: ListPlaceNode, token_summariser=default_token_summariser) -> str:
         label = f"{node.name}\n({node.type.__name__})"
