@@ -98,12 +98,30 @@ class ListPlaceNode(PositionalArgsBaseModel):
     is checked when tokens are seeded, deposited or injected. The engine then runs
     the inner nets as part of running the outer one, unless the place is also
     ``passive``, in which case they fire only when an outer body steps them.
+
+    ``keys`` declares the keys the place derives from each token
+    (``petritype.core.keys``): a dict of key name to extractor, or a sequence of
+    attribute names (each read with ``getattr``). Given as a sequence it is
+    stored as the dict. Key values are strings, integers or booleans; what a
+    query filters on and what the wire carries as a token's ``keys``.
     """
     name: PlaceNodeName
     type: Any  # Temporarily accept any value  
     tokens: list[Any] = []
     nested: bool = False
     passive: bool = False
+    keys: Optional[dict[str, Callable[[Any], Any]]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keys_as_extractors(cls, values):
+        """A sequence of attribute names becomes a dict of ``getattr`` extractors."""
+        if isinstance(values, dict) and values.get("keys") is not None and not isinstance(values["keys"], dict):
+            names = values["keys"]
+            if isinstance(names, str) or not all(isinstance(name, str) for name in names):
+                raise TypeError("keys is a dict of name to extractor, or a sequence of attribute names")
+            values = {**values, "keys": {name: _attribute(name) for name in names}}
+        return values
     # TODO: Add validation to check that type matches tokens
     # Stable ids of the tokens, parallel to ``tokens`` (same length, same order). Assigned
     # by the graph that holds the place (``TokenIds``); empty until then. Private so that
@@ -161,7 +179,18 @@ class ListPlaceNode(PositionalArgsBaseModel):
         return self
 
     def copy_sans_tokens(self) -> "ListPlaceNode":
-        return ListPlaceNode(self.name, self.type, nested=self.nested, passive=self.passive)
+        return ListPlaceNode(self.name, self.type, nested=self.nested, passive=self.passive, keys=self.keys)
+
+    @property
+    def key_names(self) -> tuple[str, ...]:
+        return tuple(self.keys) if self.keys else ()
+
+
+def _attribute(name: str) -> Callable[[Any], Any]:
+    def extract(token: Any) -> Any:
+        return getattr(token, name)
+    extract.__name__ = f"attribute_{name}"
+    return extract
 
 
 # An alias to ListPlaceNode just called PlaceNode.

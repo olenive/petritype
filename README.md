@@ -234,6 +234,22 @@ A renderer marks a token that holds nets with its inner nets' names and token co
 
 Any net whose places all have a JSON form (pydantic models, scalars, nets) can be **saved and loaded**: `graph.export_marking()` / `graph.import_marking(...)` for the marking alone, `NetJson.save(graph)` / `NetJson.restore(saved)` for the whole net (`{template, marking, params, enabled}`), rebuilt through a template registered with `@Templates.template("Cabin")`. A nested token's JSON form carries its inner nets in that saved form, so a vehicle can be written to disk, injected over the protocol and restored, cabin and all.
 
+### Token keys and queries
+
+A place can declare **keys**, named attributes derived from each token, and a net can then be asked for the tokens matching a filter, with their places, ids, keys and values:
+
+```python
+from petritype.core.keys import Filter, Query
+
+ListPlaceNode("Forest", Species, [...], keys={"species": lambda s: s.name, "class": lambda s: s.class_})
+
+Query.matches(graph, Filter.where(class_="Bird"))                       # every bird, place by place
+Query.matches(graph, Filter.where(class_="Mammal").in_places("Tundra"))  # AND across keys, OR within
+Query.distinct(graph, "class")                                           # ['Bird', 'Mammal', ...]
+```
+
+Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`). `examples/wildlife.py` is the worked example.
+
 ### Decorator for registration
 
 Mark functions as Petri net factories with execution mode metadata, useful for discovery and orchestration tooling.

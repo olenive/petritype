@@ -479,3 +479,45 @@ so a place of vehicles reads at a glance and the label never embeds a whole net.
 view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
 is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
 so a notebook draws the city and, beside it, the cabin of the vehicle it is following.
+
+---
+
+# Token keys, queries and filters
+
+Decided and built 2026-10-09 from `Cyberpunk2020-Simulation/dev-docs/TOKEN_QUERYING_AND_FILTERING.md`
+(the consumer's proposal; its "As built (Python)" section records what differs). The wire
+side is PROTOCOL.md §13. Tokens carry *keys*, named attributes a place derives from each
+token's value; one mechanism then gives queries, viewer filtering, projections and (phase 3)
+keyed input edges.
+
+## The model
+
+- **Keys (R1).** `ListPlaceNode(..., keys={"species": lambda s: s.name, "class": lambda s:
+  s.class_})`, or `keys=("name", "diet")` for attribute names; `place.key_names` is the
+  declaration order. A key value is a string, an integer or a boolean, and `1` is not `True`
+  (`same_value` compares type and value). Keys are derived on demand (`Keys.of(place,
+  token)`), so a token mutated in place has new keys the next time they are read.
+- **No index.** The design asks for an index per key and value kept in step on `Added`,
+  `Removed` and `Mutated`. Not built: Python's tokens are plain objects in plain lists, moved
+  by the engine at several points, and a query over a net of this library's size costs a
+  scan; an index is a later optimisation if profiling asks for one, behind the same
+  `Query` functions.
+- **Filters (R2).** `Filter(clauses, places?, prefix?)`, a `Clause(key, values)` ORing its
+  values or `Clause(key, param=name)` accepting the net parameter's current value; AND across
+  clauses; `Filter.where(class_="Bird", diet=[...])` as the short spelling (a trailing
+  underscore is dropped, so Python keywords can name keys). A place that declares no keys
+  matches no clause; no clauses and no restriction keeps everything.
+- **Queries (R2).** `Query.matches(graph, filter)` in place order then token order, each a
+  `Match(place, token_id, keys, token)`; `Query.distinct(graph, key, places?)` in order of
+  first appearance; `Query.count` and `Query.first` for a place.
+- `examples/wildlife.py` is the design's §2 net: habitats as places, `Species` tokens with
+  `class` as a key they carry (the field is `class_`, aliased `class` on the wire), `Migrate`
+  as take-all-and-put-back until keyed edges land, `Settle` routing by destination, `Spread`
+  and `Decline` through mutate edges. Its five questions and section 6's answers are
+  `tests/test_token_keys.py`.
+
+## As built, 2026-10-09 (phase 1: core)
+
+`petritype/core/keys.py` (`Keys`, `Clause`, `Filter`, `Match`, `Query`), the `keys` field
+on `ListPlaceNode`, `examples/wildlife.py`, `tests/test_token_keys.py` (17). Phases 2 to 4
+(the protocol; keyed edges; the visualiser) follow.
