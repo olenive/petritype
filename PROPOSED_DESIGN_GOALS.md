@@ -478,7 +478,9 @@ its own fields and each inner net's name and token count in place of the net
 so a place of vehicles reads at a glance and the label never embeds a whole net. A descend
 view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
 is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
-so a notebook draws the city and, beside it, the cabin of the vehicle it is following.
+so a notebook draws the city and, beside it, the cabin of the vehicle it is following:
+`examples/transit_journey.py` does exactly that, stepping the acceptance script (13 firings,
+pinned by `tests/test_notebooks.py`).
 
 ---
 
@@ -551,4 +553,6 @@ untouched) is `tests/test_keyed_edges.py`.
 it keeps, its header reads `matching / count` and a last line says `(n hidden by filter)`, so
 a hidden token is never mistaken for an absent one (the design's R4 rule for the Bevy viewer,
 applied to the Graphviz renderer). The tabs and the filter bar of R4 are the Bevy viewer's;
-a notebook builds its own controls from `Query.distinct`.
+a notebook builds its own controls from `Query.distinct`: `examples/wildlife_filter.py`,
+one tab per `class` and per `diet`, a season switch that lets the keyed-edge migration fire,
+and the same question asked of the net as a `Query.matches` table.

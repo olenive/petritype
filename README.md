@@ -368,6 +368,8 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
 - **ML Training** — multi-step model training pipeline with evaluation and retraining loops
 - **Time Series** — statistical processing of time series data
+- **Transit** (`examples/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, stepped through the acceptance script with the followed bus's cabin drawn beside the city
+- **Wildlife** (`examples/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 
 The notebooks live in the repository — they are not part of the pip package — so
 run them from a clone:
