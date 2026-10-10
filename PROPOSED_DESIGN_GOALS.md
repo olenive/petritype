@@ -406,7 +406,7 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 
 ## What differs from the design document, and why
 
-- The cabin of the transit example (`examples/transit.py`) does not re-seat passengers who
+- The cabin of the transit example (`examples/tokens_as_nets/transit.py`) does not re-seat passengers who
   came to the door to leave: `Sit` and `Stand` wait while an announcement stands, and the
   announcement is cleared once nobody is aboard at all. Built as the document words it
   (`Sit` guarded by seats alone, cleared once nobody is seated or standing), the net
@@ -425,7 +425,7 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 checks, the descent in `fire_one_transition`, sinks), `petritype/core/events.py`
 (`Nested`; `ParamChanged.transition` may be `None`), `petritype/core/nested.py` (the short
 import), `petritype/runtime.py` (`SetNetParam`, nested checks on commands, the inner turn in
-concurrent mode), `examples/transit.py` (the design's §2 net, its acceptance script as
+concurrent mode), `examples/tokens_as_nets/transit.py` (the design's §2 net, its acceptance script as
 `main`), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests, depth two included).
 
 ## As built, 2026-10-09 (phase 2: saving and templates)
@@ -479,7 +479,7 @@ so a place of vehicles reads at a glance and the label never embeds a whole net.
 view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
 is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
 so a notebook draws the city and, beside it, the cabin of the vehicle it is following:
-`examples/transit_journey.py` does exactly that, stepping the acceptance script (13 firings,
+`examples/tokens_as_nets/transit_journey.py` does exactly that, stepping the acceptance script (13 firings,
 pinned by `tests/test_notebooks.py`).
 
 ---
@@ -512,7 +512,7 @@ keyed input edges.
 - **Queries (R2).** `Query.matches(graph, filter)` in place order then token order, each a
   `Match(place, token_id, keys, token)`; `Query.distinct(graph, key, places?)` in order of
   first appearance; `Query.count` and `Query.first` for a place.
-- `examples/wildlife.py` is the design's §2 net: habitats as places, `Species` tokens with
+- `examples/token_view_filtering/wildlife.py` is the design's §2 net: habitats as places, `Species` tokens with
   `class` as a key they carry (the field is `class_`, aliased `class` on the wire), `Migrate`
   as take-all-and-put-back until keyed edges land, `Settle` routing by destination, `Spread`
   and `Decline` through mutate edges. Its five questions and section 6's answers are
@@ -521,7 +521,7 @@ keyed input edges.
 ## As built, 2026-10-09 (phase 1: core)
 
 `petritype/core/keys.py` (`Keys`, `Clause`, `Filter`, `Match`, `Query`), the `keys` field
-on `ListPlaceNode`, `examples/wildlife.py`, `tests/test_token_keys.py` (17).
+on `ListPlaceNode`, `examples/token_view_filtering/wildlife.py`, `tests/test_token_keys.py` (17).
 
 ## As built, 2026-10-09 (phase 2: the protocol)
 
@@ -541,7 +541,7 @@ so the other tokens are never removed and re-added and keep their ids. The argum
 the one token, never a list. A failed firing restores a keyed take to the front of its place
 (best effort, like a plain take). On the wire the edge is `take_where` / `mutate_where` with
 its `filter` (§13.5); the runner's `launched.consumed` names the token actually taken, and
-its snapshot leaves that token out wherever it stood. `Migrate` in `examples/wildlife.py`
+its snapshot leaves that token out wherever it stood. `Migrate` in `examples/token_view_filtering/wildlife.py`
 is now one keyed edge; section 6's "only events" (one token out, one in, per firing, the fox
 untouched) is `tests/test_keyed_edges.py`.
 
@@ -553,6 +553,6 @@ untouched) is `tests/test_keyed_edges.py`.
 it keeps, its header reads `matching / count` and a last line says `(n hidden by filter)`, so
 a hidden token is never mistaken for an absent one (the design's R4 rule for the Bevy viewer,
 applied to the Graphviz renderer). The tabs and the filter bar of R4 are the Bevy viewer's;
-a notebook builds its own controls from `Query.distinct`: `examples/wildlife_filter.py`,
+a notebook builds its own controls from `Query.distinct`: `examples/token_view_filtering/wildlife_filter.py`,
 one tab per `class` and per `diet`, a season switch that lets the keyed-edge migration fire,
 and the same question asked of the net as a `Query.matches` table.

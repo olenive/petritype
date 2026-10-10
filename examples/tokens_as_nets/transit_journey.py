@@ -18,7 +18,7 @@ def _(mo):
         # Transit — a net whose tokens are nets
 
         The city holds **vehicle tokens**; each vehicle holds a **cabin**, a Petri net of its
-        own (`examples/transit.py`, the example of the nets-as-tokens design). The city is drawn
+        own (`examples/tokens_as_nets/transit.py`, the example of the nets-as-tokens design). The city is drawn
         on the left and, on the right, the cabin of the bus we are following, found by its
         stable `net_id` wherever the bus is standing. A vehicle token's label names its inner
         net and how many tokens it holds (`Vehicle(...) ⊂ cabin: 3`).

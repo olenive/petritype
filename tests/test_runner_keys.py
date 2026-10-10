@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.wildlife import wildlife  # noqa: E402
+from examples.token_view_filtering.wildlife import wildlife  # noqa: E402
 from petritype import petri_net  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,
@@ -263,7 +263,7 @@ class TestProjection:
         assert [(c["method"], c["params"].get("kind")) for c in changes] == [("hidden", "mutated")]
 
     async def test_a_filter_on_an_inner_net_is_per_net(self):
-        from examples.transit import transit
+        from examples.tokens_as_nets.transit import transit
         harness = Harness(transit)
         await harness.send("load", {"net": "transit"})
         state = result(await harness.send("get_state"))

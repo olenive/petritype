@@ -228,7 +228,7 @@ ListPlaceNode("Depot", Vehicle, [bus], nested=True)
 MutateEdge("Depot", "Board Depot", "vehicle")
 ```
 
-Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/transit.py` is the worked example: buses and ferries whose cabins are nets.
+Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets.
 
 A renderer marks a token that holds nets with its inner nets' names and token counts (`Vehicle(name='Bus 1', ...) ⊂ cabin: 3`) rather than printing the net; to draw the net inside, render `vehicle.cabin` like any other graph.
 
@@ -248,7 +248,7 @@ Query.matches(graph, Filter.where(class_="Mammal").in_places("Tundra"))  # AND a
 Query.distinct(graph, "class")                                           # ['Bird', 'Mammal', ...]
 ```
 
-Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. A renderer given a filter (`activation_coloured_attr_functions(graph, filter=...)`) lists only the kept tokens, heads each place with `matching / count` and says how many it hides. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live), instead of taking a whole place out and putting the rest back. `examples/wildlife.py` is the worked example.
+Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. A renderer given a filter (`activation_coloured_attr_functions(graph, filter=...)`) lists only the kept tokens, heads each place with `matching / count` and says how many it hides. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live), instead of taking a whole place out and putting the rest back. `examples/token_view_filtering/wildlife.py` is the worked example.
 
 ### Decorator for registration
 
@@ -368,8 +368,8 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
 - **ML Training** — multi-step model training pipeline with evaluation and retraining loops
 - **Time Series** — statistical processing of time series data
-- **Transit** (`examples/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, stepped through the acceptance script with the followed bus's cabin drawn beside the city
-- **Wildlife** (`examples/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
+- **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, stepped through the acceptance script with the followed bus's cabin drawn beside the city
+- **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 
 The notebooks live in the repository — they are not part of the pip package — so
 run them from a clone:

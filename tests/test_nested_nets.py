@@ -1,6 +1,6 @@
 """Nets as tokens (``NETS_AS_TOKENS.md``, Python track phase 1: R1 to R4, R7, R10).
 
-The transit example (``examples/transit.py``) is the acceptance net; section 6 of
+The transit example (``examples/tokens_as_nets/transit.py``) is the acceptance net; section 6 of
 the design document gives the expected results pinned here. Outer transitions the
 design's script fires by hand are held back with ``RunContext.disabled`` while
 the net runs to quiet, so the driver's own order (outer first, then inner nets in
@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.transit import (  # noqa: E402
+from examples.tokens_as_nets.transit import (  # noqa: E402
     HELD_BACK, Vehicle, acceptance_script, build_cabin, build_city, fire, run_to_quiet,
 )
 from petritype.core.events import Added, Failed, Fired, Mutated, Nested, ParamChanged, Removed  # noqa: E402

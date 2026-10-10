@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.transit import HELD_BACK, Vehicle, build_cabin, build_city, fire, run_to_quiet  # noqa: E402
+from examples.tokens_as_nets.transit import HELD_BACK, Vehicle, build_cabin, build_city, fire, run_to_quiet  # noqa: E402
 from petritype.core.events import Resynced  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,

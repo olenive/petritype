@@ -18,7 +18,7 @@ def _(mo):
         # Wildlife — token keys, queries and a filtered view
 
         Habitats are places; every token is one species in one habitat and carries its own
-        category as a **key** (`species`, `class`, `diet`; `examples/wildlife.py`, the example
+        category as a **key** (`species`, `class`, `diet`; `examples/token_view_filtering/wildlife.py`, the example
         of the token-keys design). The tabs below are built from `Query.distinct`, one per value
         of `class`, plus **all**; pick one and the net is drawn through that filter: a place
         lists only the tokens it keeps, its header reads `matching / count`, and it says how

@@ -9,7 +9,7 @@ names. Every place declares the keys ``species``, ``class`` and ``diet``, and
 
 Run it to see the five filters of the design document answered on the seed::
 
-    uv run python examples/wildlife.py
+    uv run python examples/token_view_filtering/wildlife.py
 """
 
 from __future__ import annotations

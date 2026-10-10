@@ -13,7 +13,7 @@ Run it to see the acceptance script of the design document, with the outer
 net's event log showing the inner firings under the path of the vehicle they
 happened in::
 
-    uv run python examples/transit.py
+    uv run python examples/tokens_as_nets/transit.py
 """
 
 from __future__ import annotations

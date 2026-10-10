@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.transit import transit  # noqa: E402
+from examples.tokens_as_nets.transit import transit  # noqa: E402
 from petritype import petri_net  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,

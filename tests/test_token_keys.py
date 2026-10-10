@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.wildlife import FILTERS, Species, answer, build_wildlife  # noqa: E402
+from examples.token_view_filtering.wildlife import FILTERS, Species, answer, build_wildlife  # noqa: E402
 from petritype.core.events import Fired  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ExecutableGraphOperations,
