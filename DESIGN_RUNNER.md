@@ -344,13 +344,33 @@ Settlements:
 - **Inner nets' sync bodies** are moved to a thread when the owner first sees
   the net, as the outer net's are at load.
 
-The shared transcript `tests/protocol/05_nested_nets.json` runs the design's
-acceptance script over the wire on the `transit` conformance net
+The shared transcript `tests/protocol/05_nested_nets.json` steps the transit
+journey over the wire on the `transit` conformance net
 (`tests/protocol_nets/transit.py`, the example itself) and replays through the
 owner and over pipes; `tests/test_runner_nested.py` covers what a transcript
 cannot show (the waits and the snapshots). The harness gained the `<path>`
 mask, captures inside longer strings and the nested fold, and replays each
 transcript against a registry reduced to its own net (PROTOCOL.md §11).
+
+**Revised 2026-10-10.** The transcript first ran the design's acceptance script,
+holding `Alight`, `Depart` and `Arrive` back with `disable` and enabling each
+where the script fired it by hand. The transit net was redesigned to run its
+own journey (each vehicle's state is where the door tokens in its cabin are,
+`Doors Open` or `Doors Closed`, which the outer guards read; PROTOCOL.md §11),
+and the transcript now steps it from the seed until all seven passengers have
+arrived, with nothing disabled, then injects, reads, sets the `destination`
+override and follows a departure to it.
+It was recorded, not written: `tests/record_transcript.py` runs a list of sends
+against `python -m petritype.runner` over pipes, folds and masks what comes back
+as §11 asks (every token id and nested id a named capture, `bus`,
+`bus_ada_seats`, `bus_cabin`), and writes the transcript; given a transcript it
+re-records it from its own sends (`uv run python tests/record_transcript.py
+tests/protocol/05_nested_nets.json -o tests/protocol/05_nested_nets.json`).
+Recording it showed one runner detail worth knowing: an inner net the owner
+has not yet seen gets its first `fireable` baseline when it is first touched,
+after the firing, so the firing that first touches it reports no `nested`
+`fireable` for it; the transcript reads both cabins before the first step,
+which keeps that out of what both runtimes must agree on.
 
 ## As built, 2026-10-09: keys, queries and the connection's projection (PROTOCOL.md §13)
 

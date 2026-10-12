@@ -407,17 +407,21 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 ## What differs from the design document, and why
 
 - The cabin of the transit example (`examples/tokens_as_nets/transit.py`) does not re-seat passengers who
-  came to the door to leave: `Sit` and `Stand` wait while an announcement stands, and the
-  announcement is cleared once nobody is aboard at all. Built as the document words it
-  (`Sit` guarded by seats alone, cleared once nobody is seated or standing), the net
-  ping-pongs between `Go To Door` and `Sit` and can never hold "three at the door,
-  announcement cleared". The document's expected result "Announcements emptied" after step 4
-  therefore does not hold; the announcement stands until the last passenger alights.
+  came to the door to leave. Built as the document words it (`Sit` guarded by seats alone,
+  the announcement cleared once nobody is seated or standing), the net ping-pongs between
+  `Go To Door` and `Sit` and can never hold "three at the door, announcement cleared". The
+  first fix (2026-10-09) made `Sit` and `Stand` wait while an announcement stands; since
+  2026-10-10 they wait on the cabin's doors instead (below). Either way the
+  document's expected result "Announcements emptied" after step 4 does not hold: the
+  announcement stands until the last passenger has alighted.
 - One `Go To Door` drawing from either of two places is two transitions (`Go To Door`,
   `Go To Door From Standing`): an input edge draws from one place.
-- The acceptance script's "run to quiet" holds `Alight`, `Depart` and `Arrive` back
-  (`RunContext.disabled`): the design fires them by hand, and the driver would otherwise fire
-  `Arrive` the moment a vehicle is in transit and `Alight` the moment someone is at the door.
+- There is no acceptance script any more (2026-10-10, below). Until then its "run to quiet"
+  held `Alight`, `Depart` and `Arrive` back (`RunContext.disabled`): the design fires them by
+  hand, and the driver would otherwise fire `Arrive` the moment a vehicle is in transit and
+  `Alight` the moment someone is at the door. Driven by plain stepping with nothing held
+  back, that net ping-ponged `Alight Depot` / `Board Depot` for ever and the cabin never
+  fired once.
 
 ## As built, 2026-10-09 (phase 1: core)
 
@@ -426,7 +430,8 @@ checks, the descent in `fire_one_transition`, sinks), `petritype/core/events.py`
 (`Nested`; `ParamChanged.transition` may be `None`), `petritype/core/nested.py` (the short
 import), `petritype/runtime.py` (`SetNetParam`, nested checks on commands, the inner turn in
 concurrent mode), `examples/tokens_as_nets/transit.py` (the design's §2 net, its acceptance script as
-`main`), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests, depth two included).
+`main`; since 2026-10-10 its journey, below), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests,
+depth two included).
 
 ## As built, 2026-10-09 (phase 2: saving and templates)
 
@@ -466,7 +471,8 @@ import the marking" is what `NetJson.restore(NetJson.save(net))` does when a cop
 share Python objects at all.
 
 Tests: `tests/test_nested_serialisation.py` (20), including step 6 of the acceptance script
-through JSON text at both save points.
+through JSON text at both save points (since 2026-10-10: saved with the bus in transit and
+once everyone has arrived, continued by plain stepping).
 
 ## As built, 2026-10-09 (phases 3 and 4: the protocol runner; the visualiser)
 
@@ -479,8 +485,47 @@ so a place of vehicles reads at a glance and the label never embeds a whole net.
 view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
 is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
 so a notebook draws the city and, beside it, the cabin of the vehicle it is following:
-`examples/tokens_as_nets/transit_journey.py` does exactly that, stepping the acceptance script (13 firings,
-pinned by `tests/test_notebooks.py`).
+`examples/tokens_as_nets/transit_journey.py` does exactly that, stepping the journey (45 firings from the
+seed until every passenger has arrived, pinned by `tests/test_notebooks.py`; until 2026-10-10 the
+acceptance script, 13 firings).
+
+## As built, 2026-10-10: the transit net runs its own journey
+
+An example illustrates how to build a net that runs its process correctly on its own, never
+a net plus a script that makes it work. The transit net did not: under plain stepping with
+nothing disabled (the Bevy viewer's Step, any `fire_one_transition` loop) the outer net
+ping-ponged `Alight Depot` / `Board Depot` for ever, since the default tie-break takes the
+first declared fireable transition and the driver gives an inner net the turn only when the
+outer net has nothing to fire. The fix is the Petri net idiom: the vehicle's state is where
+the control tokens in its cabin are, one per door, read by the outer guards and moved by an
+inner transition and by `Arrive`.
+
+- Every cabin template gains two places, `Doors Open` and `Doors Closed`, holding one token
+  per door, the door's name (a bus or a shuttle has one door, `Front`, a ferry two, `Bow`
+  and `Stern`), every door open when built. A door open with no announcement standing is
+  boarding, a door open with an announcement standing is alighting, every door closed is
+  under way. Two places and not one token naming the phase, so that the canvas shows it and
+  more doors are simply more tokens. `Board` needs boarding, `Alight` alighting, `Depart`
+  every door closed; inside, `Sit`, `Stand` and `Go Below` need boarding, the `Go To Door`
+  transitions an announcement. `Close Doors` (new) moves one door from open to closed once
+  nobody is left at the door and no announcement stands, aboard or not, so an empty vehicle
+  moves on rather than block a stop; the ferry fires it twice. `Arrive` opens every door in
+  its own body as it puts up the announcement: left to the cabin, `Depart` would fire first.
+  `Clear Announcement` only takes the announcement down. `stopped` stays, set and shown,
+  read by no guard.
+- Alighted passengers go to a new place `Arrived`, never back onto a platform, where they
+  would board again. The vehicles follow a loop (Depot, Central, Harbour, Airport); the net
+  parameter `destination` is now an override (`None` by default).
+- The seed adds two passengers at Central and two at the harbour; from it plain stepping
+  delivers all seven to `Arrived` in 45 firings, and the same holds under `last_declared`
+  and random tie-breaks at every level and in concurrent mode. A driver that gave the cabins
+  the first turn would close every door before anyone boarded; both drivers fire the outer
+  net first.
+- The example keeps two helpers, `step` (one firing, the engine's choice) and `journey`
+  (step until everyone has arrived or a budget runs out); the acceptance script, `fire`,
+  `run_to_quiet` and `HELD_BACK` are gone. The notebook's Step and Repeat Step are those two.
+  PROTOCOL.md §11 fixes the redesigned net, and `tests/protocol/05_nested_nets.json` was
+  re-recorded with `tests/record_transcript.py` (`DESIGN_RUNNER.md`).
 
 ---
 

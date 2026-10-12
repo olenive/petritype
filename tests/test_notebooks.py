@@ -68,8 +68,9 @@ _FIRING_NOTEBOOKS = [
     (EXAMPLES_DIR / "toy" / "one_to_many" / "01_distribute_by_types.py", 6),
     (EXAMPLES_DIR / "toy" / "one_to_many" / "01_fill_place.py", 1),
     (EXAMPLES_DIR / "special_cases" / "returning_empty_list.py", 8),
-    # The nets-as-tokens acceptance script: 3 boards, 3 inner moves, depart, arrive, 3 inner moves, 2 alights.
-    (EXAMPLES_DIR / "tokens_as_nets" / "transit_journey.py", 13),
+    # Nets as tokens: the transit city stepped from its seed until all seven passengers have
+    # arrived (the vehicles never stop, so the notebook's fire_one stops on the passengers).
+    (EXAMPLES_DIR / "tokens_as_nets" / "transit_journey.py", 45),
 ]
 
 # Where the ending is the point of the example, pin the terminal marking as well: the right

@@ -307,18 +307,35 @@ class TestTransitOverTheProtocol:
         state = result(await harness.send("get_state"))
         bus = state["marking"]["places"]["Depot"]["tokens"][0]
         cabin = bus["nets"][0]["nested_id"]
-        for transition in ("Board Depot", "Alight Depot", "Alight Central", "Arrive"):
-            await harness.send("disable", {"transition": transition})
-        for transition in ("Depart Central", "Depart Harbour", "Depart Airport"):
-            await harness.send("disable", {"transition": transition})
-        lines = await harness.send("step")  # Depart Depot
-        assert result(lines)["transition"] == "Depart Depot"
+        fired = []
+        while not fired or fired[-1] != "Depart Depot":  # boarding, settling, the doors closing
+            lines = await harness.send("step")
+            fired.append(result(lines)["transition"])
+        assert len(fired) == 10
+        assert [line["params"]["event"]["method"] for line in lines if line.get("method") == "nested"] == ["param_changed"]
         moved = result(await harness.send("get_state", {"nested_id": cabin}))
         assert moved["path"].startswith("transit/In Transit/#") and moved["nested_id"] == cabin
-        assert [line["params"]["event"]["method"] for line in lines if line.get("method") == "nested"] == ["param_changed"]
-        await harness.send("enable", {"transition": "Arrive"})
         lines = await harness.send("step")
         assert result(lines)["transition"] == "Arrive"
+        assert [(line["params"]["event"]["method"], line["params"]["event"]["params"].get("place"))
+                for line in lines if line.get("method") == "nested"][:4] == [
+            ("param_changed", None), ("removed", "Doors Closed"), ("added", "Doors Open"), ("added", "Announcements"),
+        ], "stopped, the doors opened, and the announcement, all by the outer body"
         arrived = result(await harness.send("get_state", {"nested_id": cabin}))
         assert arrived["path"].startswith("transit/Central/#")
         assert arrived["marking"]["places"]["Announcements"]["count"] == 1
+        assert arrived["marking"]["places"]["Doors Closed"]["count"] == 0
+        assert result(await harness.send("get_token", {"id": arrived["marking"]["places"]["Doors Open"]["tokens"][0]["id"],
+                                                       "nested_id": cabin}))["value"] == "Front"
+        assert arrived["transitions"]["Go To Door"]["fireable"] is True
+
+    async def test_stepping_over_the_protocol_delivers_every_passenger(self):
+        harness = Harness(transit)
+        await harness.send("load", {"net": "transit"})
+        for _ in range(45):
+            assert result(await harness.send("step"))["fired"] is True
+        arrived = result(await harness.send("get_place_tokens", {"place": "Arrived"}))
+        assert arrived["count"] == 7
+        for stop in ("Depot", "Central", "Harbour", "Airport"):
+            assert result(await harness.send("get_place_tokens", {"place": f"Platform@{stop}"}))["count"] == 0
+        assert result(await harness.send("step"))["fired"] is True, "the vehicles go on round, empty"

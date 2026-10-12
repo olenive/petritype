@@ -228,7 +228,7 @@ ListPlaceNode("Depot", Vehicle, [bus], nested=True)
 MutateEdge("Depot", "Board Depot", "vehicle")
 ```
 
-Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets.
+Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
 
 A renderer marks a token that holds nets with its inner nets' names and token counts (`Vehicle(name='Bus 1', ...) ⊂ cabin: 3`) rather than printing the net; to draw the net inside, render `vehicle.cabin` like any other graph.
 
@@ -368,7 +368,7 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
 - **ML Training** — multi-step model training pipeline with evaluation and retraining loops
 - **Time Series** — statistical processing of time series data
-- **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, stepped through the acceptance script with the followed bus's cabin drawn beside the city
+- **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, running its journey under plain stepping (each vehicle's state is where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read), with the followed bus's cabin drawn beside the city
 - **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 
 The notebooks live in the repository — they are not part of the pip package — so

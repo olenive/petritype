@@ -1,13 +1,15 @@
 """Nets as tokens (``NETS_AS_TOKENS.md``, Python track phase 1: R1 to R4, R7, R10).
 
-The transit example (``examples/tokens_as_nets/transit.py``) is the acceptance net; section 6 of
-the design document gives the expected results pinned here. Outer transitions the
-design's script fires by hand are held back with ``RunContext.disabled`` while
-the net runs to quiet, so the driver's own order (outer first, then inner nets in
-place, token and net order) reproduces the script.
+The transit example (``examples/tokens_as_nets/transit.py``) is the acceptance net. It runs
+its journey on its own: each vehicle's state is where its door tokens are in its cabin,
+``Doors Open`` or ``Doors Closed``, which the city's guards read, so plain stepping (the
+engine's own choice, outer first, then inner nets in place, token and net order) carries
+every passenger to ``Arrived`` with nothing held back. The story it tells from its seed is
+pinned here as ``JOURNEY``.
 """
 
 import asyncio
+import random
 import sys
 from pathlib import Path
 
@@ -17,7 +19,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from examples.tokens_as_nets.transit import (  # noqa: E402
-    HELD_BACK, Vehicle, acceptance_script, build_cabin, build_city, fire, run_to_quiet,
+    PASSENGERS, WAITING, Vehicle, build_cabin, build_city, everyone_arrived, journey, step,
 )
 from petritype.core.events import Added, Failed, Fired, Mutated, Nested, ParamChanged, Removed  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
@@ -40,8 +42,25 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-def quiet(graph: ExecutableGraph, holding_back=HELD_BACK):
-    return run(run_to_quiet(graph, holding_back))
+async def steps(graph: ExecutableGraph, count: int) -> list[str]:
+    """``count`` firings of the engine's own choosing; what each fired."""
+    return [await step(graph) for _ in range(count)]
+
+
+async def until(graph: ExecutableGraph, name: str, budget: int = 100) -> list[str]:
+    """Step until a firing named ``name``; what each fired, that one last."""
+    fired = []
+    while not fired or fired[-1] != name:
+        assert len(fired) < budget, f"no {name} within {budget} firings: {fired}"
+        fired.append(await step(graph))
+    return fired
+
+
+def fireable(graph: ExecutableGraph) -> list[str]:
+    """The names of the transitions of ``graph`` itself that can fire now."""
+    place_nodes, incoming, _outgoing, read = ExecutableGraphOperations.maps(graph)
+    return [t.name for t in graph.transitions
+            if ExecutableGraphCheck.transition_is_fireable(t, graph, incoming, place_nodes, read)]
 
 
 def tokens(graph: ExecutableGraph, place: str) -> list:
@@ -59,10 +78,49 @@ def firings(events) -> list[tuple[tuple[str, ...], str]]:
     return out
 
 
+def _inner(path: tuple[str, ...], *transitions: str) -> list[tuple[tuple[str, ...], str]]:
+    return [(path, transition) for transition in transitions]
+
+
+BUS_AT_DEPOT, BUS_AT_CENTRAL, BUS_AT_HARBOUR = ("Depot", "#1", "cabin"), ("Central", "#11", "cabin"), ("Harbour", "#16", "cabin")
+FERRY_AT_HARBOUR, FERRY_AT_AIRPORT = ("Harbour", "#2", "cabin"), ("Airport", "#18", "cabin")
+
+# The story the transit city tells from its seed under plain stepping, every firing
+# with the path of the cabin it happened in (outer ones with an empty path): the bus
+# boards three at the depot and the ferry two at the harbour; the bus settles them,
+# closes its doors, departs and arrives at Central, where they come to the door and
+# alight one by one; it opens for boarding, takes two more on to the harbour, waits
+# there behind the ferry until the ferry has settled its own two, closed both its doors
+# and gone, sets its passengers down and follows the ferry to the airport, where the
+# ferry's alight.
+OUTER = ()
+JOURNEY = [
+    (OUTER, "Board Depot"), (OUTER, "Board Depot"), (OUTER, "Board Depot"),
+    (OUTER, "Board Harbour"), (OUTER, "Board Harbour"),
+    *_inner(BUS_AT_DEPOT, "Sit", "Sit", "Stand", "Close Doors"),
+    (OUTER, "Depart Depot"), (OUTER, "Arrive"),
+    (BUS_AT_CENTRAL, "Go To Door"), (OUTER, "Alight Central"),
+    (BUS_AT_CENTRAL, "Go To Door"), (OUTER, "Alight Central"),
+    (BUS_AT_CENTRAL, "Go To Door From Standing"), (OUTER, "Alight Central"),
+    (BUS_AT_CENTRAL, "Clear Announcement"),
+    (OUTER, "Board Central"), (OUTER, "Board Central"),
+    *_inner(BUS_AT_CENTRAL, "Sit", "Sit", "Close Doors"),
+    (OUTER, "Depart Central"), (OUTER, "Arrive"),
+    *_inner(FERRY_AT_HARBOUR, "Go Below", "Go Below", "Go Up", "Go Up", "Close Doors", "Close Doors"),
+    (OUTER, "Depart Harbour"), (OUTER, "Arrive"),
+    (BUS_AT_HARBOUR, "Go To Door"), (OUTER, "Alight Harbour"),
+    (BUS_AT_HARBOUR, "Go To Door"), (OUTER, "Alight Harbour"),
+    *_inner(BUS_AT_HARBOUR, "Clear Announcement", "Close Doors"),
+    (OUTER, "Depart Harbour"), (OUTER, "Arrive"),
+    (FERRY_AT_AIRPORT, "Go To Door From Upper Deck"), (OUTER, "Alight Airport"),
+    (FERRY_AT_AIRPORT, "Go To Door From Upper Deck"), (OUTER, "Alight Airport"),
+]
+
+
 # --- small nets --------------------------------------------------------------------------
 
 
-def step(x: int) -> int:
+def tick(x: int) -> int:
     return x + 1
 
 
@@ -71,7 +129,7 @@ def build_counter(start: list[int], template: str = "Counter") -> ExecutableGrap
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Low", int, start),
         ArgumentEdgeToTransition("Low", "Up", "x"),
-        FunctionTransitionNode("Up", step),
+        FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
         ListPlaceNode("High", int),
     ], params={"limit": 10}, template=template)
@@ -186,7 +244,7 @@ class TestRunningInnerNets:
         shelf = ExecutableGraphOperations.construct_graph([
             ListPlaceNode("Seed", int, [0]),
             ArgumentEdgeToTransition("Seed", "Own", "x"),
-            FunctionTransitionNode("Own", step),
+            FunctionTransitionNode("Own", tick),
             ReturnedEdgeFromTransition("Own", "Done"),
             ListPlaceNode("Done", int),
             ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1, 2]))], nested=True),
@@ -247,28 +305,47 @@ class TestRunningInnerNets:
             (("Opened", "#2", "counter"), "Up"), (("Opened", "#2", "counter"), "Up"), ((), "Open"),
         ]
 
-    def test_the_acceptance_steps_two_and_four_reach_quiet_with_the_inner_firings(self):
+    def test_the_bus_settles_its_passengers_closes_its_doors_and_only_then_departs(self):
         city = build_city()
-        for _ in range(3):
-            run(fire(city, "Board Depot"))
-        quiet(city)
         bus = tokens(city, "Depot")[0]
-        assert bus.cabin.fired_counts == {"Sit": 2, "Stand": 1}
+        assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == (["Front"], [])
+        assert run(steps(city, 9))[5:] == ["Depot/#1/cabin/Sit", "Depot/#1/cabin/Sit", "Depot/#1/cabin/Stand",
+                                          "Depot/#1/cabin/Close Doors"]
         assert tokens(city, "Platform@Depot") == []
         assert (tokens(bus.cabin, "Seats"), tokens(bus.cabin, "Standing"), tokens(bus.cabin, "Door")) == (
             ["Ada", "Bram"], ["Cato"], [],
         )
-        run(fire(city, "Depart Depot"))
-        before = dict(bus.cabin.fired_counts)
-        quiet(city)
-        assert bus.cabin.fired_counts == before, "nothing inside can move while not stopped"
-        run(fire(city, "Arrive"))
-        quiet(city)
-        assert tokens(city, "Central") == [bus]
-        assert bus.cabin.fired_counts == {"Sit": 2, "Stand": 1, "Go To Door": 2, "Go To Door From Standing": 1}
-        assert tokens(bus.cabin, "Door") == ["Ada", "Bram", "Cato"]
-        # The announcement stands until the last passenger has left (see build_cabin).
+        assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == ([], ["Front"])
+        assert run(step(city)) == "Depart Depot"
+        assert bus.destination == "Central", "the next stop of the loop"
+        assert bus.cabin.params["stopped"] is False
+        assert fireable(bus.cabin) == [], "nothing inside moves in transit: the doors are closed"
+        assert run(step(city)) == "Arrive"
+        assert tokens(city, "Central") == [bus] and bus.destination is None
+        # Arrive opened the doors itself, so Depart Central is not fireable and the cabin has its turn.
+        assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == (["Front"], [])
+        assert bus.cabin.params["stopped"] is True
         assert tokens(bus.cabin, "Announcements") == ["Arrived at Central"]
+        assert fireable(city) == []
+        assert fireable(bus.cabin) == ["Go To Door", "Go To Door From Standing"]
+        assert run(steps(city, 7))[-1] == "Central/#11/cabin/Clear Announcement"
+        assert tokens(city, "Arrived") == ["Ada", "Bram", "Cato"]
+        assert tokens(bus.cabin, "Doors Open") == ["Front"] and tokens(bus.cabin, "Announcements") == []
+        assert fireable(city) == ["Board Central"], "a door open and no announcement: boarding again"
+
+    def test_the_ferry_closes_its_two_doors_one_a_firing_and_departs_once_both_are_closed(self):
+        city = build_city()
+        ferry = tokens(city, "Harbour")[0]
+        assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == (["Bow", "Stern"], [])
+        run(until(city, "Harbour/#2/cabin/Close Doors"))
+        assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == (["Stern"], ["Bow"])
+        assert fireable(city) == [], "one door still open: the ferry does not depart"
+        assert run(step(city)) == "Harbour/#2/cabin/Close Doors"
+        assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == ([], ["Bow", "Stern"])
+        assert run(steps(city, 2)) == ["Depart Harbour", "Arrive"]
+        assert tokens(city, "Airport") == [ferry]
+        assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == (["Bow", "Stern"], [])
+        assert tokens(ferry.cabin, "Announcements") == ["Arrived at Airport"]
 
 
 # --- R3: reaching inside -------------------------------------------------------------------
@@ -278,23 +355,30 @@ class TestReachingInside:
 
     def test_board_alight_depart_arrive(self):
         city = build_city()
-        run(acceptance_script(city))
+        run(until(city, "Alight Central"))
+        run(until(city, "Alight Central"))
         bus = tokens(city, "Central")[0]
         assert bus.name == "Bus 1" and bus.destination is None
-        assert tokens(city, "Platform@Central") == ["Ada", "Bram"]
-        assert tokens(bus.cabin, "Door") == ["Cato"]
+        assert tokens(city, "Arrived") == ["Ada", "Bram"]
+        assert tokens(city, "Platform@Central") == ["Dara", "Eve"], "nobody alights onto a platform"
+        assert tokens(bus.cabin, "Standing") == ["Cato"]
         assert tokens(city, "Depot") == [] and tokens(city, "In Transit") == []
         assert bus.cabin.params["stopped"] is True
         ferry = tokens(city, "Harbour")[0]
-        assert ferry.cabin.fired_counts == {}
+        assert ferry.cabin.fired_counts == {}, "the bus's cabin, first in place order, had the inner turns"
+        assert tokens(ferry.cabin, "Door") == ["Finn", "Gwen"]
 
     def test_a_body_receives_a_net_parameter_by_name(self):
         city = build_city()
+        assert city.params == {"destination": None}
         NetParams.set(city, "destination", "Airport")
-        run(fire(city, "Depart Depot"))
-        assert tokens(city, "In Transit")[0].destination == "Airport"
-        run(fire(city, "Arrive"))
+        run(until(city, "Depart Depot"))
+        assert tokens(city, "In Transit")[0].destination == "Airport", "the override, not the loop's Central"
+        assert run(step(city)) == "Arrive"
         assert [v.name for v in tokens(city, "Airport")] == ["Bus 1"]
+        NetParams.set(city, "destination", None)
+        run(until(city, "Depart Airport"))
+        assert [(v.name, v.destination) for v in tokens(city, "In Transit")] == [("Bus 1", "Depot")], "the loop again"
 
     def test_net_params_are_declared_not_a_free_store(self):
         city = build_city()
@@ -322,7 +406,7 @@ class TestReachingInside:
         city = build_city(restore_tokens_on_failure=True)
         city.transition_named("Board Depot").function = board_then_fail
         with pytest.raises(TransitionFailedError) as caught:
-            run(fire(city, "Board Depot"))
+            run(step(city))  # Board Depot, the first firing from the seed
         assert caught.value.restored
         assert tokens(city, "Platform@Depot") == ["Ada", "Bram", "Cato"]
         # Conservation, not rollback: what the body did inside the cabin stays done.
@@ -330,7 +414,7 @@ class TestReachingInside:
         assert tokens(bus.cabin, "Door") == ["Ada"]
         events = city.drain_events()
         assert isinstance(events[-1], Failed) and events[-1].restored
-        assert Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 1)) in events
+        assert Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 2)) in events, "id 1 is the door token, Front"
 
     def test_put_and_take_check_types_and_record_events(self):
         cabin = build_cabin()
@@ -339,12 +423,12 @@ class TestReachingInside:
             NestedNets.put(cabin, "Door", [42])
         with pytest.raises(KeyError):
             NestedNets.put(cabin, "Hold", ["Ada"])
-        assert NestedNets.put(cabin, "Door", ["Ada", "Bram"]) == [1, 2]
+        assert NestedNets.put(cabin, "Door", ["Ada", "Bram"]) == [2, 3], "the door token, Front, seeded open, is 1"
         with pytest.raises(ValueError, match="holds 2 tokens, not 3"):
             NestedNets.take(cabin, "Door", 3)
         assert NestedNets.take(cabin, "Door") == ["Ada"]
-        assert tokens(cabin, "Door") == ["Bram"] and cabin.place_named("Door").token_ids == (2,)
-        assert cabin.drain_events() == [Added("Door", 1), Added("Door", 2), Removed("Door", 1)]
+        assert tokens(cabin, "Door") == ["Bram"] and cabin.place_named("Door").token_ids == (3,)
+        assert cabin.drain_events() == [Added("Door", 2), Added("Door", 3), Removed("Door", 2)]
 
     def test_a_sink_transition_fires_and_deposits_nothing(self):
         seen = []
@@ -373,43 +457,31 @@ class TestReachingInside:
 
 class TestObservability:
 
-    def test_the_log_names_each_inner_firing_under_the_place_the_bus_stood_in(self):
+    def test_the_log_names_each_inner_firing_under_the_place_its_vehicle_stood_in(self):
         city = build_city()
-        events = run(acceptance_script(city))
-        assert firings(events) == [
-            ((), "Board Depot"), ((), "Board Depot"), ((), "Board Depot"),
-            (("Depot", "#1", "cabin"), "Sit"),
-            (("Depot", "#1", "cabin"), "Sit"),
-            (("Depot", "#1", "cabin"), "Stand"),
-            ((), "Depart Depot"),
-            ((), "Arrive"),
-            (("Central", "#7", "cabin"), "Go To Door"),
-            (("Central", "#7", "cabin"), "Go To Door"),
-            (("Central", "#7", "cabin"), "Go To Door From Standing"),
-            ((), "Alight Central"), ((), "Alight Central"),
-        ]
+        assert firings(run(journey(city))) == JOURNEY
 
     def test_what_a_body_did_inside_comes_before_its_firing(self):
         city = build_city()
-        run(fire(city, "Board Depot"))
+        assert run(step(city)) == "Board Depot"
         bus = tokens(city, "Depot")[0]
         inside, mutated, fired = city.drain_events()
-        assert inside == Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 1))
+        assert inside == Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 2))
         assert mutated == Mutated("Depot", 1)
         assert isinstance(fired, Fired)
         assert (fired.transition, fired.consumed, fired.produced) == ("Board Depot", (("Platform@Depot", 3),), ())
 
     def test_the_bus_keeps_its_nested_id_from_depot_to_central(self):
         city = build_city()
-        bus = tokens(city, "Depot")[0]
-        events = run(acceptance_script(city))
-        nested = [e for e in events if isinstance(e, Nested)]
-        assert nested and {e.nested_id for e in nested} == {bus.cabin.net_id}
-        assert {e.path for e in nested} == {
-            ("Depot", "#1", "cabin"), ("In Transit", "#6", "cabin"), ("Central", "#7", "cabin"),
+        bus, ferry = tokens(city, "Depot")[0], tokens(city, "Harbour")[0]
+        run(until(city, "Alight Central"))
+        events = city.drain_events()
+        assert {e.nested_id for e in events if isinstance(e, Nested)} == {bus.cabin.net_id, ferry.cabin.net_id}
+        assert {e.path for e in events if isinstance(e, Nested) and e.nested_id == bus.cabin.net_id} == {
+            ("Depot", "#1", "cabin"), ("In Transit", "#10", "cabin"), ("Central", "#11", "cabin"),
         }
-        assert NestedNets.find(city, bus.cabin.net_id) == (("Central", "#7", "cabin"), bus.cabin)
-        assert NestedNets.resolve(city, ("Central", "#7", "cabin")) is bus.cabin
+        assert NestedNets.find(city, bus.cabin.net_id) == (("Central", "#11", "cabin"), bus.cabin)
+        assert NestedNets.resolve(city, ("Central", "#11", "cabin")) is bus.cabin
         with pytest.raises(LookupError, match="no token #1"):
             NestedNets.resolve(city, ("Depot", "#1", "cabin"))
 
@@ -464,6 +536,63 @@ class TestObservability:
         assert shelf.drain_events() == []
 
 
+# --- the journey: the transit city runs its own process ---------------------------------------
+
+
+def _policy(city: ExecutableGraph, policy: str) -> ExecutableGraph:
+    """Set a tie-break on the city and on every cabin: ``first_declared`` (the
+    default), ``last_declared``, or a seeded random choice (``random:<seed>``).
+    Whatever the policy, the city fires before its cabins (the engine's order)."""
+    if policy.startswith("random:"):
+        rng = random.Random(int(policy.split(":")[1]))
+        def choose(graph, candidates):
+            return rng.choice(candidates) if candidates else None
+    for graph in (city, *(inner for *_, inner in NestedNets.walk(city))):
+        if policy.startswith("random:"):
+            graph.transition_selector = choose
+        else:
+            graph.tie_break = policy
+    return city
+
+
+class TestTheJourney:
+
+    @pytest.mark.parametrize("policy", ["first_declared", "last_declared", "random:1", "random:2", "random:3"])
+    def test_plain_stepping_delivers_every_passenger_to_arrived(self, policy):
+        city = _policy(build_city(), policy)
+        events = run(journey(city, budget=100))
+        assert everyone_arrived(city), f"{len(tokens(city, 'Arrived'))} arrived within the budget"
+        assert sorted(tokens(city, "Arrived")) == sorted(PASSENGERS)
+        assert len(firings(events)) <= 50
+        if policy == "first_declared":
+            assert tokens(city, "Arrived") == list(PASSENGERS) and len(firings(events)) == 45
+
+    def test_the_vehicles_keep_going_round_once_everyone_has_arrived(self):
+        city = build_city()
+        run(journey(city))
+        fired = run(steps(city, 40))
+        assert None not in fired, "no futile end: the vehicles circulate, empty"
+        assert {name for name in fired if name.startswith("Depart ")} >= {"Depart Airport", "Depart Depot"}
+        assert tokens(city, "Arrived") == list(PASSENGERS)
+
+    def test_no_passenger_alights_where_they_boarded_or_returns_to_a_platform(self):
+        boarded_at = {passenger: stop for stop, queue in WAITING.items() for passenger in queue}
+        city = build_city()
+        platforms = [f"Platform@{stop}" for stop in WAITING]
+        alighted_at = {}
+        while not everyone_arrived(city):
+            before = {place: len(tokens(city, place)) for place in platforms}
+            fired = run(step(city))
+            assert fired is not None and len(alighted_at) <= len(PASSENGERS)
+            assert all(len(tokens(city, place)) <= before[place] for place in platforms), f"{fired} refilled a platform"
+            if fired.startswith("Alight "):
+                alighted_at[tokens(city, "Arrived")[-1]] = fired.removeprefix("Alight ")
+        assert set(alighted_at) == set(PASSENGERS)
+        assert all(alighted_at[p] != boarded_at[p] for p in PASSENGERS), alighted_at
+        assert alighted_at == {"Ada": "Central", "Bram": "Central", "Cato": "Central", "Dara": "Harbour",
+                               "Eve": "Harbour", "Finn": "Airport", "Gwen": "Airport"}
+
+
 # --- the visualiser: marking tokens that hold nets ------------------------------------------
 
 
@@ -473,7 +602,8 @@ class TestSummary:
         city = build_city()
         bus = tokens(city, "Depot")[0]
         NestedNets.put(bus.cabin, "Door", ["Ada", "Bram"])
-        assert NestedNets.summary(bus) == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 2"
+        # Three: the two passengers and the door token, Front.
+        assert NestedNets.summary(bus) == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 3"
         assert NestedNets.summary(bus, maximum_length=20) == "Vehicle(name='Bus 1'..."
         assert NestedNets.summary(build_counter([1, 2])) == "net: 2"
         assert NestedNets.summary(Crate(left=build_counter([1]), right=build_counter([]))) == "Crate() \u2282 left: 1, right: 0"
@@ -485,7 +615,7 @@ class TestSummary:
         city = build_city()
         bus = tokens(city, "Depot")[0]
         label = NodeLabel.default_place(city.place_named("Depot"))
-        assert label.splitlines()[2] == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 0"
+        assert label.splitlines()[2] == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 1"
         assert NodeLabel.default_token_summariser("Ada") == "Ada"
         assert NodeLabel.inner_nets(bus) == {"cabin": bus.cabin}
 

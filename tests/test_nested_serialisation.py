@@ -1,9 +1,10 @@
 """Nets as tokens, phase 2 (``NETS_AS_TOKENS.md`` R5, R5a, R5b, R6): saving and
 loading markings, templates, the JSON form of a nested token, and forking.
 
-The acceptance net is the transit example; step 6 of the design's script (save
-after step 3 and after step 5, load each, continue, markings equal) is pinned
-here through JSON text.
+The acceptance net is the transit example; step 6 of the design's script (save,
+load, continue, markings equal) is pinned here through JSON text, saving while
+the bus is in transit and again once every passenger has arrived, and continuing
+by plain stepping.
 """
 
 import asyncio
@@ -17,7 +18,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from examples.tokens_as_nets.transit import HELD_BACK, Vehicle, build_cabin, build_city, fire, run_to_quiet  # noqa: E402
+from examples.tokens_as_nets.transit import PASSENGERS, Vehicle, build_cabin, build_city, journey, step  # noqa: E402
 from petritype.core.events import Resynced  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,
@@ -161,10 +162,11 @@ class TestSavedForm:
         saved = NetJson.save(cabin)
         assert saved == {
             "template": "Cabin",
-            "marking": {"Door": ["Ada", "Bram"], "Seats": [], "Standing": [], "Announcements": []},
+            "marking": {"Door": ["Ada", "Bram"], "Seats": [], "Standing": [], "Announcements": [],
+                        "Doors Open": ["Front"], "Doors Closed": []},
             "params": {"stopped": False, "seats": 2, "capacity": 6},
             "enabled": {"Sit": True, "Stand": False, "Go To Door": True, "Go To Door From Standing": True,
-                        "Clear Announcement": True},
+                        "Close Doors": True, "Clear Announcement": True},
         }
         restored = NetJson.restore(json.loads(json.dumps(saved)))
         assert restored is not cabin and restored.net_id != cabin.net_id
@@ -205,10 +207,11 @@ class TestSavedForm:
             "name": "Bus 1", "kind": "Bus", "destination": None,
             "cabin": {
                 "template": "Cabin",
-                "marking": {"Door": ["Ada"], "Seats": [], "Standing": [], "Announcements": []},
+                "marking": {"Door": ["Ada"], "Seats": [], "Standing": [], "Announcements": [],
+                            "Doors Open": ["Front"], "Doors Closed": []},
                 "params": {"stopped": True, "seats": 2, "capacity": 6},
                 "enabled": {"Sit": True, "Stand": True, "Go To Door": True, "Go To Door From Standing": True,
-                            "Clear Announcement": True},
+                            "Close Doors": True, "Clear Announcement": True},
             },
         }
         assert Serializable.place_type(Vehicle) and Serializable.place_type(ExecutableGraph)
@@ -235,19 +238,11 @@ class TestSavedForm:
 # --- step 6 of the acceptance script -----------------------------------------------------------
 
 
-async def to_step_three(city):
-    for _ in range(3):
-        await fire(city, "Board Depot")
-    await run_to_quiet(city, HELD_BACK)
-    await fire(city, "Depart Depot")
-    await run_to_quiet(city, HELD_BACK)
-
-
-async def steps_four_and_five(city):
-    await fire(city, "Arrive")
-    await run_to_quiet(city, HELD_BACK)
-    await fire(city, "Alight Central")
-    await fire(city, "Alight Central")
+async def to_departure(city):
+    """Plain stepping until the bus has left the depot: boarding, settling, the
+    doors closing and ``Depart Depot``, ten firings from the seed."""
+    while await step(city) != "Depart Depot":
+        pass
 
 
 def saved_through_text(city) -> dict:
@@ -258,32 +253,36 @@ class TestSaveAndLoadTheCity:
 
     def test_step_six(self):
         straight = build_city()
-        run(to_step_three(straight))
-        after_three = saved_through_text(straight)
-        bus_in_transit = after_three["marking"]["In Transit"][0]
+        run(to_departure(straight))
+        in_transit = saved_through_text(straight)
+        bus_in_transit = in_transit["marking"]["In Transit"][0]
         assert bus_in_transit["destination"] == "Central"
         assert bus_in_transit["cabin"]["marking"] == {
             "Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": [],
+            "Doors Open": [], "Doors Closed": ["Front"],
         }
         assert bus_in_transit["cabin"]["params"]["stopped"] is False
+        assert in_transit["params"] == {"destination": None}
 
-        loaded = NetJson.load_into(build_city(), after_three)
-        assert NetJson.save(loaded) == after_three
-        run(steps_four_and_five(straight))
-        run(steps_four_and_five(loaded))
+        loaded = NetJson.load_into(build_city(), in_transit)
+        assert NetJson.save(loaded) == in_transit
+        run(journey(straight))
+        run(journey(loaded))
         assert NetJson.save(loaded) == NetJson.save(straight), "inner and outer markings equal after continuing"
-        assert tokens(loaded, "Platform@Central") == ["Ada", "Bram"]
-        assert tokens(tokens(loaded, "Central")[0].cabin, "Door") == ["Cato"]
+        assert tokens(loaded, "Arrived") == list(PASSENGERS)
+        assert [vehicle.name for vehicle in tokens(loaded, "Airport")] == ["Ferry 1", "Bus 1"]
 
-        after_five = saved_through_text(straight)
-        loaded_again = NetJson.load_into(build_city(), after_five)
-        assert NetJson.save(loaded_again) == after_five
-        bus = tokens(loaded_again, "Central")[0]
-        assert bus.cabin.template == "Cabin" and bus.cabin.net_id != tokens(straight, "Central")[0].cabin.net_id
+        arrived = saved_through_text(straight)
+        loaded_again = NetJson.load_into(build_city(), arrived)
+        assert NetJson.save(loaded_again) == arrived
+        bus = tokens(loaded_again, "Airport")[1]
+        assert bus.cabin.template == "Cabin" and bus.cabin.net_id != tokens(straight, "Airport")[1].cabin.net_id
+        assert tokens(bus.cabin, "Doors Open") == ["Front"], "the door tokens are saved with the cabin"
+        assert tokens(bus.cabin, "Announcements") == ["Arrived at Airport"]
 
     def test_the_outer_marking_alone_round_trips_too(self):
         city = build_city()
-        run(to_step_three(city))
+        run(to_departure(city))
         marking = json.loads(json.dumps(city.export_marking()))
         other = build_city()
         other.import_marking(marking)

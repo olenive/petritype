@@ -478,7 +478,9 @@ A host that serves the net to remote viewers relays the same shapes:
 
 Conformance is tested by recorded transcripts: one JSON file per scenario,
 replayed through a runner without a process by a harness that owns the
-runner's state machine, or over pipes against the binary.
+runner's state machine, or over pipes against the binary. The conformance
+nets below may change until v1 of the protocol is tagged, and each change is
+dated where the net is described.
 
 ```json
 {
@@ -547,62 +549,113 @@ runner's state machine, or over pipes against the binary.
   Their names, places, transitions, seeds, parameters and the guards that
   decide what fires are fixed here, since a transcript depends on them:
 
-  **`transit`** ("Vehicles board, carry and alight passengers"), the
-  `City` net of `NETS_AS_TOKENS.md` §2. Places, in this order: `Depot`,
-  `Central`, `Harbour`, `Airport` (type `Vehicle`, nested, serializable),
-  `Platform@Depot`, `Platform@Central`, `Platform@Harbour`,
-  `Platform@Airport` (type `str`), `In Transit` (type `Vehicle`, nested,
-  serializable). `Vehicle` is `{name, kind, destination, cabin}` with `kind`
-  one of `"Bus"`, `"Tram"`, `"Ferry"`, `"Shuttle"`, `destination` a place
-  name or `null`, and `cabin` its one inner net (named `cabin` whatever the
-  kind), in the form of §12.5. Templates: `Cabin` (Bus, Tram: places
-  `Door`, `Seats`, `Standing`, `Announcements`, all `str`; transitions
-  `Sit` (Door to Seats, guard: `Seats` holds fewer than `seats` and
-  `Announcements` is empty), `Stand` (Door to Standing, guard: `Seats`
-  holds `seats` or more and `Announcements` is empty), `Go To Door` (Seats
-  to Door) and `Go To Door From Standing` (Standing to Door), both guarded
-  by `stopped` being true and `Announcements` non-empty, and `Clear
-  Announcement` (consumes one announcement, guard: `Door`, `Seats` and
-  `Standing` all empty); parameters `stopped` (`true`), `seats` (`2`),
-  `capacity` (`6`)); `Deck` (Ferry: places `Door`, `Lower Deck`,
-  `Upper Deck`, `Announcements`; transitions `Go Below` (Door to Lower
-  Deck, guard: `Announcements` empty), `Go Up` (Lower Deck to Upper Deck),
-  `Go To Door` (Lower Deck to Door) and `Go To Door From Upper Deck` (Upper
-  Deck to Door), the last two guarded as the Cabin's, `Clear Announcement`
-  guarded by `Door` and both decks empty; parameters `stopped` (`true`),
-  `capacity` (`40`)); `Pod` (Shuttle: places `Door`, `Seats`,
-  `Announcements`; transitions `Sit`, `Go To Door`, `Clear Announcement`,
-  guarded as the Cabin's; parameters `stopped` (`true`), `seats` (`4`),
-  `capacity` (`4`)). Two guards differ from the design document, which has
-  `Sit` guarded by seats alone and the announcement cleared once nobody is
-  seated or standing: built so, a cabin re-seats the passengers at its door
-  the moment the announcement clears and can never hold them there, so
-  nobody sits or stands while an announcement stands and it is cleared only
-  once nobody is aboard at all. Where the design names one `Go To Door`
+  **`transit`** ("Vehicles board, carry and alight passengers"), the `City`
+  net of `NETS_AS_TOKENS.md` §2, redesigned on 2026-10-10 so that it runs its
+  journey under plain stepping: each vehicle's state is where the door tokens
+  in its cabin are, read by the outer guards and moved by an inner transition
+  and by `Arrive`. Places, in this order: `Depot`, `Central`, `Harbour`,
+  `Airport` (type `Vehicle`, nested, serializable), `Platform@Depot`,
+  `Platform@Central`, `Platform@Harbour`, `Platform@Airport` (type `str`,
+  passengers waiting to board), `In Transit` (type `Vehicle`, nested,
+  serializable), `Arrived` (type `str`, passengers who have alighted,
+  anywhere; an alighted passenger never goes back onto a platform, where it
+  would board again). `Vehicle` is `{name, kind, destination, cabin}` with
+  `kind` one of `"Bus"`, `"Tram"`, `"Ferry"`, `"Shuttle"`, `destination` a
+  place name while in transit and `null` otherwise, and `cabin` its one inner
+  net (named `cabin` whatever the kind), in the form of §12.5. Every
+  template's places end, after those its passengers occupy, with
+  `Announcements`, `Doors Open` and `Doors Closed` (all `str`); the last two
+  are control places holding one token per door, the door's name: `Cabin` and
+  `Pod` have one door, `"Front"`, and `Deck` two, `"Bow"` then `"Stern"`; a
+  freshly built cabin holds every door in `Doors Open`. A door open with no
+  announcement standing is boarding, a door open with an announcement
+  standing is alighting, and every door closed is under way. The phase is two
+  places, not one token naming it, so that the canvas shows it (it is where
+  the door tokens are) and more doors are simply more tokens. Every template
+  ends with the same two transitions: `Close Doors` (takes one token from
+  `Doors Open` and produces it into `Doors Closed`, the door's name passing
+  through; guard: `Door` is empty and `Announcements` is empty, everyone
+  aboard having settled, with no condition on anybody being aboard, so an
+  empty vehicle closes up and moves on rather than strand at a stop in front
+  of others; it fires once per open door, so the ferry fires it twice) and
+  `Clear Announcement` (consumes one announcement and produces nothing;
+  guard: every place passengers occupy, `Door` included, is empty; it does
+  not touch the doors). Templates: `Cabin` (Bus, Tram: places `Door`,
+  `Seats`, `Standing`, `Announcements`, `Doors Open`, `Doors Closed`, all
+  `str`; transitions, in this order, `Sit` (Door to Seats, guard: `Seats`
+  holds fewer than `seats`, `Doors Open` is non-empty and `Announcements` is
+  empty), `Stand` (Door to Standing, guard: `Seats` holds `seats` or more,
+  `Doors Open` is non-empty and `Announcements` is empty), `Go To Door`
+  (Seats to Door) and `Go To Door From Standing` (Standing to Door), both
+  guarded by `Announcements` being non-empty (an announcement stands only
+  while the doors are open: `Arrive` opens them as it puts one up, and `Close
+  Doors` refuses while one stands), `Close Doors`, `Clear Announcement`;
+  parameters `stopped` (`true`), `seats` (`2`), `capacity` (`6`)); `Deck`
+  (Ferry: places `Door`, `Lower Deck`, `Upper Deck`, `Announcements`, `Doors
+  Open`, `Doors Closed`; transitions `Go Below` (Door to Lower Deck, guard:
+  `Doors Open` is non-empty and `Announcements` is empty), `Go Up` (Lower
+  Deck to Upper Deck, no guard), `Go To Door` (Lower Deck to Door) and `Go To
+  Door From Upper Deck` (Upper Deck to Door), both guarded by `Announcements`
+  being non-empty, `Close Doors`, `Clear Announcement`; parameters `stopped`
+  (`true`), `capacity` (`40`)); `Pod` (Shuttle: places `Door`, `Seats`,
+  `Announcements`, `Doors Open`, `Doors Closed`; transitions `Sit`, `Go To
+  Door`, `Close Doors`, `Clear Announcement`, guarded as the Cabin's;
+  parameters `stopped` (`true`), `seats` (`4`), `capacity` (`4`)). `stopped`
+  is kept, set by the outer net and shown to viewers, but no guard reads it
+  any more: the doors replaced it. Where the design names one `Go To Door`
   drawing from either of two places, there are two transitions, since an
-  input edge draws from one place. Seed: `Depot` holds one `Vehicle {name: "Bus 1",
-  kind: "Bus"}` with an empty `Cabin`; `Harbour` one `{name: "Ferry 1",
-  kind: "Ferry"}` with an empty `Deck`; `Platform@Depot` holds `"Ada"`,
-  `"Bram"`, `"Cato"` in that order; everything else is empty. Transitions,
-  in this order: `Board Depot`, `Board Central`, `Board Harbour`,
-  `Board Airport`, `Alight Depot`, `Alight Central`, `Alight Harbour`,
-  `Alight Airport`, `Depart Depot`, `Depart Central`, `Depart Harbour`,
-  `Depart Airport`, `Arrive`. `Board L` takes one passenger from
-  `Platform@L` and mutates the front vehicle at `L`, putting the passenger
-  into its inner `Door`; its guard is that the front vehicle at `L` has room
-  (the tokens in its inner places other than `Announcements` number fewer
-  than its `capacity`); it produces nothing. `Alight L` mutates the front
-  vehicle at `L`, taking the oldest passenger out of its inner `Door` and
-  producing it into `Platform@L`; guard: that `Door` is non-empty. `Depart
-  L` takes the front vehicle at `L`, sets its `destination` to the net
-  parameter `destination` and its inner `stopped` to `false`, and produces
-  it into `In Transit`. `Arrive` takes the front vehicle of `In Transit`,
-  sets its inner `stopped` to `true`, puts `"Arrived at <destination>"` into
-  its inner `Announcements`, clears its `destination` and produces it into
-  the place its destination named. Net parameter `destination` (`"Central"`).
-  The transit transcript holds `Alight`, `Depart` and `Arrive` back with
-  `disable` where the design's script fires them by hand, so that the
-  driver's order (§12.3) reproduces the script.
+  input edge draws from one place. The route is a fixed loop: `Depot`,
+  `Central`, `Harbour`, `Airport`, then `Depot` again. Seed: `Depot` holds
+  one `Vehicle {name: "Bus 1", kind: "Bus"}` with a `Cabin` (`seats` 2)
+  holding only `Doors Open: ["Front"]`; `Harbour` one `{name: "Ferry 1",
+  kind: "Ferry"}` with a `Deck` holding only `Doors Open: ["Bow", "Stern"]`;
+  `Platform@Depot` holds `"Ada"`, `"Bram"`, `"Cato"`, `Platform@Central`
+  `"Dara"`, `"Eve"` and `Platform@Harbour` `"Finn"`, `"Gwen"`, each in that
+  order; everything else is empty. Transitions, in this order: `Board Depot`,
+  `Board Central`, `Board Harbour`, `Board Airport`, `Alight Depot`, `Alight
+  Central`, `Alight Harbour`, `Alight Airport`, `Depart Depot`, `Depart
+  Central`, `Depart Harbour`, `Depart Airport`, `Arrive`. `Board L` takes one
+  passenger from `Platform@L` and mutates the front vehicle at `L`, putting
+  the passenger into its inner `Door`; it produces nothing; guard: the front
+  vehicle at `L` has room (the tokens in its inner places other than
+  `Announcements`, `Doors Open` and `Doors Closed` number fewer than its
+  `capacity`), its `Doors Open` is non-empty and its `Announcements` is
+  empty. `Alight L` mutates the front vehicle at `L`, taking the oldest
+  passenger out of its inner `Door` and producing it into `Arrived`; guard:
+  that `Door` is non-empty and its `Announcements` is non-empty. `Depart L`
+  takes the front vehicle at `L`, sets its `destination` to the net parameter
+  `destination` when that is not `null` and otherwise to the stop after `L`
+  on the loop, sets its inner `stopped` to `false`, and produces it into `In
+  Transit`; guard: the front vehicle's `Doors Open` is empty, every door
+  closed. `Arrive` takes the front vehicle of `In Transit`, sets its inner
+  `stopped` to `true`, moves every token of its inner `Doors Closed` to its
+  `Doors Open` in order (takes them all, then puts them back), puts `"Arrived
+  at <destination>"` into its inner `Announcements`, clears its `destination`
+  and produces it into the place its destination named. The doors open in
+  `Arrive`'s own body: left to an inner transition, they would all be closed
+  when the vehicle landed, and `Depart` would fire again before the inner net
+  had a turn. Net parameter `destination` (`null`), an override of the loop:
+  while it names a place every departure goes there. Its JSON type is string
+  or null, and a number is refused with `invalid_params`; Python's runner
+  keeps a net parameter to the JSON type of its current value
+  (`DESIGN_RUNNER.md`), so it refuses a number only once the parameter holds
+  a string and cannot set it back to `null` over the wire, which is why the
+  transcript sets `"Airport"` before it tries `3`. Driven by the order of
+  §12.3 (the outer net first, the first declared fireable transition by
+  default), the seed tells this story: `Board Depot` three times, `Board
+  Harbour` twice, the bus's `Sit`, `Sit`, `Stand` and `Close Doors`, `Depart
+  Depot`, `Arrive` at Central, then for each passenger `Go To Door` (or `Go
+  To Door From Standing`) and `Alight Central`, the bus's `Clear
+  Announcement`, `Board Central` twice, and so on round the loop, the ferry's
+  deck likewise, closing its two doors with two firings of `Close Doors`:
+  after 45 firings all seven passengers are in `Arrived`, and the vehicles
+  keep going round, empty. The story holds whatever the tie-break within each
+  net as long as the outer net fires first; a driver that gave the cabins the
+  first turn would close every vehicle's doors before anyone boarded. The
+  transit transcript holds nothing back: it steps that journey from the seed
+  with every transition enabled (until 2026-10-10 it held `Alight`, `Depart`
+  and `Arrive` back with `disable` and fired them as the design's script
+  did).
 
   **`wildlife`** ("Species migrate, spread and decline across habitats"),
   the net of `TOKEN_QUERYING_AND_FILTERING.md` §2. Places, in this order,
@@ -770,10 +823,11 @@ each inner net, that net's state:
 ```json
 {"name": "Bus 1", "kind": "Bus", "destination": null,
  "cabin": {"template": "Cabin",
-           "marking": {"Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": []},
+           "marking": {"Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": [],
+                       "Doors Open": ["Front"], "Doors Closed": []},
            "params": {"stopped": true, "seats": 2, "capacity": 6},
            "enabled": {"Sit": true, "Stand": true, "Go To Door": true,
-                       "Go To Door From Standing": true, "Clear Announcement": true}}}
+                       "Go To Door From Standing": true, "Close Doors": true, "Clear Announcement": true}}}
 ```
 
 - `template` names the factory, registered by name with the runtime, that
