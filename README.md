@@ -104,7 +104,7 @@ FunctionTransitionNode('Fetch', fetch)
 Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
 
 - **`guard`** — a firing condition the engine enforces in every execution mode: a transition whose guard returns `False` is not fireable, regardless of available tokens. Guards run on every fireable-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
-- **`priority`** — a selection hint: the default selector fires the highest-priority fireable transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters.
+- **`priority`** — a selection hint: the default selector fires the highest-priority fireable transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters, and `"round_robin"` takes the live transitions in turn, each pick the first one declared after the last.
 
 ```python
 # Guard: BatchProcess is not fireable until the pool is full
@@ -192,6 +192,28 @@ def summarise(items: list[str]) -> str:
 ArgumentEdgeToTransition('Items', 'Summarise', 'items')
 ```
 
+### Edges that accept an empty place
+
+Every edge above waits for a token: a transition never fires while one of its input places is empty. For a place a transition only needs to look at when something is there, where none is a perfectly good answer, two edges read **every token, zero or more**, and never hold the transition back. Both need a `list[T]` argument, checked when the graph is built:
+
+- **`DrainEdge`** — takes every token, as a list-mode argument does, but an empty place hands the body `[]` instead of holding it back.
+- **`SurveyEdge`** — a deep copy of every token, possibly none; nothing is consumed.
+
+```python
+from petritype.core.executable_graph_components import DrainEdge, SurveyEdge
+
+def price_order(order: str, promotions: list[str]) -> tuple[str, list[str]]:
+    return order, [f"{promotion} on {order}" for promotion in promotions]
+
+def go(cars: list[str], light: str) -> list[str]:
+    return cars
+
+SurveyEdge('Promotions', 'Price Order', 'promotions')  # prices an order whether or not a promotion runs
+DrainEdge('Waiting', 'Go', 'cars')                     # every car waiting goes past the light at once
+```
+
+A transition whose only argument edge is a drain consumes nothing on an empty place, so `assert_no_source_transitions` counts it as a source. The traffic light's `Go` is one: its guard, green and someone waiting, is what keeps it from firing on an empty queue. The worked examples are `examples/edges_on_empty_places/shop.py` for the survey and `examples/edges_on_empty_places/traffic_light.py` for the drain, beside a plain read; the renderer draws both edges with a hollow arrowhead.
+
 ### Read arcs — non-consuming reads
 
 A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present for the transition to be fireable, but firing never consumes it:
@@ -210,7 +232,7 @@ Read arcs render dashed, distinct from the solid consuming / producing arrows.
 
 ### Nets as tokens
 
-A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself (outer transitions first, then inner nets in place, token and net order), gathers their events into its own log as `Nested` records carrying the path to the net they happened in, and lets its bodies reach inside the tokens they hold:
+A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself (outer transitions first, then inner nets in place, token and net order; `deep_policy="interleaved"` on `construct_graph` or the graph takes the nets in turn instead, so an outer net that can always fire starves none of them), gathers their events into its own log as `Nested` records carrying the path to the net they happened in, and lets its bodies reach inside the tokens they hold:
 
 ```python
 from petritype.core.nested import NestedNets
@@ -267,6 +289,25 @@ def health_check() -> ExecutableGraph:
 ```
 
 Modes: `manual` (default), `24/7` (continuous), `batch` (run once), `cron` (scheduled).
+
+A net can also declare, beside it, the controls a viewer shows for it and how its places are drawn. The traffic light (`examples/edges_on_empty_places/traffic_light.py`) declares two buttons and fills its light with the light's colour:
+
+```python
+from petritype.runtime import ControlSpec, PlaceStyle
+
+@petri_net(
+    name="traffic-light",
+    controls={
+        "car": ControlSpec.inject("Waiting", car, "+ Car", kind="text", config={"placeholder": "name"}),
+        "change": ControlSpec.fire("Change", "Change"),
+    },
+    place_styles={"Light": PlaceStyle(fill="token")},
+)
+def traffic_light() -> ExecutableGraph:
+    return build_traffic_light()
+```
+
+The [protocol runner](#net-protocol--run-a-net-as-a-process) serves them in the topology and runs a control when a viewer sends `press` (PROTOCOL.md §5.1, §6.6), so a viewer draws the buttons without knowing the net and the code stays with it: `car` adds the car `car(name, graph)` makes (the name typed, or `Car N` read off the marking), and `change` fires `Change` when it can (the `Fire` command). A token's `.color` is its colour on the wire, and `PlaceStyle(fill="token")` fills a place with the colour of its one token; the light's token is a `Colour`, a `str` whose `color` is the lamp's hex, so its JSON form stays `"red"`. The same control-map renders in a marimo notebook through `petritype.marimo_controls`.
 
 ## Runtime — observable, interactive nets
 
@@ -370,6 +411,8 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Time Series** — statistical processing of time series data
 - **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, running its journey under plain stepping (each vehicle's state is where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read), with the followed bus's cabin drawn beside the city
 - **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
+- **Shop** (`examples/edges_on_empty_places/shop_day.py`) — an edge that accepts an empty place: switch promotions on and off and place orders, and each order is priced with whatever promotions are running through a survey edge, its receipt showing what each one took off. The example day also plays by itself
+- **Traffic light** (`examples/edges_on_empty_places/traffic_light_junction.py`) — the edge that takes every token, zero or more: cars wait at a light that cycles red, green and amber (one place, whose token is its colour). Two transitions: `Change` cycles the light by itself, and `Go` drains every car waiting past the light while it is green, reading the light and guarded on green and someone waiting, so a car arriving at green goes straight through. Cars arrive on a schedule or by hand
 
 The notebooks live in the repository — they are not part of the pip package — so
 run them from a clone:

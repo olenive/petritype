@@ -27,12 +27,17 @@ Since 2026-10-09 the owner serves a tree of nets: the outer net the host loaded
 and, inside the tokens of its ``nested`` places, inner nets at any depth, each
 addressed by a ``path`` or a ``nested_id`` and each with its own
 ``marking_version``, ``fireable`` set, topology and log view. One ``_Net``
-record per net, built when the net is first addressed or fired, holds what the
-protocol keeps about it; the outer one is ``_Loaded.outer`` and every method
-below takes the net it acts on. A firing may be in any net: the driver picks the
-outer net's choice first and, when it has none, descends in the order the
-library's own driver uses (place, token, net order; a net's own inner nets
-before the next token). An inner net's notifications go out wrapped in
+record per net holds what the protocol keeps about it, built when the owner first
+knows of the net: at the load for the nets the factory seeded, at the ``inject``
+that carried its token, at the landing of the firing that produced it (since
+2026-10-12; until then when first addressed or fired), which is when its
+``fireable`` baseline is taken. The outer one is ``_Loaded.outer`` and every
+method below takes the net it acts on. A firing may be in any net: under the
+loaded net's default ``deep_policy`` the driver picks the outer net's choice
+first and, when it has none, descends in the order the library's own driver uses
+(place, token, net order; a net's own inner nets before the next token); under
+``"interleaved"`` it goes round the same nets from the one after the net that
+fired last, by the library's cycle and cursor. An inner net's notifications go out wrapped in
 ``nested`` with the inner version inside and the outer version, unmoved, on the
 wrapper; the engine delivers inner events to the outer log already wrapped as
 ``Nested`` records with the path as it stood.
@@ -92,6 +97,7 @@ from pydantic import TypeAdapter
 
 from petritype.core import events as core_events
 from petritype.core.executable_graph_components import (
+    DrainEdge,
     ExecutableGraph,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
@@ -112,9 +118,11 @@ from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
 from petritype.runner.translate import (
-    JSON_SCALARS, Filters, Serializable, StrictJson, Tokens, Topologies, TypeNames,
+    JSON_SCALARS, Controls, Filters, Serializable, StrictJson, Tokens, Topologies, TypeNames,
 )
-from petritype.runtime import Disable, Enable, Extend, RunContext, Runner, SetNetParam, SetParam
+from petritype.runtime import (
+    ControlSpec, Disable, Enable, Extend, Fire, RunContext, Runner, SetNetParam, SetParam,
+)
 
 
 # How many entries ``get_log`` keeps (PROTOCOL.md §8).
@@ -133,11 +141,11 @@ READS = frozenset({"get_state", "get_place_tokens", "get_token", "get_log", "que
 METHODS = frozenset({
     "describe", "load", "get_state", "get_place_tokens", "get_token", "step", "start", "stop",
     "reset", "inject", "enable", "disable", "set_param", "get_log", "shutdown",
-    "query", "distinct", "set_filter",
+    "query", "distinct", "set_filter", "press",
 })
 
 # Methods that act on the outer net alone (§12.3); a ``path`` or ``nested_id`` on them is refused.
-OUTER_ONLY = frozenset({"enable", "disable", "set_param", "start", "stop", "reset", "step"})
+OUTER_ONLY = frozenset({"enable", "disable", "set_param", "start", "stop", "reset", "step", "press"})
 
 CONTINUOUS_MODE = "24/7"
 
@@ -275,6 +283,9 @@ class _Net:
     # The connection's projection of this net (§13.4), and the ids it has been shown.
     filter: Optional[Filter] = None
     visible: set[int] = field(default_factory=set)
+    # What the last ``launched`` in this net listed under the filter, which its
+    # ``failed`` lists too (§13.4).
+    launched_shown: set[tuple[str, int]] = field(default_factory=set)
 
     @property
     def is_outer(self) -> bool:
@@ -303,6 +314,8 @@ class _InFlight:
     held_nets: set[int] = field(default_factory=set)
     # The tokens an outer firing took or holds, as ``(place, id)``, for a path that names one.
     held_tokens: set[tuple[str, int]] = field(default_factory=set)
+    # The ``press`` request waiting for this firing, if a ``fire`` control launched it.
+    press_id: Optional[str] = None
 
 
 @dataclass
@@ -339,6 +352,8 @@ class _Loaded:
     params: dict
     outer: _Net
     inner: dict[int, _Net] = field(default_factory=dict)
+    # The controls of this generation, ``{name: ControlSpec}`` (the entry's, resolved at the build).
+    controls: dict = field(default_factory=dict)
     running: bool = False
     in_flight: Optional[_InFlight] = None
     deferred: deque = field(default_factory=deque)
@@ -545,6 +560,9 @@ class Owner:
         try:
             ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)
             outer = self._new_net(graph, self.marking_version)
+            # What the entry declares beside the net: its controls and place styles (§5.1).
+            controls = NetEntries.controls(entry)
+            Topologies.declare(outer.topology, Controls.wire(controls, graph), entry.place_styles)
         except Exception as error:
             raise ProtocolError(ErrorCode.LOAD_FAILED, f"{type(error).__name__}: {error}") from error
         # A new generation starts from its built marking: whatever the factory did
@@ -553,10 +571,12 @@ class Owner:
         TokenIds.resync(graph)
         graph.drain_events()
         self._carried_version = outer.marking_version
-        self._loaded = _Loaded(entry=entry, params=raw, outer=outer)
+        self._loaded = _Loaded(entry=entry, params=raw, outer=outer, controls=controls)
         self.generation += 1
         # Recorded silently: ``reloaded`` already means "refetch".
         outer.last_fireable = self._fireable_names(outer)
+        # The inner nets the factory seeded are known from the load: their baselines too.
+        self._know_new()
         out.lines.append(wire.Reloaded(
             generation=self.generation, reason=reason,
             marking_version=outer.marking_version, running=False,
@@ -601,6 +621,27 @@ class Owner:
         if path:
             net.last_path = path
         return net
+
+    def _know_new(self) -> None:
+        """Take the ``fireable`` baseline of every inner net, at any depth, that the
+        owner does not know yet (§7.2, §12.3): a net is known from when the runtime
+        first knows of it, at the load for the nets the factory seeded, at the
+        ``inject`` that carried its token, or at the landing of the outer firing that
+        produced its token; no ``fireable`` is sent for the baseline itself, and the
+        first ``nested`` ``fireable`` reports the first change from it. Every net,
+        passive places' included."""
+        loaded = self._loaded
+        if not NestedNets.any_nested(loaded.outer.graph):
+            return
+
+        def visit(graph: ExecutableGraph, prefix: tuple[str, ...]) -> None:
+            for segments, _token, _name, inner in NestedNets.walk(graph):
+                path = (*prefix, *segments)
+                if inner.net_id not in loaded.inner:
+                    self._net_for(inner, path)
+                visit(inner, path)
+
+        visit(loaded.outer.graph, ())
 
     def _net_by_id(self, net_id: Optional[int]) -> Optional[_Net]:
         """The net with this id if it is the outer one, already known, or live
@@ -980,9 +1021,9 @@ class Owner:
     def _handed_over(self, net: _Net, transition: FunctionTransitionNode) -> _Handover:
         """What firing ``transition`` now will take and hand over, by stage 1's own
         rules: argument edges in order, each taking the oldest remaining token of
-        its place, or every remaining one for a ``list[...]`` argument; then the
-        mutate edges, which take nothing and hand over the oldest remaining token
-        (or all of them) where they are."""
+        its place, or every remaining one for a ``list[...]`` argument or a drain
+        (possibly none); then the mutate edges, which take nothing and hand over the
+        oldest remaining token (or all of them) where they are."""
         consumed: list[tuple[str, int]] = []
         taken: dict[str, int] = {}
         keyed_taken: dict[str, list[int]] = {}  # per place, the indices a keyed take removes
@@ -997,7 +1038,7 @@ class Owner:
                     keyed_taken.setdefault(place.name, []).append(index)
                 continue
             start = taken.get(place.name, 0)
-            takes_all = Topologies.takes_all(transition.function, edge.argument, place)
+            takes_all = isinstance(edge, DrainEdge) or Topologies.takes_all(transition.function, edge.argument, place)
             end = len(ids) if takes_all else min(start + 1, len(ids))
             consumed.extend((place.name, token_id) for token_id in ids[start:end])
             taken[place.name] = max(start, end)
@@ -1119,15 +1160,36 @@ class Owner:
         return None
 
     def _select(self) -> Optional[tuple[_Net, FunctionTransitionNode]]:
-        """The next firing anywhere: the outer net's choice, else the first inner
-        net's (§12.3)."""
+        """The next firing anywhere, by the loaded net's ``deep_policy``: under
+        ``"outer_first"`` (the default) the outer net's choice, else the first
+        inner net's (§12.3); under ``"interleaved"`` the first net with a firing
+        round the cycle of nets, from the one after the net the last deep step
+        fired in (``NestedNets.deep_turns``, the library's own order and cursor).
+        Every net chooses by its own selector, so a round-robin tie-break moves
+        only the cursor of the net that fires. The deep-step cursor is recorded
+        under both policies, as the library records it, so a ``deep_policy``
+        switched to ``"interleaved"`` mid-run resumes after the net that fired
+        last."""
         outer = self._loaded.outer
+        if outer.graph.deep_policy == "interleaved" and NestedNets.any_nested(outer.graph):
+            for segments, graph in NestedNets.deep_turns(outer.graph):
+                net = self._net_for(graph, segments)
+                chosen = self._select_in(net)
+                if chosen is not None:
+                    # Chosen here, launched at once: this net took the turn.
+                    NestedNets.took_turn(outer.graph, graph)
+                    return net, chosen
+            return None
         chosen = self._select_in(outer)
         if chosen is not None:
+            NestedNets.took_turn(outer.graph, outer.graph)
             return outer, chosen
         if not NestedNets.any_nested(outer.graph):
             return None
-        return self._select_inner(outer)
+        found = self._select_inner(outer)
+        if found is not None:
+            NestedNets.took_turn(outer.graph, found[0].graph)
+        return found
 
     # --- the firing cycle ---
 
@@ -1160,9 +1222,10 @@ class Owner:
         }))
 
     def _launch(self, net: _Net, transition: FunctionTransitionNode, step_id: Optional[str], now: datetime,
-                out: Outgoing) -> None:
+                out: Outgoing, press_id: Optional[str] = None) -> None:
         """Write ``launched`` for ``transition`` in ``net`` and hand its firing
-        out. The fireable set is compared when the firing lands, not now: the
+        out; the ``step`` (``step_id``) or ``press`` (``press_id``) that launched it
+        is answered when it lands. The fireable set is compared when the firing lands, not now: the
         launch's own change is transient, and a ``fireable`` between ``launched``
         and ``distributed`` would split the pair a viewer folds into ``fired``."""
         loaded = self._loaded
@@ -1172,8 +1235,10 @@ class Owner:
         self._flush(now, out)
         handover = self._handed_over(net, transition)
         net.marking_version += 1
+        shown = self._shown(net, handover.consumed)
+        net.launched_shown = set(shown)
         launched = wire.Launched(
-            transition=transition.name, consumed=_pairs(self._shown(net, handover.consumed)),
+            transition=transition.name, consumed=_pairs(shown),
             marking_version=net.marking_version, running=loaded.running,
         )
         net.visible.difference_update(token_id for _place, token_id in handover.consumed)
@@ -1189,6 +1254,7 @@ class Owner:
                 snapshots[ancestor.nested_id] = self._capture(ancestor, eager={place_name: {index}})
         loaded.in_flight = _InFlight(
             net.nested_id, transition.name, now, step_id, snapshots, handover.consumed, held_nets, held_tokens,
+            press_id=press_id,
         )
         loaded.idle = False
         out.launch = Launch(transition.name, _fire(net, transition, self.generation))
@@ -1241,6 +1307,8 @@ class Owner:
         # here, so the landing's lines already say so.
         TokenIds.resync(net.graph)
         events = self._flush(now, out)
+        # The nets inside the tokens this firing produced are known from its landing.
+        self._know_new()
         fired, failed, path = self._firing_of(events, flight)
         if fired is not None or failed is not None:
             announced, landed = _pairs(flight.consumed), _pairs((fired or failed).consumed)
@@ -1293,6 +1361,9 @@ class Owner:
                     marking_version=self.marking_version, running=False,
                 ).line())
 
+        if flight.press_id is not None:
+            self._pressed(flight, fired is not None or failed is not None, landing, out)
+            return
         if flight.step_id is None:
             return
         if fired is None and failed is None and landing.error is not None:
@@ -1434,9 +1505,83 @@ class Owner:
         ), None)
         if added is None:
             raise ProtocolError(ErrorCode.INTERNAL, "the token was added without an event")
-        out.lines.append(Lines.result(request_id, {
-            "status": "injected", "id": str(added.token_id), "marking_version": net.marking_version,
-        }))
+        # The nets the token carried are known from here: their fireable baselines (§12.3).
+        self._know_new()
+        injected = {"status": "injected", "id": str(added.token_id), "marking_version": net.marking_version}
+        if not net.is_outer:
+            # A result about an inner net names it (§12.3), the version its own.
+            injected["path"] = self._path_of(net)
+            injected["nested_id"] = str(net.nested_id)
+        out.lines.append(Lines.result(request_id, injected))
+
+    def _press(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
+        """``press {control, value?}`` (§6): run one of the net's declared controls.
+        The control is looked up (``unknown_control``) and the value checked by its
+        kind (``Controls.value``, ``invalid_params``); its ``to_command`` gives the
+        command, handed the net when it takes it. ``None`` answers ``nothing``. A
+        ``Fire`` is a pinned ``step``: launched as a step launches, so ``fired``,
+        progress and ``fireable`` follow as for a step, and answered when it lands
+        (``_pressed``), or ``nothing`` at once when the transition is not fireable.
+        Any other command goes through the engine's command path (``_apply``) and
+        its events out as an ``inject``'s do. A ``to_command`` that raises, or a
+        command the net refuses, is ``internal``."""
+        loaded = self._loaded
+        name = _string(params, "control")
+        spec = loaded.controls.get(name)
+        if spec is None:
+            raise ProtocolError(ErrorCode.UNKNOWN_CONTROL, f"no control named {name!r}")
+        value = Controls.value(spec, params)
+        outer = loaded.outer
+        try:
+            command = ControlSpec.command(spec, value, outer.graph)
+        except Exception as error:
+            raise ProtocolError(
+                ErrorCode.INTERNAL, f"control {name!r} raised {type(error).__name__}: {error}",
+            ) from error
+        if command is None:
+            self._nothing(request_id, f"{name} has nothing to do", out)
+            return
+        if isinstance(command, Fire):
+            transition = next((t for t in outer.graph.transitions if t.name == command.transition), None)
+            if transition is None:
+                raise ProtocolError(
+                    ErrorCode.INTERNAL, f"control {name!r} fires {command.transition!r}, no transition of the net",
+                )
+            if not self._is_fireable(outer, transition):
+                self._nothing(request_id, f"{transition.name} is not fireable", out)
+                return
+            NestedNets.took_turn(outer.graph, outer.graph)
+            self._launch(outer, transition, None, now, out, press_id=request_id)
+            return
+        self._apply(outer, command)
+        self._flush(now, out)
+        # The nets a token it added carried are known from here, as for an ``inject``.
+        self._know_new()
+        out.lines.append(Lines.result(request_id, wire.PressResult(
+            status="pressed", marking_version=self.marking_version,
+        )))
+
+    def _nothing(self, request_id: str, reason: str, out: Outgoing) -> None:
+        out.lines.append(Lines.result(request_id, wire.PressResult(
+            status="nothing", reason=reason, marking_version=self.marking_version,
+        )))
+
+    def _pressed(self, flight: _InFlight, landed: bool, landing: Landing, out: Outgoing) -> None:
+        """Answer the ``press`` whose ``Fire`` just landed: ``pressed`` when it fired
+        or failed (the ``failed`` already says which), ``internal`` when it raised
+        before taking anything, ``nothing`` when it found the transition no longer
+        fireable."""
+        if landed:
+            out.lines.append(Lines.result(flight.press_id, wire.PressResult(
+                status="pressed", marking_version=self.marking_version,
+            )))
+        elif landing.error is not None:
+            out.lines.append(Lines.error(
+                flight.press_id, ErrorCode.INTERNAL,
+                f"firing {flight.name} raised {type(landing.error).__name__}: {landing.error}",
+            ))
+        else:
+            self._nothing(flight.press_id, f"{flight.name} is not fireable", out)
 
     def _enable(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
         self._toggle(Enable, request_id, params, now, out)
@@ -1456,7 +1601,8 @@ class Owner:
         transition, through ``SetParam`` (the parameter must be one the function
         takes and no edge supplies; an annotated one is validated); without,
         one of the net's own parameters (``graph.params``), through
-        ``SetNetParam``, which must be declared and keeps its JSON type."""
+        ``SetNetParam``, which must be declared (``invalid_params`` otherwise,
+        §6.4) and decodes by its declared type (``_net_param_value``)."""
         param = _string(params, "param")
         if "value" not in params:
             raise ProtocolError(ErrorCode.INVALID_PARAMS, 'set_param needs a "value"')
@@ -1476,8 +1622,16 @@ class Owner:
         out.lines.append(Lines.result(request_id, {"marking_version": self.marking_version}))
 
     def _net_param_value(self, current: Any, param: str, value: Any) -> Any:
-        """A net parameter keeps the JSON type of its current value: a scalar is
-        validated strictly against that type; anything else is taken as given."""
+        """A net parameter decodes by its declared type (§6.4, since 2026-10-12):
+        the annotation of the factory parameter of the same name, validated
+        strictly (``NetEntries.decode``), so ``destination: str | None = None``
+        takes a string or ``null`` in either order and refuses a number. A
+        parameter the factory does not annotate keeps the JSON type of its current
+        value: a scalar is validated strictly against that type; anything else is
+        taken as given."""
+        spec = next((spec for spec in self._loaded.entry.params if spec.name == param), None)
+        if spec is not None and NetEntries.adapter(spec) is not None:
+            return NetEntries.decode(spec, value)
         if isinstance(current, JSON_SCALARS):
             try:
                 return StrictJson.validate(TypeAdapter(type(current)), value)
@@ -1620,9 +1774,17 @@ class Owner:
                 **stamp,
             )
         if isinstance(event, core_events.Failed):
+            consumed = list(event.consumed)
+            if net is not None and net.filter is not None:
+                # Projected as its ``launched`` was: the tokens it showed (§13.4).
+                consumed = [(place, token_id) for place, token_id in consumed
+                            if (place, token_id) in net.launched_shown]
+                if event.restored:
+                    # Back where they were, ids and all: shown again, and no ``added`` for them.
+                    net.visible.update(token_id for _place, token_id in consumed)
             return wire.Failed(
                 transition=event.transition, error=event.error, restored=event.restored,
-                consumed=_pairs(event.consumed), **stamp,
+                consumed=_pairs(consumed), **stamp,
             )
         if isinstance(event, core_events.Added):
             token = self._live(net, event.place, event.token_id)

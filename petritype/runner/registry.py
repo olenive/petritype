@@ -52,6 +52,11 @@ class NetEntry:
     params: tuple[ParamSpec, ...] = ()
     # The factory takes ``**kwargs``, so names it does not declare are passed on.
     accepts_any: bool = False
+    # ``@petri_net(controls=...)``: the control-map ``{name: ControlSpec}``, or a
+    # zero-argument callable returning one (resolved at each load and reset).
+    controls: Any = None
+    # ``@petri_net(place_styles=...)``: ``{place name: PlaceStyle}``.
+    place_styles: Optional[dict] = None
 
 
 class NetEntries:
@@ -71,7 +76,20 @@ class NetEntries:
             schedule=config.get("schedule"),
             params=params,
             accepts_any=accepts_any,
+            controls=config.get("controls"),
+            place_styles=config.get("place_styles"),
         )
+
+    def controls(entry: NetEntry) -> dict:
+        """The entry's control-map for a new generation: the declared map, or what the
+        declared callable returns; ``{}`` when it declares none. ``TypeError`` for
+        anything that is not a map of names to controls."""
+        declared = entry.controls() if callable(entry.controls) else entry.controls
+        if declared is None:
+            return {}
+        if not isinstance(declared, dict) or not all(isinstance(name, str) for name in declared):
+            raise TypeError(f"net {entry.name!r} declares controls that are not a map of names to controls")
+        return dict(declared)
 
     def first_doc_line(factory: Callable) -> Optional[str]:
         doc = inspect.getdoc(factory)
@@ -81,11 +99,18 @@ class NetEntries:
 
     def params_of(factory: Callable) -> tuple[tuple[ParamSpec, ...], bool]:
         """The parameters of ``factory``'s signature (``@wraps`` is followed), and
-        whether it takes ``**kwargs``. ``*args`` cannot be named, so it is skipped."""
+        whether it takes ``**kwargs``. ``*args`` cannot be named, so it is skipped.
+        Annotations are evaluated (a module with ``from __future__ import
+        annotations`` spells them as strings), so that a parameter decodes by its
+        declared type; one that will not evaluate stays a string and is not checked."""
         try:
             signature = inspect.signature(factory)
         except (TypeError, ValueError):
             return (), True
+        try:
+            signature = inspect.signature(factory, eval_str=True)
+        except Exception:
+            pass  # an annotation names something the module does not define: keep the strings
         specs = []
         accepts_any = False
         for parameter in signature.parameters.values():
@@ -155,13 +180,24 @@ class NetEntries:
             bound[name] = value if spec is None else NetEntries.decode(spec, value)
         return bound
 
-    def decode(spec: ParamSpec, value: Any) -> Any:
+    def adapter(spec: ParamSpec) -> Optional[TypeAdapter]:
+        """What validates a value of this parameter: a ``TypeAdapter`` of its
+        annotation, or ``None`` when it has none, a string one, or one pydantic
+        cannot handle."""
         annotation = spec.annotation
         if annotation is inspect.Parameter.empty or isinstance(annotation, str):
-            return value
+            return None
         try:
-            adapter = TypeAdapter(annotation)
+            return TypeAdapter(annotation)
         except Exception:
+            return None
+
+    def decode(spec: ParamSpec, value: Any) -> Any:
+        """``value`` validated against the parameter's annotation in strict JSON
+        mode (``invalid_params`` when it does not validate); as given when there is
+        no annotation to validate against (``adapter``)."""
+        adapter = NetEntries.adapter(spec)
+        if adapter is None:
             return value
         try:
             return StrictJson.validate(adapter, value)

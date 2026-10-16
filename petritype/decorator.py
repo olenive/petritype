@@ -12,7 +12,7 @@ which can be discovered by scanning tools at build/deploy time.
 """
 
 from functools import wraps
-from typing import Callable, Literal, TypeVar
+from typing import Any, Callable, Literal, Optional, TypeVar
 
 ExecutionMode = Literal["manual", "24/7", "batch", "cron"]
 
@@ -25,6 +25,8 @@ def petri_net(
     mode: ExecutionMode = "manual",
     description: str = "",
     schedule: str | None = None,
+    controls: Optional[Any] = None,
+    place_styles: Optional[dict[str, Any]] = None,
 ) -> Callable[[F], F]:
     """Declare a function as a Petri net factory.
 
@@ -37,6 +39,12 @@ def petri_net(
             - "cron": Runs on schedule (requires `schedule` parameter)
         description: Human-readable description shown in UI.
         schedule: Cron expression for mode="cron" (e.g., "0 9 * * *" for 9am daily).
+        controls: The net's control-map, ``{name: ControlSpec}`` in display order, or a
+            zero-argument callable returning one (called at every load and reset, so the
+            controls of each generation are fresh). Kept off the net; the protocol runner
+            serves it as ``topology.controls`` and runs it on ``press`` (PROTOCOL.md §6).
+        place_styles: ``{place name: PlaceStyle}``, how a viewer draws those places
+            (``PlaceStyle(fill="token")`` fills a place with its one token's colour).
 
     Returns:
         Decorator that attaches `_petri_net_config` to the function.
@@ -70,6 +78,8 @@ def petri_net(
             "schedule": schedule,
             "module": None,  # Filled in at discovery time
             "function": fn.__name__,
+            "controls": controls,
+            "place_styles": place_styles,
         }
 
         @wraps(fn)

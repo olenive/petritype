@@ -7,7 +7,14 @@ on 2026-10-09 for nested nets (§12) and token keys, queries and filters (§13),
 with what they add to §3, §5, §6, §7, §8 and §11; those additions are the
 agreed wire form of `NETS_AS_TOKENS.md` R8 and `TOKEN_QUERYING_AND_FILTERING.md`
 R3 (both in `Cyberpunk2020-Simulation/dev-docs/`), written before either
-runtime implemented them so that both implement the same thing. Both
+runtime implemented them so that both implement the same thing. On
+2026-10-12 it was amended again to close eight gaps in its wording (§2, §6,
+§6.4, §7.2, §11, §12.3, §12.5, §13.3, §13.4), which both runners follow, and
+on 2026-10-14 it gained two input edge kinds that accept an empty place
+(§5.1, §5.2, from `../petritype-rs/dev-docs/EDGES_ON_EMPTY_PLACES.md`), with
+a conformance net and a transcript for them (§11). On 2026-10-16 it gained
+the controls and place styles a net declares beside it, and `press`, which
+runs a control (§3, §5.1, §5.3, §6.6, §7, §11, §12.3). Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -65,7 +72,10 @@ are out of scope.
 - **Unknown fields are ignored and unknown notifications are skipped.** That
   is what lets version 1 grow without a bump (§10).
 - Optional fields are marked `?` below and are omitted, never `null`, unless
-  stated otherwise.
+  stated otherwise. That is what a runtime writes; what it reads is more
+  forgiving: `null` for an optional field of a request counts as the field's
+  absence, so `query {filter: null}` is `query {}` and `get_state
+  {token_limit: null}` is `get_state {}` (since 2026-10-12).
 
 ## 3. Framing (net process, stdin and stdout)
 
@@ -106,6 +116,7 @@ without parsing `message`:
 | `unknown_net` | `load` named a net this process does not carry, or a `path` or `nested_id` (§12.1) names no live inner net |
 | `load_failed` | the factory raised or the net did not build |
 | `unknown_place`, `unknown_transition`, `unknown_token` | a name or id that does not exist now |
+| `unknown_control` | `press` named a control the net does not declare (§6.6) |
 | `not_serializable` | the place has no JSON form, so a token cannot be injected or shown as JSON |
 | `invalid_token` | the JSON did not decode to the place's type |
 | `unsupported` | this runtime cannot do this (for example `set_param` on a net that declares no parameters by name) |
@@ -181,23 +192,61 @@ once per generation and lays it out.
   own (§12), and `passive?`, `true` when such a place's inner nets are
   stepped only by an outer body (§12.3); `key_names?`, the names of the keys
   the place derives from its tokens, in declaration order, present only when
-  the place declares keys (§13.1).
+  the place declares keys (§13.1); `style?`, how a viewer draws the place,
+  present only when the net declares one (since 2026-10-16). The one style so
+  far is `{"fill": "token"}`, a rule the viewer evaluates: while the place
+  holds exactly one token and that token has a `color` (§5.3), the place is
+  filled with that colour; a firing's input or output highlight wins while it
+  lasts; otherwise the theme's fill. No notification carries a style: the
+  viewer already has the token's colour.
 - `transitions[]`: `name`; `detail?`, a free object of runtime-specific
   introspection (Python: `function_name`, `signature`, `docstring`; Rust:
   `params`, the parameter type names, and `detachable`). A viewer may show
   `detail`; it must not depend on any key in it.
 - `edges[]`: `place`, `transition`, `direction` (`"in"` place to transition,
   `"out"` transition to place); `kind?` for input edges, one of `"take"`,
-  `"take_all"`, `"snapshot"`, `"mutate"`, `"take_where"`, `"mutate_where"`
-  (a reader that meets another value draws a plain edge), the last two
-  carrying `filter` (§13.5); `slot?` for output edges of a transition with
-  more than one output. Read edges (`snapshot`, `mutate`) are listed: they move no
-  tokens but they are part of the net. The order of `edges[]` is not
+  `"take_all"`, `"snapshot"`, `"mutate"`, `"take_where"`, `"mutate_where"`,
+  `"drain"`, `"survey"` (a reader that meets another value draws a plain
+  edge), `take_where` and `mutate_where` carrying `filter` (§13.5); `slot?`
+  for output edges of a transition with more than one output. A `drain` edge
+  takes every token of its place, oldest first, zero or more: unlike the
+  kinds before it, it does not hold its transition back while the place is
+  empty, and `consumed` may list nothing from it (since 2026-10-14). A
+  `survey` edge hands the body a copy of every token of its place, zero or
+  more, consuming none, and likewise never holds its transition back (since
+  2026-10-14). Read edges (`snapshot`, `survey`, `mutate`) are listed: they
+  move no tokens but they are part of the net. The order of `edges[]` is not
   significant; a reader keys an edge by its endpoints.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
   No runtime is required to compute a layout.
+- `controls?`: the controls the net declares, in declaration order, absent
+  when it declares none (since 2026-10-16). A net declares as data the
+  buttons it wants; a viewer renders them with widgets it already has, never
+  naming a net, and a press runs the control in the runtime that owns the
+  net, with code written beside the net (`press`, §6.6). A control is
+  `{name, label, kind, node?, action?, config?}`:
+  - `name` is unique within the net and is what `press` names; `label` is
+    shown.
+  - `kind` is the widget, one of `"button"`, `"toggle"`, `"slider"`,
+    `"select"`, `"text"`, and fixes the value a press carries: a `button`
+    none; a `toggle` a boolean; a `slider` a number within `config.start`
+    and `config.stop` (in steps of `config.step`); a `select` one of
+    `config.options` (strings); a `text` a string.
+  - `config?` is `{value?, options?, start?, stop?, step?, placeholder?}` by
+    kind, absent when empty: `value` is the initial value of a kind that has
+    one (`toggle`, `slider`, `select`) and absent for the others;
+    `placeholder` is a `text`'s hint shown while it is empty. Other keys are a
+    runtime's own (a notebook's button `kind`), and a viewer ignores them.
+  - `node?` names the place or transition the control acts on. It is for the
+    viewer, which may light the node while the control is hovered.
+  - `action?` says what kind of thing a press does, for the viewer's lighting
+    rule only: `"fire"` is lit while `node` is fireable; `"enable"` is a
+    toggle whose state is `node`'s `enabled` switch; `"inject"`, and a control
+    without an action, is always lit. A viewer never executes an action.
+- `assets?` is reserved for a second round: a table of images a net declares
+  once, which a token's `image?` names (§5.3).
 
 ### 5.2 Transition state
 
@@ -205,10 +254,11 @@ once per generation and lays it out.
 
 - `enabled`: the on/off switch set by `enable` and `disable`. Not whether the
   transition can fire now.
-- `fireable`: enabled, not in flight, every input place non-empty, guard
-  passes. Both libraries use this vocabulary: "fireable" for can-fire-now,
-  "enabled" for the switch. petritype-server's engine still says "enabled"
-  for fireable until it moves to the library runner.
+- `fireable`: enabled, not in flight, every input place non-empty (but one
+  read through a `drain` or `survey` edge, §5.1), guard passes. Both
+  libraries use this vocabulary: "fireable" for can-fire-now, "enabled" for
+  the switch. petritype-server's engine still says "enabled" for fireable
+  until it moves to the library runner.
 - `in_flight`: its body is running.
 - `priority?`: the current score the default selector would use, if the
   runtime can compute it cheaply and safely; omitted if computing it raised.
@@ -233,13 +283,20 @@ A token is `{id, label, color?, type_name?, keys?, nets?}`:
   or `repr`; Rust: the place's `Debug`. The full value is `get_token`
   (§6.5).
 - `color?`: a CSS hex colour (`"#rrggbb"`), when the runtime has one for this
-  token (Python: a `.color` attribute).
+  token (Python: a `.color` attribute; Rust: the style its place is declared
+  with, since 2026-10-16).
 - `type_name?`: only when it differs from the place's `type_name` (a Python
   place may hold subclasses).
 - `keys?`: `{name: value}`, the token's keys, only when its place declares
   keys (§13.1).
 - `nets?`: `[{name, nested_id, path, template?, count}]`, the nets the token
   holds, only when it holds some (§12.2).
+- `glyph?` is reserved for a second round: one grapheme the viewer draws on
+  the token, a field of token entries and `added`.
+- `image?` is reserved likewise: the name of an image in `topology.assets?`
+  (§5.1) that the viewer draws for the token, a field of token entries and
+  `added`; how `produced` carries it and `glyph` is decided when they are
+  built.
 
 ### 5.4 Progress
 
@@ -261,9 +318,10 @@ it.
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
-| `inject` | `{place, token, path?, nested_id?}` | `{status: "injected", id, marking_version}` | emits `added` |
+| `inject` | `{place, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `path` and `nested_id` for an inner net (§12.3) |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
+| `press` | `{control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}` | runs a control the net declares (§6.6); emits the events of whatever it did |
 | `get_log` | `{after?, limit?, path?, nested_id?}` | `{entries}` (§8) | |
 | `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches}` (§13.3) | never waits for a running body |
 | `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values}` (§13.3) | |
@@ -321,9 +379,9 @@ before it moves to `describe`.
   the response also carries `failed: true`, and follows the `failed`
   notification. Its response is written when the firing is complete (after
   `fired`, `distributed` or `failed`), so a caller waiting on `step` waits
-  for the body. `step` is the one request answered out of order: `get_state`,
-  `get_place_tokens`, `get_token`, `get_log` and `stop` that arrive while
-  its body runs are answered before it.
+  for the body. `step` is the one request answered out of order (with a
+  `press` that fires, §6.6): `get_state`, `get_place_tokens`, `get_token`,
+  `get_log` and `stop` that arrive while its body runs are answered before it.
 - `start` runs on the net process's own clock until `stop`. A net whose
   `mode` is `"24/7"` idles when nothing is fireable (emitting `idle` once
   per idle spell) and keeps polling; any other net stops at quiescence and
@@ -340,8 +398,8 @@ before it moves to `describe`.
   `reason: "transition_failed"` and the failure's `error_type` and `message`
   (both runners stop).
 - When tokens hold nets, "one firing" may be a firing inside one of them:
-  `step` and a running net fire the outer net's choice first and an inner
-  net's only when the outer net has nothing fireable (§12.3), and
+  `step` and a running net fire, by default, the outer net's choice first and
+  an inner net's only when the outer net has nothing fireable (§12.3), and
   `no_fireable_transitions` means nothing fireable anywhere.
 
 ### 6.4 Input
@@ -357,12 +415,20 @@ before it moves to `describe`.
   JSON has no other way to carry them. Parameter values (`load`,
   `set_param`) follow the same rule, answering `invalid_params`. The shared
   transcripts check it.
+- A parameter value decodes by its declared type: Rust's by the type
+  registered for the parameter's wire name, Python's by the annotation of the
+  factory parameter of that name, or, for one the factory does not annotate,
+  by the JSON type of its current value. So a parameter declared
+  `destination: str | None = None` takes a string or `null` in either order
+  and refuses a number, and an override can be cleared over the wire (since
+  2026-10-12).
 - `enable` and `disable` set the switch. Both libraries have it.
 - `set_param` is optional. With `transition`, Python sets one keyword
   argument of that transition; without, both runtimes set a net-wide
   parameter by its declared name (Rust ignores `transition`; Python's net
   parameters are `ExecutableGraph.params`, since 2026-10-09). A runtime
-  that cannot answers `unsupported`.
+  that cannot answers `unsupported`. A name the net does not declare is
+  `invalid_params`, never `unsupported` and never an `unknown_*` code.
 
 ### 6.5 Reading one token
 
@@ -373,10 +439,39 @@ otherwise. `text` is the runtime's full rendering of the token (Python:
 this is the long one. A host that wants JSON for a place that has none gets
 `kind: "text"`, not an error; `not_serializable` is for `inject`.
 
+### 6.6 Pressing a control
+
+`press {control, value?}` runs one of the controls the net declares
+(`topology.controls`, §5.1), since 2026-10-16. The runtime that owns the net
+executes it with the code written beside the net; the viewer names the control
+and carries the value, nothing more.
+
+- `control` names the control; a name the net does not declare is
+  `unknown_control`.
+- `value` must match the control's `kind`: absent for a `button` (a `null`
+  counts as absent, §2); a boolean for a `toggle`; a number for a `slider`,
+  within `config.start` and `config.stop`; one of `config.options` for a
+  `select`; a string for a `text`. Anything else, an option not listed and a
+  number out of range included, is `invalid_params`, and nothing runs.
+- The answer is `status: "pressed"` when the control applied something, and
+  `"nothing"` with a `reason` when it chose not to: it gave nothing to do, or
+  a `fire` control found its transition not fireable (`"Change is not
+  fireable"`). A control whose code raises is `internal`.
+- A control that fires a transition fires it as `step` does (§6.3), the
+  transition chosen by the control rather than by the net's selector: its
+  `launched` and `distributed` (or `failed`), progress and `fireable` follow,
+  and the answer is written when the firing is complete. Any other control's
+  effects are the events of the change it made, as for `inject`, `enable` or
+  `set_param`.
+- Controls belong to the outer net: `press` acts on the outer net only, and a
+  `path` or `nested_id` is `invalid_params` (§12.3).
+
 ## 7. Notifications
 
 Every notification carries `marking_version` (after the change, if it made
-one) and `running`.
+one) and `running`. A `press` (§6.6) has no notification of its own: its
+effects arrive as the usual notifications, and its answer carries the
+`marking_version` after them.
 
 ### 7.1 State notifications (each raises `marking_version` by one)
 
@@ -415,6 +510,11 @@ keys as they stand after the change.
 | `heartbeat` | `{step_started_at, executing_transition}` | periodic while loaded; both `null` when no body runs |
 | `load_progress` | `{step, message}` | during `load` |
 | `nested` | `{path, nested_id, event: {method, params}}` | an event in an inner net, wrapping the notification that net would send (§12.4); moves the inner net's version, carried inside `event`, not the outer net's |
+
+A net's first `fireable` is compared with its baseline, the set as it stood
+when the runtime first knew of the net: for the outer net at `load` or
+`reset`, which `reloaded` already tells, and for an inner net as §12.3 says.
+No `fireable` is sent for a baseline itself.
 
 ## 8. Log
 
@@ -518,13 +618,30 @@ dated where the net is described.
 - A transcript shared across runtimes masks every token id, nested id and
   path, and every `marking_version` (§2, §4, §12.1), every `type_name` and
   `label`, `runtime` and `runtime_version`, every `duration_ms` and time,
-  sets every `detail` to `"<any>"`, and uses no `color`.
-- Before comparing, the harness folds a `launched` immediately followed by
-  its `distributed` into one `fired {transition, consumed, produced,
-  duration_ms}`, so a transcript recorded against either runtime reads the
-  same (§6.3); likewise a `nested` wrapping a `launched` followed at once by
-  a `nested` wrapping its `distributed`, for the same path and nested id,
-  into a `nested` wrapping a `fired` (§12.4).
+  and sets every `detail` to `"<any>"`. It carries `color` only where both
+  runtimes give the token the same colour, which the conformance nets do by
+  giving hex values (`"#rrggbb"`, lowercase), never names (until 2026-10-16 a
+  shared transcript used no `color`). `topology.controls` (§5.1) is the net's
+  declaration and is pinned as it stands, labels included.
+- Before comparing, the harness folds a firing reported in two pieces into
+  one, so a transcript recorded against either runtime reads the same
+  (§6.3): a `launched` and the next `distributed` of the same transition at
+  the same level become one `fired {transition, consumed, produced,
+  duration_ms}` that stands where the `distributed` stood, carrying
+  `consumed` from the `launched` and `marking_version` and `running` from
+  the `distributed`. The lines between the two pieces keep their places
+  before it, and only the firing's own may stand there: its inner effects
+  (`nested` around `added`, `removed`, `mutated`, `param_changed` or
+  `fireable`), its own `mutated`s, and, under a connection's filter, the
+  `hidden`, `added` or `removed` that stand in for a mutation (§13.4).
+  Inside `nested` wrappers the same fold applies per inner net: a `nested`
+  around a `launched` and the next `nested` around its `distributed`, with
+  the same `nested_id`, become a `nested` around a `fired` (§12.4). A
+  firing that failed is not folded: its `launched` stays, and its `failed`
+  follows the lines between. Both the expected and the actual lines are
+  folded before they are compared, so a transcript may hold either shape.
+  (Until 2026-10-12 the Python harness folded only a pair with nothing
+  between; the Rust harness folded as above.)
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
@@ -636,11 +753,10 @@ dated where the net is described.
   when the vehicle landed, and `Depart` would fire again before the inner net
   had a turn. Net parameter `destination` (`null`), an override of the loop:
   while it names a place every departure goes there. Its JSON type is string
-  or null, and a number is refused with `invalid_params`; Python's runner
-  keeps a net parameter to the JSON type of its current value
-  (`DESIGN_RUNNER.md`), so it refuses a number only once the parameter holds
-  a string and cannot set it back to `null` over the wire, which is why the
-  transcript sets `"Airport"` before it tries `3`. Driven by the order of
+  or null, and a number is refused with `invalid_params` (§6.4). It is also
+  the net's one load parameter, which sets where it starts: `describe` lists
+  it as not required, with default `null` (since 2026-10-12, when the Python
+  factory came to declare its type by annotating it). Driven by the order of
   §12.3 (the outer net first, the first declared fireable transition by
   default), the seed tells this story: `Board Depot` three times, `Board
   Harbour` twice, the bus's `Sit`, `Sit`, `Stand` and `Close Doors`, `Depart
@@ -658,36 +774,170 @@ dated where the net is described.
   did).
 
   **`wildlife`** ("Species migrate, spread and decline across habitats"),
-  the net of `TOKEN_QUERYING_AND_FILTERING.md` §2. Places, in this order,
-  all of type `Species`, all serializable, each declaring the keys
-  `species` (from `name`), `class` and `diet`: `Forest`, `Wetland`,
-  `Savanna`, `Reef`, `Tundra`, `Migrating`. `Species` is `{name, class,
-  diet, population, destination}` with `class` one of `"Bird"`,
-  `"Mammal"`, `"Reptile"`, `"Fish"`, `diet` one of `"Herbivore"`,
-  `"Carnivore"`, `"Insectivore"`, `"Omnivore"`, `population` an integer
-  and `destination` a place name or `null` (set only while migrating). Seed,
-  in place order then token order: `Forest`: Robin (Bird, Insectivore, 120),
-  Fox (Mammal, Omnivore, 60); `Wetland`: Robin (Bird, Insectivore, 80),
-  Heron (Bird, Carnivore, 40); `Savanna`: Zebra (Mammal, Herbivore, 5000),
-  Gecko (Reptile, Insectivore, 200); `Reef`: Clownfish (Fish, Omnivore,
-  300); `Tundra`: Fox (Mammal, Omnivore, 30), Arctic Hare (Mammal,
-  Herbivore, 90). Net parameters `season` (`"Summer"`) and
-  `spread_threshold` (`1000`). Transitions, in this order:
-  `Migrate Forest Wetland`, which takes the oldest `Species` in `Forest`
-  whose `class` is `Bird` (a `take_where` edge with the filter
-  `class in {Bird}`; until a runtime has keyed edges, a `take_all` of
-  `Forest` that puts the others back, slot 0 to `Forest` and slot 1 to
-  `Migrating`), sets its `destination` to `"Wetland"` and produces it into
-  `Migrating`, guarded by `season` being `"Autumn"`; `Settle`, which takes
-  the front token of `Migrating`, clears its `destination` and produces it
-  into the place that destination named; `Spread Savanna Reef`, which
-  mutates the front token of `Savanna`, halving its population (rounding
-  down), and produces a copy with the other half into `Reef`, guarded by
-  that token's population exceeding `spread_threshold`; and
-  `Decline Forest`, which mutates the front token of `Forest`, halving its
-  population (rounding down), guarded by it being above zero. The design's
-  "at zero the token is removed" is not built: a mutate edge removes
-  nothing.
+  the net of `TOKEN_QUERYING_AND_FILTERING.md` §2, second edition
+  (2026-10-13). Places, in this order, all of type `Species`, all
+  serializable, each declaring the keys `species` (from `name`), `class` and
+  `diet`: `Forest`, `Wetland`, `Savanna`, `Reef`, `Tundra`, `Migrating`.
+  `Species` is `{name, class, diet, population, destination}` with `class`
+  one of `"Bird"`, `"Mammal"`, `"Reptile"`, `"Fish"`, `diet` one of
+  `"Herbivore"`, `"Carnivore"`, `"Insectivore"`, `"Omnivore"`, `population`
+  an integer and `destination` a place name or `null` (set only while
+  migrating). Seed, twenty tokens in place order then token order: `Forest`:
+  Robin (Bird, Insectivore, 120), Fox (Mammal, Omnivore, 60), Deer (Mammal,
+  Herbivore, 300), Woodpecker (Bird, Insectivore, 45); `Wetland`: Robin
+  (Bird, Insectivore, 80), Heron (Bird, Carnivore, 40), Pike (Fish,
+  Carnivore, 150), Otter (Mammal, Carnivore, 25); `Savanna`: Zebra (Mammal,
+  Herbivore, 5000), Gecko (Reptile, Insectivore, 200), Lion (Mammal,
+  Carnivore, 40), Egret (Bird, Insectivore, 1500); `Reef`: Clownfish (Fish,
+  Omnivore, 300), Parrotfish (Fish, Herbivore, 400), Reef Shark (Fish,
+  Carnivore, 20), Sea Turtle (Reptile, Herbivore, 80); `Tundra`: Fox
+  (Mammal, Omnivore, 30), Arctic Hare (Mammal, Herbivore, 90), Lemming
+  (Mammal, Herbivore, 2000), Snowy Owl (Bird, Carnivore, 15); `Migrating`
+  empty. Net parameters `season` (`"Autumn"`) and `spread_threshold`
+  (`200`). Transitions, in this order: `Migrate Forest Wetland`, which takes
+  the oldest `Species` in `Forest` whose `class` is `Bird` (a `take_where`
+  edge with the filter `class in {Bird}`), sets its `destination` to
+  `"Wetland"` and produces it into `Migrating`, guarded by `season` being
+  `"Autumn"`; `Migrate Tundra Wetland`, the same from `Tundra` with the same
+  guard; `Settle`, which takes the front token of `Migrating`, clears its
+  `destination` and produces it into the place that destination named;
+  `Spread Savanna Wetland`, which mutates the oldest bird of `Savanna` (a
+  `mutate_where` edge, `class in {Bird}`), leaving it half its population
+  (rounding down), and produces a copy carrying the rest into `Wetland`,
+  guarded by that token's population exceeding `spread_threshold`; `Decline
+  Forest`, which mutates the oldest herbivore of `Forest` (`mutate_where`,
+  `diet in {Herbivore}`), halving its population (rounding down), guarded by
+  that population exceeding 10; and `Decline Tundra`, which mutates the
+  oldest lemming of `Tundra` (`mutate_where`, `species in {Lemming}`)
+  likewise, guarded by its population exceeding 100. Every guard reads the
+  token its edge would take, the oldest match of the same filter in the same
+  place, never the place's front token; a mutated token keeps its id and its
+  place. Driven by the default selector from the seed, a run is nineteen
+  firings: `Migrate Forest Wetland` twice (the robin, then the woodpecker),
+  `Migrate Tundra Wetland` (the snowy owl), `Settle` three times (all three
+  into `Wetland`), `Spread Savanna Wetland` three times (the egret 1500 to
+  750, 375 and 187, its copies of 750, 375 and 188 into `Wetland`), `Decline
+  Forest` five times (the deer 300 to 150, 75, 37, 18 and 9) and `Decline
+  Tundra` five times (the lemmings 2000 to 1000, 500, 250, 125 and 62); then
+  nothing is fireable. With `season` `"Summer"` the migrations are not
+  fireable and the run is the other thirteen. No population reaches zero, so
+  the design's "at zero the token is removed" never arises (a mutate edge
+  removes nothing). Until 2026-10-13 the net had nine tokens, `season`
+  `"Summer"`, `spread_threshold` `1000` and front-token mutate edges in
+  `Spread Savanna Reef` and `Decline Forest`, which split whatever stood
+  first in `Savanna` (the zebra) onto the reef and halved the forest's robin
+  down to zero.
+- One more conformance net came with the `drain` and `survey` kinds of §5.1
+  on 2026-10-14: the example net of `EDGES_ON_EMPTY_PLACES.md` (in
+  `../petritype-rs/dev-docs/`), a shop that surveyed its promotions and
+  drained them at the close, so that the transcript over it
+  (`07_empty_place_edges.json`) replayed against both runtimes. On 2026-10-16
+  it was split in two, one mechanic each: the `shop` keeps the survey, and a
+  new `traffic-light` shows the drain beside a plain read, with a transcript
+  of its own (`08_traffic_light.json`). The Python nets are
+  `tests/protocol_nets/shop.py` and `tests/protocol_nets/traffic_light.py`,
+  which carry `examples/edges_on_empty_places/shop.py` and
+  `examples/edges_on_empty_places/traffic_light.py`. Their names, places,
+  transitions, guards and bodies are fixed here, since the transcripts depend
+  on them:
+
+  **`shop`** ("Price orders with whatever promotions are running"), hosted
+  `manual`, with no load parameters and no net parameters. Places, in this
+  order, all of type string, all serializable: `Orders` (orders waiting to be
+  priced), `Promotions` (promotions running now, usually none), `Priced` (one
+  per order priced), `Discounts Applied` (one per promotion applied to an
+  order). Seed: every place empty. One transition, unguarded: `Price Order`,
+  which takes the front of `Orders` (a `take` edge) and surveys `Promotions`
+  (a `survey` edge: every promotion, oldest first, zero or more, none
+  consumed), and produces the order into `Priced` (slot 0) and one
+  `"{promotion} on {order}"` per promotion, oldest first, into `Discounts
+  Applied` (slot 1). Its `consumed` lists the order alone. An empty
+  `Promotions` does not hold it back; it is never fireable while `Orders` is
+  empty, whatever `Promotions` holds. The transcript drives it with `inject`
+  and `step`: `"Order 1"` is priced with no promotion running; `"10% off"`
+  and `"Free shipping"` are injected, which makes nothing fireable, then
+  `"Order 2"`, priced with both; then a `step` fires nothing. A final
+  `get_state` and a `get_token` of each output token pin the marking:
+  `Priced` `["Order 1", "Order 2"]`, `Discounts Applied` `["10% off on Order
+  2", "Free shipping on Order 2"]`, `Promotions` `["10% off", "Free
+  shipping"]` (the survey left them running), `Orders` empty. Until
+  2026-10-16 the shop also had `Day End` (a marker token when the shop
+  closed), `Expired` and a second transition, `Close Day`, which took the
+  marker and drained `Promotions` into `Expired` (`"{promotion} expired"`
+  each), and its description ended "and end them at the close"; the
+  transcript closed the day twice, with two promotions running and with none.
+
+  **`traffic-light`** ("Cars wait at a light that cycles red, green and
+  amber, and all go when it turns green"), since 2026-10-16 (revised the
+  same day: two transitions), hosted `manual`, with no load parameters and
+  no net parameters. Places, in this order, all of type string, all
+  serializable: `Light` (the light: exactly one token, whose value is its
+  colour, `"red"`, `"green"` or `"amber"`, and whose `color` is the lamp's:
+  red `"#ff6347"`, green `"#32cd32"`, amber `"#ffa500"`), `Waiting` (cars waiting at the
+  light, oldest first: `"Car 1"`, `"Car 2"`, ...), `Passed` (every car that
+  has gone past the light, in the order they went). Seed: `"red"` in
+  `Light`, every other place empty. The colours go round red, green, amber
+  and red again. Transitions, in this order (the order matters: at green
+  with cars waiting both are fireable, and the first declared fires): `Go`,
+  guard: the light is green (the front token of `Light`) and `Waiting` is
+  not empty, which drains `Waiting` (a `drain` edge: every waiting car,
+  oldest first, all consumed) and reads `Light` (a `snapshot` edge: the
+  colour is read, not taken), and produces the cars, oldest first, into
+  `Passed`, one token per car; its `consumed` lists the cars, oldest first,
+  and the light's token is left as it was, with its id. `Change`, unguarded,
+  which takes the light from `Light` (a `take` edge) and produces the next
+  colour into `Light`: red to green, green to amber, amber to red. Bodies:
+  `Go` returns the cars unchanged, a list, which its one output place takes
+  as one token per car; `Change` returns the next colour; a car keeps its
+  name. The guard reads the net and is not described on the wire;
+  `fireable` is, and both runtimes compute it the same. `Go`'s guard needs
+  someone waiting because a drain accepts an empty place: without it `Go`
+  would be fireable at every green, and since a `step` fires the first
+  declared, it would fire at every green taking nothing and `Change` would
+  never fire (the light would stick on green); declared the other way
+  round, `Change` would always win at green and no car would go. The guard
+  hands the step to `Change` when nobody is waiting, so this net never fires
+  a drain on an empty queue (the `shop`'s survey shows the zero case).
+  `Change` is always fireable, so the light cycles by itself and the net
+  never quiesces; cars come from outside, by `inject` into `Waiting`. `Go`'s
+  only consuming edge is a drain, so it is structurally a source transition,
+  made safe by its guard; `Change` takes from and produces into `Light`, a
+  loop, so the net is cyclic. Each `Change` gives the light a fresh token;
+  `Go` leaves it. The transcript drives it with `inject` and `step` from the
+  seed: `Change` fires (consuming the light, `"red"`, and producing
+  `"green"` into `Light`); `Change` fires (amber); `"Car 1"` and `"Car 2"`
+  are injected into `Waiting`, and only `Change` is fireable, so the cars
+  wait (`Go` is held by its guard); `Change` fires (red); `Change` fires
+  (green), which makes `Go` and `Change` fireable; `Go` fires and drains
+  both (consuming `Car 1` and `Car 2` and producing both into `Passed`; the
+  light's token stays, with its id), which leaves `Change` fireable; `"Car
+  3"` is injected, which makes `Go` and `Change` fireable, and `Go` fires
+  (consuming `Car 3` and producing it into `Passed`); `Change` fires
+  (amber). A final `get_state` and a `get_token` of each token in `Passed`
+  and of the light pin the marking: `Light` `["amber"]`, `Passed` `["Car
+  1", "Car 2", "Car 3"]`, `Waiting` empty. Since 2026-10-16 the net also
+  declares two controls, in this order: `car`, `{name: "car", label: "+
+  Car", kind: "text", node: "Waiting", action: "inject", config:
+  {placeholder: "name"}}`, which adds a car to `Waiting` named as typed, or,
+  given the empty string, `"Car N"` with `N` one more than the cars in
+  `Waiting` and `Passed` together (read off the marking, so both runtimes name
+  it alike); and `change`, `{name: "change", label: "Change", kind:
+  "button", node: "Change", action: "fire"}`, which fires `Change` when it is
+  fireable. `Light` has the style `{fill: "token"}`. The light's token
+  entries and every `Change` firing's produced light carry its colour; cars
+  carry none. Six exchanges follow the final reads: `press change` fires
+  `Change` (amber to red, the produced light carrying `"#ff6347"`) and
+  answers `pressed`; `press car` with `value: ""` adds `"Car 4"` to
+  `Waiting`, and with `value: "Taxi"` adds `"Taxi"`, each `added` then
+  `pressed`; `press car` with `value: 7` is `invalid_params`, `press nope`
+  `unknown_control`, and `press change` with `value: true`
+  `invalid_params`. The fireable set stays `Change` alone through them, so
+  no `fireable` is sent, and the marking ends with `Light` `["red"]`,
+  `Waiting` `["Car 4", "Taxi"]` and `Passed` `["Car 1", "Car 2", "Car 3"]`.
+  On 2026-10-16 the light went from three places (`Red`, `Green`, `Amber`)
+  to one place (with three transitions: `Turn Green`, `Pass on Green`,
+  `Change`) to these two transitions, and then gained its controls and its
+  colours.
 
 ## 12. Nested nets
 
@@ -751,7 +1001,9 @@ A `path` or `nested_id` that names no live inner net is answered
   transition states, marking (its own token ids, unique within the inner
   net only, so a `get_token` on an inner token must name the net), progress
   and log. A result about an inner net carries `path` and `nested_id`
-  (absent for the outer net); the `net` of an inner `get_state` is the net's
+  (absent for the outer net), `inject`'s included: `{status, id,
+  marking_version, path, nested_id}`, with the inner net's version (since
+  2026-10-12); the `net` of an inner `get_state` is the net's
   name within its token, `template?` the template that built it, and
   `generation` the inner net's own, `1` for as long as it exists.
 - **Versions are per net.** Each inner net has its own `marking_version`,
@@ -771,6 +1023,22 @@ A `path` or `nested_id` that names no live inner net is answered
   entry of an inner firing carry its `path` and `nested_id`; the
   `marking_version` of a `step` result is the outer net's. An inner net in a
   `passive` place is never fired by the driver; only an outer body steps it.
+  That order is the default. A net built with the interleaved deep-step
+  policy (Python `deep_policy="interleaved"`, Rust `DeepPolicy::Interleaved`,
+  since 2026-10-12) is driven round a cycle instead, the outer net and then
+  the inner nets in that same order: each firing goes to the first net with
+  something to fire, counting from the net after the one the last firing was
+  in, so that an outer net that can always fire does not starve the inner
+  ones; the policy, like the tie-break within each net, is the runtime's own
+  and nothing on the wire changes (`DESIGN_RUNNER.md`, Rust `DESIGN.md`
+  §6.6).
+- **Baselines.** An inner net's `fireable` baseline (§7.2) is taken when the
+  runtime first knows of the net: at `load` for the inner nets the factory
+  seeded, at the `inject` that carried the token, or at the landing of the
+  outer firing that produced the token. No `fireable` is sent for the
+  baseline itself; the first `nested` `fireable` for that net reports the
+  first change from it. `reset` and `load` retake every baseline, the nets
+  being new (since 2026-10-12).
 - **Reads during a firing.** While an outer body runs, a read addressed to
   an inner net of a token that firing took, or holds through a mutate edge,
   is answered after the landing (it may wait, as `get_token` on such a token
@@ -778,9 +1046,13 @@ A `path` or `nested_id` that names no live inner net is answered
   outer body reaches only the tokens it holds and an inner body only its own
   net, and is answered at once. While an inner body runs, reads of that inner
   net follow §6.3 as for the outer net.
-- `enable`, `disable`, `set_param`, `start`, `stop` and `reset` act on the
-  outer net only. An inner net's switches and parameters are set by the
-  template that builds it or by an outer body reaching inside.
+- `enable`, `disable`, `set_param`, `start`, `stop`, `reset`, `step` and
+  `press` act on the outer net only; any of them given `path` or `nested_id`
+  is `invalid_params` (`step` named here since 2026-10-12: its result names
+  the net a firing was in, its request names none; `press` since 2026-10-16,
+  the controls being the outer net's). An inner net's switches and
+  parameters are set by the template that builds it or by an outer body
+  reaching inside.
 
 ### 12.4 Inner events
 
@@ -843,7 +1115,10 @@ each inner net, that net's state:
 - `inject` into a nested place takes this form, builds the inner nets from
   their templates and imports their markings, parameters and switches, then
   appends the token and emits `added` for it alone: the inner tokens arrived
-  with it and are read with it.
+  with it and are read with it. Its nets are known from then on (§12.3,
+  baselines). An `inject` addressed to an inner net, of this form or any
+  other, is answered with that net's `path`, `nested_id` and version
+  (§12.3).
 
 ### 12.6 Lifetime
 
@@ -902,12 +1177,12 @@ clause is `{key, values: [value]}` or `{key, param}`.
 | `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches: [{place, token, json?}]}` |
 | `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values: [value]}` |
 
-- `query` returns the tokens matching `filter` (absent: the connection's
-  filter of §13.4, else every token), in place order then token order, each
-  as `{place, token, json?}`: `token` a full token entry (§5.3, keys
-  included) and `json` the token's JSON value where its place is
-  `serializable`. `count` is the number of matches and `matches` holds the
-  first `token_limit` of them (default 200, clamped to 1..1000, as
+- `query` returns the tokens matching `filter` (absent, or `null` as §2
+  says: the connection's filter of §13.4, else every token), in place order
+  then token order, each as `{place, token, json?}`: `token` a full token
+  entry (§5.3, keys included) and `json` the token's JSON value where its
+  place is `serializable`. `count` is the number of matches and `matches`
+  holds the first `token_limit` of them (default 200, clamped to 1..1000, as
   `get_state`). It reflects the marking at `marking_version` and never waits
   for a running body: it is served from the same marking as `get_state`.
 - `distinct` returns the distinct values of `key` over the tokens of the
@@ -945,8 +1220,9 @@ wire make possible. Under a filter:
   names, which is followed by an `added` or `removed` for each token it
   brings into or out of view (after its `param_changed`). `count` in a read
   is the truth whenever a client doubts its own tally.
-- `launched.consumed`, `distributed.produced` and `fired`'s lists hold only
-  matching tokens; the notification is sent even when a list comes out
+- `launched.consumed`, `failed.consumed`, `distributed.produced` and
+  `fired`'s lists hold only matching tokens (a `failed` lists what its
+  `launched` listed); the notification is sent even when a list comes out
   empty, since it moves the version.
 - `query` without a `filter` uses the connection's; `query` with one uses
   that alone and leaves the connection's as it was.

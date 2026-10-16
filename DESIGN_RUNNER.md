@@ -136,7 +136,7 @@ Token ids and events landed as designed, with these settlements:
 | `progress` | `step_count`, `last_fired`, `fired_counts` (already on the graph) plus `last_progress_at` kept by the runner |
 | token `label`, `color` | pydantic `model_dump_json` or `repr`, cut at 1000 characters; `.color` resolved to hex (moved from the server) |
 | `places[].serializable` | the place type is a pydantic model or a JSON scalar |
-| edges | argument edges (`take`, or `take_all` for a `list[...]` argument), `snapshot_edges`, `mutate_edges`, return edges (`slot` from `return_index`) |
+| edges | argument edges (`take`, or `take_all` for a `list[...]` argument; `take_where` for a `TakeWhereEdge`, `drain` for a `DrainEdge`), `snapshot_edges` (`snapshot`, or `survey` for a `SurveyEdge`), `mutate_edges` (`mutate`, `mutate_where`), return edges (`slot` from `return_index`) |
 
 ## The runner module
 
@@ -317,7 +317,8 @@ Settlements:
   the batch touched.
 - **Driving.** `_select` asks the outer net's selector first and, when it
   picks nothing, descends in the library driver's order (place, token, net; a
-  net's own inner nets before the next token), each net by its own selector.
+  net's own inner nets before the next token), each net by its own selector
+  (the default deep-step policy; the interleaved one came on 2026-10-12, below).
   A firing in an inner net goes through `fire_one_transition` on that net
   with a pinned selector and `descend=False`. On landing the outer net counts
   it under its path (`step_count`, `fired_counts["Depot/#17/cabin/Sit"]`,
@@ -340,7 +341,8 @@ Settlements:
   (`graph.params`, through the new `SetNetParam` command): it must be
   declared, and keeps the JSON type of its current value. Before 2026-10-09
   this was `invalid_params`; the Rust runner's net-wide `set_param` and the
-  saved form's `params` now mean the same in both.
+  saved form's `params` now mean the same in both. *2026-10-12:* a parameter
+  the factory annotates decodes by that annotation instead (below).
 - **Inner nets' sync bodies** are moved to a thread when the owner first sees
   the net, as the outer net's are at load.
 
@@ -367,10 +369,12 @@ as §11 asks (every token id and nested id a named capture, `bus`,
 re-records it from its own sends (`uv run python tests/record_transcript.py
 tests/protocol/05_nested_nets.json -o tests/protocol/05_nested_nets.json`).
 Recording it showed one runner detail worth knowing: an inner net the owner
-has not yet seen gets its first `fireable` baseline when it is first touched,
-after the firing, so the firing that first touches it reports no `nested`
+had not yet seen got its first `fireable` baseline when it was first touched,
+after the firing, so the firing that first touched it reported no `nested`
 `fireable` for it; the transcript reads both cabins before the first step,
-which keeps that out of what both runtimes must agree on.
+which kept that out of what both runtimes must agree on. Since 2026-10-12 the
+baseline is taken when the owner first knows of the net (below), as the Rust
+runner does, and the transcript replays unchanged.
 
 ## As built, 2026-10-09: keys, queries and the connection's projection (PROTOCOL.md §13)
 
@@ -409,6 +413,179 @@ Settlements:
 
 The shared transcript `tests/protocol/06_keys_query_filter.json` asks the design's five
 questions over the wire on the `wildlife` conformance net (`tests/protocol_nets/wildlife.py`,
-the example itself), sets a projection and watches a migration, a spread and two injections
-through it; `tests/test_runner_keys.py` covers the rest (the mutations that cross the
-boundary, the parameter-driven changes, a filter on an inner net).
+the example itself), sets a projection, turns `season` to summer and back, and watches through
+it a keyed spread with its copy, a hidden decline, three keyed migrations, a settling and two
+injections (re-recorded on 2026-10-13 for the net's second edition, PROTOCOL.md §11);
+`tests/test_runner_keys.py` covers the rest (the mutations that cross the boundary, the
+parameter-driven changes, a filter on an inner net).
+
+## As built, 2026-10-12: the protocol's wording gaps and the scheduling policies
+
+PROTOCOL.md was amended on 2026-10-12 to close eight gaps in its wording (the
+decisions A1 to A8 of that day, shared with the Rust runner); where the runner
+did not yet do what the words say, it changed. The engine gained two
+scheduling policies at the same time (`PROPOSED_DESIGN_GOALS.md`, "Ordering is
+intentional"), which the runner honours.
+
+Settlements:
+
+- **The fold (§11).** `fold()` in `tests/test_protocol_transcripts.py` folds a
+  `launched` and the next `distributed` of the same transition across the
+  lines the firing's own body causes (`BETWEEN_PIECES`: `nested`, `mutated`,
+  `hidden`, `added`, `removed`), which keep their places before the `fired`;
+  inside `nested` wrappers likewise per inner net. Both the expected and the
+  actual lines are folded, as the Rust harness folds them. A failed firing is
+  not folded.
+- **`inject` into an inner net** answers `{status, id, marking_version, path,
+  nested_id}`, with the inner net's version (§12.3).
+- **`step` is outer-only** (§12.3): it was already in `OUTER_ONLY`, so a
+  `path` or `nested_id` on it was already `invalid_params`; now pinned by a
+  test, as is `invalid_params` for an undeclared `set_param` name (§6.4).
+- **`null` counts as absent** (§2): `Requests.null_as_absent`, the one helper,
+  drops every `null` field of a request's params when it is parsed, except the
+  two whose `null` is a value (`inject.token`, `set_param.value`:
+  `NULL_IS_A_VALUE`). A required field given `null` is then missing, which is
+  `invalid_params` as before.
+- **`failed.consumed` under a filter** (§13.4) lists what its `launched`
+  listed (`_Net.launched_shown`); a restored token goes back into the set the
+  connection has been shown, so `_sync_visible` no longer announces it as a
+  fresh `added`.
+- **Baselines** (§7.2, §12.3): `Owner._know_new` builds the `_Net`, and so
+  takes the `fireable` baseline, of every inner net at any depth the owner does
+  not know yet, at the end of `load` and `reset`, after an `inject` and at each
+  landing; a net with events in a batch is still known from that batch, after
+  them. The firing that first touches a seeded cabin now reports its `nested`
+  `fireable`.
+- **Parameter values by their declared type** (§6.4): a net parameter decodes
+  by the annotation of the factory parameter of the same name
+  (`NetEntries.adapter`, strict JSON as a load parameter is), and, when the
+  factory does not annotate one, by the JSON type of its current value as
+  before. `NetEntries.params_of` now evaluates annotations
+  (`inspect.signature(eval_str=True)`), so a module written with `from
+  __future__ import annotations` is checked too; one that will not evaluate
+  stays a string and passes unchecked. The transit factory declares
+  `destination: str | None = None`, so the override takes a place name or
+  `null` in either order and can be cleared over the wire. That makes
+  `destination` a load parameter of `transit` as well, which `describe`
+  lists (not required, default `null`); PROTOCOL.md §11 says so, and the Rust
+  conformance net must declare the same for the shared transcript to replay.
+- **The scheduling policies.** The tie-break needs nothing of the runner: it
+  chooses with the net's own selector (`_select_in`), so the default selector
+  moves the cursor of the net that fires and no other, on every pick under any
+  tie-break (only `"round_robin"` reads it), and a
+  disabled transition, not being fireable, is never a candidate. `reset` and
+  `load` build a new graph, so its cursor starts afresh. `_select` reads the
+  loaded net's `deep_policy`: under `"outer_first"` it is what it was; under
+  `"interleaved"` it goes round `NestedNets.deep_turns` (the library's cycle,
+  starting after the library's cursor) and asks each net's selector in turn.
+  Under either policy it records the net it chose with `NestedNets.took_turn`
+  as it launches, as the library does, so a `deep_policy` switched to
+  `"interleaved"` mid-run resumes after the net that fired last. `step` and a
+  running net share `_select`, so both honour it. Nothing on the wire changes.
+
+The shared transcript `tests/protocol/05_nested_nets.json` was re-recorded
+with `tests/record_transcript.py` for two lines: `describe` now lists
+`destination`, and the inner `inject` answers with its `path` and
+`nested_id`. Being recorded with the new fold, its firings read as `fired`
+lines now where they read as `launched` and `distributed` pairs around their
+bodies' lines before; both harnesses fold the expected lines too, so either
+shape replays. The recorder walked `describe`'s `nets` as if it were a token's
+`nets`, which left a parameter's `type_name` unmasked; it now masks it.
+`tests/test_runner_protocol_gaps.py` covers A2 to A8 and the policies through
+the owner.
+
+## As built, 2026-10-14: edges that accept an empty place (PROTOCOL.md §5.1)
+
+The library gained `DrainEdge` and `SurveyEdge` (`PROPOSED_DESIGN_GOALS.md`,
+"Input edges that accept an empty place"): an argument edge that takes every
+token of its place and a snapshot edge that copies every token, both zero or
+more, neither holding its transition back. The runner needed little for them,
+since both are subclasses of edges it already reads:
+
+- **Topology.** `Topologies.of` lists a `DrainEdge` as `kind: "drain"` and a
+  `SurveyEdge` as `kind: "survey"` (a drain is tested before the `take_all`
+  case, which its `list[T]` argument would also pass); `wire.Edge.kind` admits
+  the two strings. Nothing else on the wire changes.
+- **`launched.consumed`.** `_handed_over` treats a drain as taking every
+  remaining token of its place, so `consumed` lists each car the traffic
+  light's `Go` drains, oldest first (and nothing of the light, which it
+  reads), and would list none from an empty place; the snapshot a read during
+  the body is served from leaves them out. A survey takes nothing and hands
+  nothing over live.
+- **Fireability** is the library's (`ExecutableGraphCheck.transition_is_fireable`),
+  which skips the presence check for both kinds (`requires_presence`), so the
+  `fireable` lists and notifications follow with no change here.
+
+Two shared transcripts drive the edges over the wire, each on a conformance
+net that is the example itself (PROTOCOL.md §11). Until 2026-10-16 there was
+one, on a shop that both surveyed its promotions and drained them at the
+close; it was split so that each example shows one mechanic.
+`tests/protocol/07_empty_place_edges.json`, on the `shop`
+(`tests/protocol_nets/shop.py`), shows the topology with its `survey` edge,
+an order priced with no promotion running, two promotions injected without
+making anything fireable, an order priced with both, a step that fires
+nothing, and the final marking with each output token's value.
+`tests/protocol/08_traffic_light.json`, on the `traffic-light`
+(`tests/protocol_nets/traffic_light.py`; revised the same day so that the
+light is one place whose token is its colour, and again so that the net has
+two transitions, `Change` cycling the light and `Go` draining the cars on
+green), shows the topology with its `drain` and its plain `snapshot` read of
+the light, the light going green and amber with nobody waiting, two cars
+arriving at amber and waiting through red, the light going green and `Go`
+draining both, a car arriving at green and going straight through, and the
+final marking with each car's and the light's value. Both were recorded with `tests/record_transcript.py`, re-record to
+the same bytes, and replay through the owner and over pipes.
+`tests/test_empty_place_edges.py` covers the rest through the library and
+the owner.
+
+## As built, 2026-10-16: net-declared controls and place styles (PROTOCOL.md §5.1, §6.6)
+
+A net declares, beside it, the controls a viewer shows and how its places are
+drawn: `@petri_net(controls=..., place_styles=...)`, which `NetEntry` carries
+(`controls`, the `{name: ControlSpec}` map or a zero-argument callable
+returning one; `place_styles`, `{place: PlaceStyle}`). Both stay off the net,
+as `ControlSpec` always was. The runner gained one method, `press`, in
+`METHODS` and in `OUTER_ONLY`, and one error code, `unknown_control`.
+
+- **Topology.** At each build (`load`, `reset`) `NetEntries.controls`
+  resolves the map, kept on `_Loaded.controls` for that generation, and
+  `Topologies.declare` puts `Controls.wire` of it on the outer net's topology
+  as `controls` and each style on its place as `style`. A wire `Control` is
+  the `ControlSpec` without `to_command`: `node`, `action` and `config` left
+  out when absent or empty, and `config.value` for a `button` or a `text`,
+  which have no initial value. A kind or an action outside the vocabulary, a
+  `node` that is no place or transition, a `config` that is not plain JSON or
+  a style on a place the net does not have is `load_failed`. Inner nets'
+  topologies carry neither.
+- **Dispatch.** `Owner._press` looks the control up (`unknown_control`),
+  checks the value by kind (`Controls.value`, `invalid_params`: a button takes
+  none and hands `to_command` `True`, as a notebook's clicked button does),
+  and calls `ControlSpec.command`, which hands `to_command` the net too when
+  it takes a second argument. `None` answers `nothing`. A `Fire` is a pinned
+  `step`: `nothing` at once when `_is_fireable` says no (switched off, in
+  flight, inputs missing or guard failing), else `_launch` with the press's
+  id on `_InFlight.press_id`, so `launched`, `distributed`, the log entry,
+  progress and `fireable` follow as for a step, and `_pressed` answers when it
+  lands. Any other command goes through `_apply` and `_flush` as an `inject`'s
+  does, then `pressed`. A `to_command` that raises, a `Fire` naming no
+  transition, or a command the strict context refuses is `internal`. While a
+  body is airborne a `press` waits for the landing, as every non-read does.
+- **The runtime.** `Fire(transition)` is a command: `Runner.drain_inbox`
+  fires that transition once if it is fireable, through `fire_one_transition`
+  with a selector pinned to it and no descent, counted against the fuse.
+  `drain_inbox` is synchronous and the engine's firing is a coroutine, so the
+  firing is run to completion on a fresh event loop, on a helper thread when
+  the caller's thread already runs one (`_run_now`); the caller waits, as for
+  a synchronous body. The Owner does not take that path: its `Fire` is the
+  pinned step above.
+- **Colour.** No new mechanism: a token's `.color` is its `color`. The
+  traffic light's light is a `Colour(str)`, which `JsonForm` now treats as a
+  `str` (a subclass of a JSON scalar has its scalar's form, built by its own
+  constructor), so its JSON form stays `"red"`.
+
+`tests/protocol/08_traffic_light.json` was re-recorded with six presses
+appended (PROTOCOL.md §11) and its colours kept: a shared transcript now
+carries a colour given as lowercase `#rrggbb`, which `tests/record_transcript.py`
+keeps and the shared-safe check allows, and pins `topology.controls` as
+declared, labels included. `tests/test_net_controls.py` covers the rest, and
+`tests/test_empty_place_edges.py` the traffic light's two controls.

@@ -12,7 +12,8 @@ from petritype.core.data_structures import (
     TypeRelationship
 )
 from petritype.core.executable_graph_components import (
-    ArgumentEdgeToTransition, ExecutableGraph, MutateEdge, ReturnedEdgeFromTransition, SnapshotEdge
+    ArgumentEdgeToTransition, DrainEdge, ExecutableGraph, MutateEdge, ReturnedEdgeFromTransition, SnapshotEdge,
+    SurveyEdge,
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
 
@@ -21,9 +22,10 @@ class RustworkxArgumentEdgeData(BaseModel):
     source_place_node_name: PlaceNodeName
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
+    drain: bool = False  # True for DrainEdge: takes every token, zero or more
 
     def __hash__(self):
-        return hash((self.source_place_node_name, self.target_transition_node_name, self.argument))
+        return hash((self.source_place_node_name, self.target_transition_node_name, self.argument, self.drain))
 
     def __eq__(self, other):
         if not isinstance(other, RustworkxArgumentEdgeData):
@@ -31,7 +33,8 @@ class RustworkxArgumentEdgeData(BaseModel):
         return (
             self.source_place_node_name == other.source_place_node_name and
             self.target_transition_node_name == other.target_transition_node_name and
-            self.argument == other.argument
+            self.argument == other.argument and
+            self.drain == other.drain
         )
 
 
@@ -58,10 +61,11 @@ class RustworkxReadEdgeData(BaseModel):
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
     mutate: bool  # True for MutateEdge (read/write), False for SnapshotEdge (read-only copy)
+    survey: bool = False  # True for SurveyEdge: a copy of every token, zero or more
 
     def __hash__(self):
         return hash(
-            (self.source_place_node_name, self.target_transition_node_name, self.argument, self.mutate)
+            (self.source_place_node_name, self.target_transition_node_name, self.argument, self.mutate, self.survey)
         )
 
     def __eq__(self, other):
@@ -71,7 +75,8 @@ class RustworkxReadEdgeData(BaseModel):
             self.source_place_node_name == other.source_place_node_name and
             self.target_transition_node_name == other.target_transition_node_name and
             self.argument == other.argument and
-            self.mutate == other.mutate
+            self.mutate == other.mutate and
+            self.survey == other.survey
         )
 
 
@@ -114,6 +119,7 @@ class RustworkxGraph:
                     source_place_node_name=edge.place_node_name,
                     target_transition_node_name=edge.transition_node_name,
                     argument=edge.argument,
+                    drain=isinstance(edge, DrainEdge),
                 ),
             ))
         return tuple(out)
@@ -155,6 +161,7 @@ class RustworkxGraph:
                         target_transition_node_name=edge.transition_node_name,
                         argument=edge.argument,
                         mutate=mutate,
+                        survey=isinstance(edge, SurveyEdge),
                     ),
                 ))
         return tuple(out)

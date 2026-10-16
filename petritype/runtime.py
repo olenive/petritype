@@ -32,7 +32,8 @@ Layers built so far:
   deposits by the engine, inbox commands as they are applied.
 - **Nested tokens:** a token of a ``nested`` place holds nets of its own (``NestedNets``),
   which every loop here runs as part of running the outer net: sequential firing descends
-  through ``fire_one_transition`` (outer first, then inner nets in place, token, net order);
+  through ``fire_one_transition`` (outer first, then inner nets in place, token, net order,
+  or the nets in turn under the graph's ``deep_policy="interleaved"``);
   the concurrent loops give one inner net the turn when nothing outer can launch and
   nothing is in flight. Inner firings count as firings of the outer net under their path.
 
@@ -42,8 +43,11 @@ Design notes realised here:
   plus a passive `RunContext` the caller owns.
 - **Commands target places, transitions or the net.** Places: `Extend` (append a list of
   tokens) / `SetTokens` (replace; `[]` clears). Transitions: `SetParam` (merge kwargs),
-  `Enable` / `Disable`. The net: `SetNetParam` (one of ``graph.params``). Bad commands are
-  dropped-and-logged, or raise under `RunContext.strict`.
+  `Enable` / `Disable`, `Fire` (fire it now if it is fireable). The net: `SetNetParam` (one
+  of ``graph.params``). Bad commands are dropped-and-logged, or raise under `RunContext.strict`.
+- **Controls:** a control-map ``{name: ControlSpec}`` binds widgets to commands; a net
+  declares one with ``@petri_net(controls=...)`` and its place styles (``PlaceStyle``) with
+  ``place_styles=...``, which the protocol runner serves to viewers (PROTOCOL.md §5.1, §6).
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ import asyncio
 import inspect
 import logging
 import time
-from concurrent.futures import Executor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional, Union
@@ -189,7 +193,17 @@ class SetNetParam:
     value: Any
 
 
-Command = Union[Extend, SetTokens, SetParam, Enable, Disable, SetNetParam]
+@dataclass
+class Fire:
+    """Fire one transition now, if it is fireable (enabled, not in flight, its inputs there
+    and its guard passing); otherwise do nothing. What a ``fire`` control's press produces.
+    Fired through the engine's one-firing primitive with a selector pinned to it, outer net
+    only (no descent into inner nets), counted as any firing is."""
+
+    transition: str
+
+
+Command = Union[Extend, SetTokens, SetParam, Enable, Disable, SetNetParam, Fire]
 
 
 @dataclass
@@ -230,32 +244,109 @@ class RunContext:
     n_fired: int = 0
 
 
+# The widgets a control may be, and what its press does (for a viewer's lighting rule).
+CONTROL_KINDS = ("button", "toggle", "slider", "select", "text")
+CONTROL_ACTIONS = ("inject", "fire", "enable")
+
+
+def _takes_net(function: Callable) -> bool:
+    """Whether ``function`` takes a second positional argument, the net as it stands."""
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p for p in parameters
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
+
+
 @dataclass
 class ControlSpec:
     """A declarative binding of a UI control to a place/transition. Apps author a control-map
     ``{name: ControlSpec}`` — kept *off* the net — and the UI renders it, feeding each widget's
     value to ``to_command`` and enqueuing whatever command comes back (``None`` = nothing to do).
+    A net may declare its map with ``@petri_net(controls=...)``; the protocol runner then
+    serves it as ``topology.controls`` and runs it on ``press`` (PROTOCOL.md §5.1, §6).
 
     - ``node``       — the place/transition the control targets (for labelling / future co-location).
-    - ``kind``       — which widget: ``"button" | "toggle" | "slider" | "select"``.
+    - ``kind``       — which widget: ``"button" | "toggle" | "slider" | "select" | "text"``. It
+                       fixes the value a press carries: a button's is ``True`` (clicked), a
+                       toggle's a boolean, a slider's a number, a select's one of its options,
+                       a text's a string.
     - ``label``      — display label.
-    - ``to_command`` — ``value -> Command | None`` (turns the UI value into an inbox command).
+    - ``to_command`` — ``value -> Command | None`` (turns the UI value into an inbox command);
+                       one that takes a second argument is handed the net as it stands too,
+                       ``(value, graph) -> Command | None``, for a command that depends on the
+                       marking. ``ControlSpec.command`` calls it either way.
     - ``config``     — widget specifics (slider ``start``/``stop``/``step``, select ``options``,
-                       default ``value``).
+                       text ``placeholder``, default ``value``).
+    - ``action``     — what kind of thing a press does, for a viewer's lighting rule only:
+                       ``"fire"`` (lit while ``node`` is fireable), ``"enable"`` (a toggle
+                       showing ``node``'s switch), ``"inject"``, or ``None`` (always lit). The
+                       constructors ``inject``, ``fire`` and ``enable`` set it.
     """
 
     node: str
     kind: str
     label: str
-    to_command: Callable[[Any], Optional[Command]]
+    to_command: Callable[..., Optional[Command]]
     config: dict = field(default_factory=dict)
+    action: Optional[str] = None
+
+    @staticmethod
+    def inject(place: str, make: Callable[..., Any], label: str, kind: str = "button",
+               config: Optional[dict] = None) -> "ControlSpec":
+        """A control that adds a token to ``place``: ``make(value)`` is the token, or
+        ``make(value, graph)`` when it takes the net too (to number what it makes from the
+        marking, say). A press gives ``Extend(place, [token])``."""
+        reads_net = _takes_net(make)
+
+        def to_command(value: Any, graph: Optional[ExecutableGraph] = None) -> Command:
+            return Extend(place, [make(value, graph) if reads_net else make(value)])
+
+        return ControlSpec(place, kind, label, to_command, dict(config or {}), action="inject")
+
+    @staticmethod
+    def fire(transition: str, label: str) -> "ControlSpec":
+        """A button that fires ``transition`` once, if it is fireable (``Fire``)."""
+        return ControlSpec(transition, "button", label, lambda _clicked: Fire(transition), action="fire")
+
+    @staticmethod
+    def enable(transition: str, label: str, value: bool = True) -> "ControlSpec":
+        """A toggle that switches ``transition`` on (``Enable``) or off (``Disable``); ``value``
+        is the toggle's initial state."""
+        return ControlSpec(
+            transition, "toggle", label,
+            lambda on: Enable(transition) if on else Disable(transition),
+            {"value": value}, action="enable",
+        )
+
+    @staticmethod
+    def command(spec: "ControlSpec", value: Any, graph: Optional[ExecutableGraph] = None) -> Optional[Command]:
+        """``spec.to_command`` applied to ``value``, handed ``graph`` too when it takes one."""
+        if _takes_net(spec.to_command):
+            return spec.to_command(value, graph)
+        return spec.to_command(value)
+
+
+@dataclass(frozen=True)
+class PlaceStyle:
+    """How a viewer draws a place, declared beside the net with
+    ``@petri_net(place_styles={place: PlaceStyle(...)})`` and served in the topology
+    (PROTOCOL.md §5.1). ``fill="token"``, the one fill so far: while the place holds exactly
+    one token and that token has a colour, the viewer fills the place with it."""
+
+    fill: str
 
 
 def apply_control(ctx: RunContext, spec: ControlSpec, value: Any) -> Optional[Command]:
-    """Turn a control's value into a command via ``spec.to_command`` and enqueue it on
-    ``ctx.inbox`` (if any). Returns the command, or ``None`` if the control produced nothing.
-    The control never touches the graph — only the inbox."""
-    command = spec.to_command(value)
+    """Turn a control's value into a command via ``ControlSpec.command`` (``spec.to_command``,
+    handed the net when it takes it) and enqueue it on ``ctx.inbox`` (if any). Returns the
+    command, or ``None`` if the control produced nothing. The control never touches the graph
+    — only the inbox."""
+    command = ControlSpec.command(spec, value, ctx.graph)
     if command is not None and ctx.inbox is not None:
         ctx.inbox.put_nowait(command)
     return command
@@ -287,6 +378,62 @@ def _reject(ctx: RunContext, reason: str) -> bool:
     return False
 
 
+def _run_now(coroutine) -> Any:
+    """Run ``coroutine`` to completion from synchronous code: on a fresh event loop, in a
+    helper thread when this thread already runs one (``drain_inbox`` is synchronous and is
+    called from inside the Runner's own loops). The caller waits, as it waits for a
+    synchronous body."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    with ThreadPoolExecutor(max_workers=1) as helper:
+        return helper.submit(asyncio.run, coroutine).result()
+
+
+def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
+    """Apply a ``Fire``: if ``cmd.transition`` is fireable now (switched on in ``ctx`` and on
+    the graph, not in flight, inputs there, guard passing), fire it once through
+    ``fire_one_transition`` with a selector pinned to it and no descent into inner nets,
+    counted against the fuse; otherwise do nothing. Returns True iff it fired. A body that
+    fails raises ``TransitionFailedError``, as a step's would."""
+    graph = ctx.graph
+    transition = _transition_named(graph, cmd.transition)
+    if transition is None:
+        return _reject(ctx, f"unknown transition {cmd.transition!r}")
+    if transition.name in ctx.disabled or transition.name in graph.in_flight:
+        return False
+    place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(graph)
+    if not ExecutableGraphCheck.transition_is_fireable(
+        transition=transition,
+        executable_graph=graph,
+        transition_names_to_incoming_edges=incoming,
+        place_names_to_nodes=place_nodes,
+        transition_names_to_read_edges=read,
+    ):
+        return False
+    if _fuse_spent(ctx):
+        _blow_fuse(ctx, transition.name)
+
+    def pinned(_graph, fireable):
+        return transition if any(t is transition for t in fireable) else None
+
+    fired = _run_now(ExecutableGraphOperations.fire_one_transition(
+        executable_graph=graph,
+        place_names_to_nodes=place_nodes,
+        transition_names_to_incoming_edges=incoming,
+        transition_names_to_outgoing_edges=outgoing,
+        transition_names_to_read_edges=read,
+        transition_selector=pinned,
+        executor=ctx.thread_pool,
+        descend=False,
+    ))
+    if fired is None:
+        return False
+    ctx.n_fired += 1
+    return True
+
+
 def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     """Apply one input command to the live graph. Returns True if applied.
 
@@ -294,9 +441,14 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     ``SetTokens`` retires every old id (``Removed``) and gives every new token a
     fresh one (``Added``); ``SetParam`` records one ``ParamChanged`` per keyword,
     ``SetNetParam`` one with no transition; ``Enable``/``Disable`` record
-    ``Toggled`` only when the switch changed."""
+    ``Toggled`` only when the switch changed; ``Fire`` records the firing's events
+    when it fires (``_fire_now``) and nothing when it does not, which is not a
+    rejection (False, nothing logged)."""
     graph = ctx.graph
     TokenIds.resync(graph)
+
+    if isinstance(cmd, Fire):
+        return _fire_now(ctx, cmd)
 
     if isinstance(cmd, (Extend, SetTokens)):
         place = graph.place_named(cmd.place)
@@ -572,7 +724,8 @@ class Runner:
     def drain_inbox(ctx: RunContext) -> int:
         """Apply all currently-queued input commands, in FIFO order. Synchronous (no await),
         so it is safe to call between fires without interleaving a torn marking. Returns the
-        number of commands applied."""
+        number of commands applied. A ``Fire`` fires its transition here, if it is fireable,
+        and is waited for (``_fire_now``); one that finds it not fireable is not counted."""
         if ctx.inbox is None:
             return 0
         applied = 0

@@ -541,7 +541,7 @@ class TestObservability:
 
 def _policy(city: ExecutableGraph, policy: str) -> ExecutableGraph:
     """Set a tie-break on the city and on every cabin: ``first_declared`` (the
-    default), ``last_declared``, or a seeded random choice (``random:<seed>``).
+    default), ``last_declared``, ``round_robin``, or a seeded random choice (``random:<seed>``).
     Whatever the policy, the city fires before its cabins (the engine's order)."""
     if policy.startswith("random:"):
         rng = random.Random(int(policy.split(":")[1]))
@@ -557,7 +557,7 @@ def _policy(city: ExecutableGraph, policy: str) -> ExecutableGraph:
 
 class TestTheJourney:
 
-    @pytest.mark.parametrize("policy", ["first_declared", "last_declared", "random:1", "random:2", "random:3"])
+    @pytest.mark.parametrize("policy", ["first_declared", "last_declared", "round_robin", "random:1", "random:2", "random:3"])
     def test_plain_stepping_delivers_every_passenger_to_arrived(self, policy):
         city = _policy(build_city(), policy)
         events = run(journey(city, budget=100))

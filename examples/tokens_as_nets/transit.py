@@ -23,7 +23,10 @@ while alighting, depart once every door is closed), the cabin closes the doors
 stepping, the city first and a cabin only when the city has nothing to fire,
 carries every passenger to ``Arrived`` with nothing disabled and no transition
 picked by name. A passenger who alights goes to ``Arrived``, never back onto a
-platform, where they would board again.
+platform, where they would board again. The city keeps the engine's default
+deep-step policy, outer first, because its guards let it fall quiet while a cabin
+has work; ``deep_policy="interleaved"`` is the policy for a net that cannot give
+its outer transitions guards, since it lets every live net fire in turn.
 
 Run it to watch the journey, with the city's event log showing the inner firings
 under the path of the vehicle they happened in::
@@ -351,10 +354,12 @@ WAITING = {"Depot": ["Ada", "Bram", "Cato"], "Central": ["Dara", "Eve"], "Harbou
 PASSENGERS = tuple(passenger for queue in WAITING.values() for passenger in queue)
 
 
-def build_city(record_events: bool = True, restore_tokens_on_failure: bool = False) -> ExecutableGraph:
+def build_city(
+    record_events: bool = True, restore_tokens_on_failure: bool = False, destination: Optional[str] = None,
+) -> ExecutableGraph:
     """The seed: a bus with two seats at the depot and a ferry at the harbour, both
     boarding and empty; seven passengers waiting on three platforms; no
-    destination override, so every vehicle follows the loop."""
+    destination override unless one is given, so every vehicle follows the loop."""
     return ExecutableGraphOperations.construct_graph(
         city_nodes_and_edges(
             vehicles={
@@ -363,15 +368,19 @@ def build_city(record_events: bool = True, restore_tokens_on_failure: bool = Fal
             },
             waiting={stop: list(queue) for stop, queue in WAITING.items()},
         ),
-        params={"destination": None},
+        params={"destination": destination},
         record_events=record_events,
         restore_tokens_on_failure=restore_tokens_on_failure,
     )
 
 
 @petri_net(name="transit", description="Vehicles board, carry and alight passengers")
-def transit() -> ExecutableGraph:
-    return build_city()
+def transit(destination: str | None = None) -> ExecutableGraph:
+    """The city as the runner loads it. ``destination`` is the net parameter of
+    that name, the override of the loop, and its annotation is its declared type:
+    the runner decodes ``set_param`` by it (PROTOCOL.md §6.4), so the override
+    takes a place name or ``null``, in either order, and refuses a number."""
+    return build_city(destination=destination)
 
 
 # --- stepping ---------------------------------------------------------------------------------

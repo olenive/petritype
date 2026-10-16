@@ -30,8 +30,11 @@ nested id is a capture named after its holder and its name there
 ``"<version>"``; every ``label``, ``type_name``, ``message``, ``runtime`` and
 ``runtime_version`` ``"<label>"``; every ``duration_ms`` ``"<ms>"``; every time
 ``"<time>"``; every ``detail`` ``"<any>"``; ``topology.edges`` is
-``{"<unordered>": [...]}``. A line carrying a ``color``, or any other value or
-key that embeds a token id (an outer ``fired_counts`` after inner firings, say),
+``{"<unordered>": [...]}``. ``topology.controls`` is kept as it stands, labels
+included: it is what the net declares, the same in every runtime. A ``color`` is
+kept too, and must be a hex ``"#rrggbb"`` (lowercase), which every runtime gives
+alike (§11, since 2026-10-16); a colour spelt any other way, or any value or key
+that embeds a token id (an outer ``fired_counts`` after inner firings, say),
 cannot be shared and stops the recording: change the scenario.
 
 A ``reloaded`` line (``load``, ``reset``) starts the naming of token ids afresh,
@@ -57,6 +60,7 @@ from tests.test_protocol_transcripts import NET_MODULES, Process, fold, substitu
 LABEL_KEYS = frozenset({"label", "type_name", "message", "runtime", "runtime_version"})
 TIME_KEYS = frozenset({"started_at", "last_progress_at", "idle_since"})
 EMBEDDED_ID = re.compile(r"/#\d")
+HEX_COLOUR = re.compile(r"#[0-9a-f]{6}")
 SETTLE_SECONDS = 0.2
 
 
@@ -165,7 +169,9 @@ class Masker:
 
     def field(self, key: str, item, parent: dict, net: str, place: str | None):
         if key == "color":
-            raise ValueError("a shared transcript uses no color: this net's tokens have one")
+            return self.colour(item)
+        if key == "controls" and isinstance(item, list):
+            return item  # the net's own declaration, labels included: the same in every runtime
         if key == "id" and isinstance(item, str):
             return self.token(net, item, place, parent.get("label", parent.get("value")))
         if key == "nested_id" and isinstance(item, str):
@@ -190,16 +196,18 @@ class Masker:
             return {name: self.walk(entry, net, name) for name, entry in item.items()}
         if key == "nets" and isinstance(item, list):
             holder = self.stems.get((net, parent.get("id"))) if isinstance(parent.get("id"), str) else None
-            return [self.nets_entry(entry, holder) for entry in item]
+            return [self.nets_entry(entry, holder, net, place) for entry in item]
         if key in ("consumed", "produced") and isinstance(item, list):
             return [self.pair(entry, net) for entry in item]
         return self.walk(item, net, place)
 
-    def nets_entry(self, entry, holder: str | None):
+    def nets_entry(self, entry, holder: str | None, net: str = "", place: str | None = None):
         """``{name, nested_id, path, template?, count}``: the nested id is named after
-        the token holding the net and the net's name there."""
+        the token holding the net and the net's name there. Anything else under a
+        ``nets`` key (``describe``'s list of nets, whose ``params`` carry a
+        ``type_name``) is walked as any other value."""
         if not isinstance(entry, dict) or not isinstance(entry.get("nested_id"), str):
-            return entry
+            return self.walk(entry, net, place)
         masked = dict(entry)
         masked["nested_id"] = self.nested(entry["nested_id"], entry.get("path"), holder=holder,
                                           net_name=entry.get("name") or None)
@@ -217,10 +225,15 @@ class Masker:
         if rest:
             masked.append("<label>")
         if len(rest) >= 2:
-            if rest[1] is not None:
-                raise ValueError("a shared transcript uses no color: this net's tokens have one")
-            masked.extend(rest[1:])
+            masked.append(None if rest[1] is None else self.colour(rest[1]))
+            masked.extend(rest[2:])
         return masked
+
+    def colour(self, value):
+        """A token's colour, kept: shared only as a lowercase ``#rrggbb``."""
+        if not (isinstance(value, str) and HEX_COLOUR.fullmatch(value)):
+            raise ValueError(f"a shared transcript carries a colour only as #rrggbb, not {value!r}")
+        return value
 
     def _check_shareable(self, value, where: str) -> None:
         if isinstance(value, dict):

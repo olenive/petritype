@@ -26,17 +26,25 @@ def _(mo):
         table under the picture is the same question asked of the net directly,
         `Query.matches(graph, filter)`.
 
-        - **Season: Autumn** lets the birds migrate; `Migrate Forest Wetland` is a **keyed
-          edge** that takes the oldest bird of the forest and leaves the fox where it is.
-        - **Step** fires one transition (`Spread` splits the zebra first, then migration and
-          settling once it is autumn, then `Decline` thins the forest).
+        - **Season: Autumn** (the default) lets the birds migrate: `Migrate Forest Wetland`
+          and `Migrate Tundra Wetland` take, through a **keyed edge**, the oldest bird of
+          their habitat wherever it stands and leave every other token where it is. Switch it
+          off for summer and the migrations are no longer fireable.
+        - **Step** fires one transition. From the seed, in autumn: the robin and the
+          woodpecker leave the forest and the snowy owl the tundra, and `Settle` lands all
+          three in the wetland; the savanna's egrets spread three times, half of them to the
+          wetland each time (1500 → 750 → 375 → 187); the forest's deer thin five times
+          (300 → 9, a floor of ten) and the tundra's lemmings crash five times (2000 → 62).
+          Nineteen firings, then nothing is fireable.
         - **↺ Reset** rebuilds the net.
 
         **Reading the edges.** An arrow moves tokens (consumed from a place, produced into
         one); a thick grey line with a dot at each end is a *mutate edge*, which hands the
-        transition the place's front token live and leaves it there. `Spread` and `Decline`
-        change a species' population in place through one; `Migrate` and `Settle` move the
-        token.
+        transition a token live and leaves it there, with its id. Here every mutate edge is
+        keyed: `Spread Savanna Wetland` gets the savanna's oldest bird (the egret, not the
+        zebra in front of it), `Decline Forest` the forest's oldest herbivore and `Decline
+        Tundra` the lemmings, and each guard reads that same token. `Migrate` and `Settle`
+        move the token.
         """
     )
     return
@@ -74,7 +82,7 @@ def _():
 def _(mo):
     step_button = mo.ui.run_button(label="▶ Step", kind="success")
     reset_button = mo.ui.run_button(label="↺ Reset", kind="warn")
-    autumn = mo.ui.switch(label="Season: Autumn", value=False)
+    autumn = mo.ui.switch(label="Season: Autumn", value=True)
     return autumn, reset_button, step_button
 
 

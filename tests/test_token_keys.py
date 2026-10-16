@@ -53,12 +53,12 @@ class TestKeys:
     def test_a_decline_leaves_the_keys_while_a_rename_changes_species(self):
         graph = build_wildlife()
         forest = graph.place_named("Forest")
-        robin = forest.tokens[0]
-        before = Keys.of(forest, robin)
+        deer = forest.tokens[2]
+        before = Keys.of(forest, deer)
         run(fire(graph, "Decline Forest"))
-        assert robin.population == 60 and Keys.of(forest, robin) == before
-        robin.name = "Redbreast"
-        assert Keys.of(forest, robin)["species"] == "Redbreast"
+        assert deer.population == 150 and Keys.of(forest, deer) == before
+        deer.name = "Roe Deer"
+        assert Keys.of(forest, deer)["species"] == "Roe Deer"
 
     def test_keys_by_attribute_name(self):
         place = ListPlaceNode("P", Species, [Species(name="Gecko", class_="Reptile", diet="Insectivore", population=1)],
@@ -101,7 +101,7 @@ class TestFilters:
     def test_matching_rules(self):
         graph = build_wildlife()
         forest = graph.place_named("Forest")
-        robin, fox = forest.tokens
+        robin, fox, deer, woodpecker = forest.tokens
         assert Filter.where(class_="Bird").matches(graph, forest, robin)
         assert not Filter.where(class_="Bird").matches(graph, forest, fox)
         assert Filter.where(class_=["Bird", "Mammal"], diet="Omnivore").matches(graph, forest, fox)
@@ -137,17 +137,19 @@ class TestFilteredLabel:
         graph = build_wildlife()
         forest = graph.place_named("Forest")
         summarise = lambda s: s.name
-        assert NodeLabel.default_place(forest, summarise).splitlines() == ["Forest", "(Species)", "Robin", "Fox"]
+        assert NodeLabel.default_place(forest, summarise).splitlines() == [
+            "Forest", "(Species)", "Robin", "Fox", "Deer", "Woodpecker",
+        ]
         assert NodeLabel.default_place(forest, summarise, Filter.where(class_="Bird"), graph.params).splitlines() == [
-            "Forest", "(Species) 1 / 2", "Robin", "(1 hidden by filter)",
+            "Forest", "(Species) 2 / 4", "Robin", "Woodpecker", "(2 hidden by filter)",
         ]
         assert NodeLabel.default_place(forest, summarise, Filter(), graph.params).splitlines() == [
-            "Forest", "(Species) 2 / 2", "Robin", "Fox",
+            "Forest", "(Species) 4 / 4", "Robin", "Fox", "Deer", "Woodpecker",
         ]
         node_attrs, _ = RustworkxToGraphviz.activation_coloured_attr_functions(
             graph, summarise, filter=Filter.where(class_="Bird"),
         )
-        assert node_attrs(graph.place_named("Savanna"))["label"].splitlines()[-1] == "(2 hidden by filter)"
+        assert node_attrs(graph.place_named("Savanna"))["label"].splitlines()[-2:] == ["Egret", "(3 hidden by filter)"]
 
 
 # --- R2: queries ----------------------------------------------------------------------------------
@@ -155,14 +157,35 @@ class TestFilteredLabel:
 
 EXPECTED_ON_THE_SEED = {
     "species in {Robin}": [("Forest", "Robin"), ("Wetland", "Robin")],
-    "class in {Bird}": [("Forest", "Robin"), ("Wetland", "Robin"), ("Wetland", "Heron")],
-    "class in {Bird, Mammal}": [
-        ("Forest", "Robin"), ("Forest", "Fox"), ("Wetland", "Robin"), ("Wetland", "Heron"),
-        ("Savanna", "Zebra"), ("Tundra", "Fox"), ("Tundra", "Arctic Hare"),
+    "class in {Bird}": [
+        ("Forest", "Robin"), ("Forest", "Woodpecker"), ("Wetland", "Robin"), ("Wetland", "Heron"),
+        ("Savanna", "Egret"), ("Tundra", "Snowy Owl"),
     ],
-    "class in {Bird} and diet in {Insectivore}": [("Forest", "Robin"), ("Wetland", "Robin")],
-    "class in {Mammal} in {Forest, Tundra}": [("Forest", "Fox"), ("Tundra", "Fox"), ("Tundra", "Arctic Hare")],
+    "class in {Bird, Mammal}": [
+        ("Forest", "Robin"), ("Forest", "Fox"), ("Forest", "Deer"), ("Forest", "Woodpecker"),
+        ("Wetland", "Robin"), ("Wetland", "Heron"), ("Wetland", "Otter"),
+        ("Savanna", "Zebra"), ("Savanna", "Lion"), ("Savanna", "Egret"),
+        ("Tundra", "Fox"), ("Tundra", "Arctic Hare"), ("Tundra", "Lemming"), ("Tundra", "Snowy Owl"),
+    ],
+    "class in {Bird} and diet in {Insectivore}": [
+        ("Forest", "Robin"), ("Forest", "Woodpecker"), ("Wetland", "Robin"), ("Savanna", "Egret"),
+    ],
+    "class in {Mammal} in {Forest, Tundra}": [
+        ("Forest", "Fox"), ("Forest", "Deer"), ("Tundra", "Fox"), ("Tundra", "Arctic Hare"), ("Tundra", "Lemming"),
+    ],
 }
+
+# A plain run to quiet (the default selector, autumn): three migrations and three settlings,
+# three spreads of the egret, five declines of the deer and five of the lemmings.
+PLAIN_RUN = [
+    "Migrate Forest Wetland", "Migrate Forest Wetland", "Migrate Tundra Wetland",
+    "Settle", "Settle", "Settle",
+    *["Spread Savanna Wetland"] * 3, *["Decline Forest"] * 5, *["Decline Tundra"] * 5,
+]
+
+
+def populations(graph, place):
+    return [(s.name, s.population) for s in graph.place_named(place).tokens]
 
 
 class TestQueries:
@@ -175,59 +198,114 @@ class TestQueries:
     def test_a_match_carries_place_id_keys_and_token(self):
         graph = build_wildlife()
         (match,) = Query.matches(graph, Filter.where(species="Heron"))
-        assert match == Match("Wetland", 4, {}, None)
+        assert match == Match("Wetland", 6, {}, None)
         assert match.keys == {"species": "Heron", "class": "Bird", "diet": "Carnivore"}
         assert match.token.population == 40
 
     def test_after_one_migration_and_settling(self):
         graph = build_wildlife()
-        NetParams.set(graph, "season", "Autumn")
+        assert graph.params == {"season": "Autumn", "spread_threshold": 200}
         graph.drain_events()
         run(fire(graph, "Migrate Forest Wetland"))
         run(fire(graph, "Settle"))
-        assert names(graph, "Forest") == ["Fox"] and names(graph, "Wetland") == ["Robin", "Heron", "Robin"]
-        assert answer(graph, Filter.where(class_="Bird")) == [("Wetland", "Robin"), ("Wetland", "Heron"), ("Wetland", "Robin")]
-        assert graph.place_named("Wetland").tokens[2].destination is None
+        assert names(graph, "Forest") == ["Fox", "Deer", "Woodpecker"]
+        assert names(graph, "Wetland") == ["Robin", "Heron", "Pike", "Otter", "Robin"]
+        assert answer(graph, Filter.where(class_="Bird")) == [
+            ("Forest", "Woodpecker"), ("Wetland", "Robin"), ("Wetland", "Heron"), ("Wetland", "Robin"),
+            ("Savanna", "Egret"), ("Tundra", "Snowy Owl"),
+        ]
+        assert graph.place_named("Wetland").tokens[4].destination is None
         fired = [e for e in graph.drain_events() if isinstance(e, Fired)]
         # The keyed edge moves the robin alone: one token consumed and one produced per firing,
-        # the fox untouched (section 6: one Removed, one Added, one Removed, one Added).
+        # the others untouched (section 6: one Removed, one Added, one Removed, one Added).
         assert [p for p, _ in fired[0].consumed] == ["Forest"]
         assert [p for p, _ in fired[0].produced] == ["Migrating"]
         assert [p for p, _ in fired[1].consumed] == ["Migrating"]
         assert [p for p, _ in fired[1].produced] == ["Wetland"]
-        assert graph.place_named("Forest").token_ids == (2,), "the fox kept its id"
+        assert graph.place_named("Forest").token_ids == (2, 3, 4), "the fox, the deer and the woodpecker kept their ids"
 
-    def test_the_whole_run_to_quiet_also_settles(self):
+    def test_the_whole_run_to_quiet(self):
         graph = build_wildlife()
-        NetParams.set(graph, "season", "Autumn")
-        run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2))
-        assert names(graph, "Wetland") == ["Robin", "Heron", "Robin"]
+        graph.drain_events()
+        _, fired = run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None))
+        assert [e.transition for e in graph.drain_events() if isinstance(e, Fired)] == PLAIN_RUN
+        assert fired == 19
+        assert populations(graph, "Forest") == [("Fox", 60), ("Deer", 9)]
+        assert populations(graph, "Wetland") == [
+            ("Robin", 80), ("Heron", 40), ("Pike", 150), ("Otter", 25),
+            ("Robin", 120), ("Woodpecker", 45), ("Snowy Owl", 15),
+            ("Egret", 750), ("Egret", 375), ("Egret", 188),
+        ]
+        assert populations(graph, "Savanna") == [("Zebra", 5000), ("Gecko", 200), ("Lion", 40), ("Egret", 187)]
+        assert populations(graph, "Reef") == [("Clownfish", 300), ("Parrotfish", 400), ("Reef Shark", 20), ("Sea Turtle", 80)]
+        assert populations(graph, "Tundra") == [("Fox", 30), ("Arctic Hare", 90), ("Lemming", 62)]
+        assert names(graph, "Migrating") == []
+        assert all(s.population > 0 for place in graph.places for s in place.tokens), "no population reaches zero"
+        assert all(s.destination is None for place in graph.places for s in place.tokens)
+
+    def test_in_summer_nothing_migrates(self):
+        graph = build_wildlife()
+        NetParams.set(graph, "season", "Summer")
+        _, fired = run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=None))
+        assert fired == 13, "three spreads and ten declines"
+        assert names(graph, "Forest") == ["Robin", "Fox", "Deer", "Woodpecker"] and names(graph, "Migrating") == []
+        assert names(graph, "Tundra")[-1] == "Snowy Owl"
 
     def test_after_a_spread(self):
         graph = build_wildlife()
-        run(fire(graph, "Spread Savanna Reef"))
-        assert answer(graph, Filter.where(species="Zebra")) == [("Savanna", "Zebra"), ("Reef", "Zebra")]
-        savanna, reef = (graph.place_named(p).tokens for p in ("Savanna", "Reef"))
-        assert savanna[0].population == 2500 and reef[1].population == 2500
+        savanna, wetland = (graph.place_named(p) for p in ("Savanna", "Wetland"))
+        ids = savanna.token_ids
+        run(fire(graph, "Spread Savanna Wetland"))
+        assert answer(graph, Filter.where(species="Egret")) == [("Wetland", "Egret"), ("Savanna", "Egret")]
+        egret = savanna.tokens[3]
+        assert egret.population == 750 and wetland.tokens[4].population == 750
+        assert savanna.token_ids == ids, "the egret keeps its id and its place"
+        assert populations(graph, "Savanna")[0] == ("Zebra", 5000), "the keyed edge leaves the zebra alone"
         for _ in range(2):
-            run(fire(graph, "Spread Savanna Reef"))
-        assert savanna[0].population == 625, "below the threshold, Spread stops"
+            run(fire(graph, "Spread Savanna Wetland"))
+        assert egret.population == 187 and [s.population for s in wetland.tokens[4:]] == [750, 375, 188]
+        # The egret is below the threshold now; the zebra in front of it does not count.
         with pytest.raises(AssertionError, match="not fireable"):
-            run(fire(graph, "Spread Savanna Reef"))
+            run(fire(graph, "Spread Savanna Wetland"))
+
+    def test_the_declines_stop_at_their_floors(self):
+        graph = build_wildlife()
+        for _ in range(5):
+            run(fire(graph, "Decline Forest"))
+        assert populations(graph, "Forest")[2] == ("Deer", 9)
+        with pytest.raises(AssertionError, match="not fireable"):
+            run(fire(graph, "Decline Forest"))
+        for _ in range(5):
+            run(fire(graph, "Decline Tundra"))
+        assert populations(graph, "Tundra")[2] == ("Lemming", 62)
+        with pytest.raises(AssertionError, match="not fireable"):
+            run(fire(graph, "Decline Tundra"))
+
+    def test_a_guard_reads_the_token_its_edge_would_take(self):
+        graph = build_wildlife()
+        forest = graph.place_named("Forest")
+        forest.tokens.insert(0, Species(name="Hare", class_="Mammal", diet="Herbivore", population=8))
+        # The oldest herbivore is the hare, at its floor; the deer behind it does not count.
+        with pytest.raises(AssertionError, match="not fireable"):
+            run(fire(graph, "Decline Forest"))
+        forest.tokens[0].population = 40
+        run(fire(graph, "Decline Forest"))
+        assert populations(graph, "Forest")[0] == ("Hare", 20) and populations(graph, "Forest")[3] == ("Deer", 300)
 
     def test_distinct_values_in_order_of_first_appearance(self):
         graph = build_wildlife()
-        assert Query.distinct(graph, "class") == ["Bird", "Mammal", "Reptile", "Fish"]
-        assert Query.distinct(graph, "diet", places=["Tundra"]) == ["Omnivore", "Herbivore"]
+        assert Query.distinct(graph, "class") == ["Bird", "Mammal", "Fish", "Reptile"]
+        assert Query.distinct(graph, "diet", places=["Tundra"]) == ["Omnivore", "Herbivore", "Carnivore"]
         assert Query.distinct(graph, "colour") == []
 
     def test_count_and_first(self):
         graph = build_wildlife()
         forest = graph.place_named("Forest")
         birds = Filter.where(class_="Bird")
-        assert Query.count(graph, forest, birds) == 1 and Query.first(graph, forest, birds) == 0
+        assert Query.count(graph, forest, birds) == 2 and Query.first(graph, forest, birds) == 0
         mammals = Filter.where(class_="Mammal")
         assert Query.first(graph, forest, mammals) == 1
+        assert Query.first(graph, forest, Filter.where(diet="Herbivore")) == 2
         assert Query.first(graph, forest, Filter.where(class_="Fish")) is None
 
     def test_the_species_json_form_spells_class(self):

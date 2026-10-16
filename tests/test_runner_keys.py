@@ -77,12 +77,13 @@ class TestKeysOnTheWire:
         assert state["topology"]["places"][0] == {
             "name": "Forest", "type_name": "Species", "serializable": True, "key_names": ["species", "class", "diet"],
         }
-        robin, fox = state["marking"]["places"]["Forest"]["tokens"]
+        robin, fox, deer, woodpecker = state["marking"]["places"]["Forest"]["tokens"]
         assert robin["keys"] == {"species": "Robin", "class": "Bird", "diet": "Insectivore"}
         assert fox["keys"] == {"species": "Fox", "class": "Mammal", "diet": "Omnivore"}
+        assert deer["keys"]["diet"] == "Herbivore" and woodpecker["keys"]["class"] == "Bird"
         assert "matching" not in state["marking"]["places"]["Forest"], "no filter set"
         page = result(await harness.send("get_place_tokens", {"place": "Tundra"}))
-        assert [t["keys"]["species"] for t in page["tokens"]] == ["Fox", "Arctic Hare"]
+        assert [t["keys"]["species"] for t in page["tokens"]] == ["Fox", "Arctic Hare", "Lemming", "Snowy Owl"]
 
     async def test_a_place_without_keys_has_none(self):
         def grow(x: int) -> int:
@@ -112,13 +113,16 @@ class TestKeysOnTheWire:
 
     async def test_mutated_and_produced_carry_keys(self):
         harness = await loaded_wildlife()
-        lines = await harness.send("step")  # Spread Savanna Reef: a mutate edge and a produced copy
-        assert result(lines)["transition"] == "Spread Savanna Reef"
+        await harness.send("set_param", {"param": "season", "value": "Summer"})  # no migrations
+        lines = await harness.send("step")  # Spread Savanna Wetland: a keyed mutate edge and a produced copy
+        assert result(lines)["transition"] == "Spread Savanna Wetland"
         mutated = next(line for line in lines if line.get("method") == "mutated")
-        assert mutated["params"]["keys"] == {"species": "Zebra", "class": "Mammal", "diet": "Herbivore"}
+        assert mutated["params"]["place"] == "Savanna"
+        assert mutated["params"]["keys"] == {"species": "Egret", "class": "Bird", "diet": "Insectivore"}
         distributed = next(line for line in lines if line.get("method") == "distributed")
         place, token_id, label, color, keys = distributed["params"]["produced"][0]
-        assert (place, color, keys["species"]) == ("Reef", None, "Zebra")
+        assert (place, color, keys["species"]) == ("Wetland", None, "Egret")
+        assert token_id != mutated["params"]["id"], "the copy is a token of its own"
 
 
 # --- query and distinct --------------------------------------------------------------------------
@@ -129,9 +133,10 @@ class TestQueryAndDistinct:
     async def test_query_with_a_filter(self):
         harness = await loaded_wildlife()
         answer = result(await harness.send("query", {"filter": BIRDS}))
-        assert answer["count"] == 3
+        assert answer["count"] == 6
         assert [(m["place"], m["token"]["keys"]["species"]) for m in answer["matches"]] == [
-            ("Forest", "Robin"), ("Wetland", "Robin"), ("Wetland", "Heron"),
+            ("Forest", "Robin"), ("Forest", "Woodpecker"), ("Wetland", "Robin"), ("Wetland", "Heron"),
+            ("Savanna", "Egret"), ("Tundra", "Snowy Owl"),
         ]
         assert answer["matches"][0]["json"]["class"] == "Bird" and answer["matches"][0]["json"]["population"] == 120
         assert answer["marking_version"] == 0
@@ -139,26 +144,28 @@ class TestQueryAndDistinct:
     async def test_query_restricted_and_capped(self):
         harness = await loaded_wildlife()
         mammals_there = {"clauses": [{"key": "class", "values": ["Mammal"]}], "places": ["Forest", "Tundra"]}
-        answer = result(await harness.send("query", {"filter": mammals_there, "token_limit": 2}))
-        assert answer["count"] == 3 and [m["token"]["keys"]["species"] for m in answer["matches"]] == ["Fox", "Fox"]
+        answer = result(await harness.send("query", {"filter": mammals_there, "token_limit": 3}))
+        assert answer["count"] == 5 and [m["token"]["keys"]["species"] for m in answer["matches"]] == ["Fox", "Deer", "Fox"]
         answer = result(await harness.send("query", {"filter": {"prefix": "Re"}}))
-        assert [m["place"] for m in answer["matches"]] == ["Reef"]
+        assert [m["place"] for m in answer["matches"]] == ["Reef"] * 4
         everything = result(await harness.send("query"))
-        assert everything["count"] == 9
+        assert everything["count"] == 20
 
     async def test_query_without_a_filter_uses_the_connections(self):
         harness = await loaded_wildlife()
         await harness.send("set_filter", {"filter": BIRDS})
-        assert result(await harness.send("query"))["count"] == 3
-        assert result(await harness.send("query", {"filter": {}}))["count"] == 9, "a given filter is used alone"
-        assert result(await harness.send("query"))["count"] == 3, "and leaves the connection's as it was"
+        assert result(await harness.send("query"))["count"] == 6
+        assert result(await harness.send("query", {"filter": {}}))["count"] == 20, "a given filter is used alone"
+        assert result(await harness.send("query"))["count"] == 6, "and leaves the connection's as it was"
 
     async def test_distinct(self):
         harness = await loaded_wildlife()
         assert result(await harness.send("distinct", {"key": "class"})) == {
-            "marking_version": 0, "key": "class", "values": ["Bird", "Mammal", "Reptile", "Fish"],
+            "marking_version": 0, "key": "class", "values": ["Bird", "Mammal", "Fish", "Reptile"],
         }
-        assert result(await harness.send("distinct", {"key": "diet", "places": ["Tundra"]}))["values"] == ["Omnivore", "Herbivore"]
+        assert result(await harness.send("distinct", {"key": "diet", "places": ["Tundra"]}))["values"] == [
+            "Omnivore", "Herbivore", "Carnivore",
+        ]
         assert result(await harness.send("distinct", {"key": "colour"}))["values"] == []
         assert error(await harness.send("distinct", {"key": "class", "places": ["Nowhere"]})) == "unknown_place"
 
@@ -175,7 +182,7 @@ class TestQueryAndDistinct:
         harness = await loaded_wildlife()
         await harness.send("set_param", {"param": "season", "value": "Bird"})
         answer = result(await harness.send("query", {"filter": {"clauses": [{"key": "class", "param": "season"}]}}))
-        assert answer["count"] == 3
+        assert answer["count"] == 6
 
 
 # --- the connection's projection -----------------------------------------------------------------
@@ -188,11 +195,11 @@ class TestProjection:
         assert result(await harness.send("set_filter", {"filter": BIRDS})) == {"marking_version": 0}
         state = result(await harness.send("get_state"))
         forest = state["marking"]["places"]["Forest"]
-        assert (forest["count"], forest["matching"]) == (2, 1)
-        assert [t["keys"]["species"] for t in forest["tokens"]] == ["Robin"]
-        assert state["marking"]["places"]["Savanna"] == {"count": 2, "matching": 0, "tokens": []}
+        assert (forest["count"], forest["matching"]) == (4, 2)
+        assert [t["keys"]["species"] for t in forest["tokens"]] == ["Robin", "Woodpecker"]
+        assert state["marking"]["places"]["Reef"] == {"count": 4, "matching": 0, "tokens": []}
         page = result(await harness.send("get_place_tokens", {"place": "Wetland", "limit": 1}))
-        assert (page["count"], page["matching"], page["has_more"]) == (2, 2, True)
+        assert (page["count"], page["matching"], page["has_more"]) == (4, 2, True)
         page = result(await harness.send("get_place_tokens", {"place": "Wetland", "offset": 1, "limit": 1}))
         assert [t["keys"]["species"] for t in page["tokens"]] == ["Heron"] and page["has_more"] is False
         fox = state["marking"]["places"]["Forest"]
@@ -218,47 +225,57 @@ class TestProjection:
         assert lines[0]["params"]["keys"]["species"] == "Owl"
         assert lines[0]["params"]["marking_version"] == 2, "hidden moved the version too"
         state = result(await harness.send("get_state"))
-        assert (state["marking"]["places"]["Forest"]["count"], state["marking"]["places"]["Forest"]["matching"]) == (4, 2)
+        assert (state["marking"]["places"]["Forest"]["count"], state["marking"]["places"]["Forest"]["matching"]) == (6, 3)
 
     async def test_a_firing_lists_only_matching_tokens(self):
-        harness = await loaded_wildlife()
-        await harness.send("set_param", {"param": "season", "value": "Autumn"})
+        harness = await loaded_wildlife()  # autumn by default
         await harness.send("set_filter", {"filter": BIRDS})
-        lines = await harness.send("step")  # Migrate: takes the robin and the fox, puts the fox back
+        lines = await harness.send("step")  # Migrate: a keyed take of the robin alone
         assert result(lines)["transition"] == "Migrate Forest Wetland"
         launched = lines[0]["params"]
         assert [place for place, _ in launched["consumed"]] == ["Forest"], "only the robin"
         distributed = next(line for line in lines if line.get("method") == "distributed")["params"]
         assert [(entry[0], entry[4]["species"]) for entry in distributed["produced"]] == [("Migrating", "Robin")]
+        for migration in ("Migrate Forest Wetland", "Migrate Tundra Wetland"):
+            await harness.send("disable", {"transition": migration})
         lines = await harness.send("step")  # Settle
         distributed = next(line for line in lines if line.get("method") == "distributed")["params"]
         assert [(entry[0], entry[4]["species"]) for entry in distributed["produced"]] == [("Wetland", "Robin")]
         state = result(await harness.send("get_state"))
-        assert (state["marking"]["places"]["Forest"]["count"], state["marking"]["places"]["Forest"]["matching"]) == (1, 0)
+        assert (state["marking"]["places"]["Forest"]["count"], state["marking"]["places"]["Forest"]["matching"]) == (3, 1)
         assert state["marking"]["places"]["Wetland"]["matching"] == 3
 
     async def test_a_mutation_in_or_out_of_the_filter_is_added_or_removed(self):
         harness = await loaded_wildlife()
-        insectivores = {"clauses": [{"key": "diet", "values": ["Insectivore"]}]}
-        await harness.send("set_filter", {"filter": insectivores})
-        lines = await harness.send("step")  # Spread Savanna Reef: the zebra is a herbivore, hidden
+        await harness.send("set_param", {"param": "season", "value": "Summer"})  # no migrations
+        mammals = {"clauses": [{"key": "class", "values": ["Mammal"]}]}
+        await harness.send("set_filter", {"filter": mammals})
+        lines = await harness.send("step")  # Spread Savanna Wetland: the egret is a bird, hidden
+        assert result(lines)["transition"] == "Spread Savanna Wetland"
         changes = [line for line in lines if line.get("method") in ("mutated", "hidden", "added", "removed")]
-        assert [(c["method"], c["params"].get("kind")) for c in changes] == [("hidden", "mutated")]
+        assert [(c["method"], c["params"].get("kind"), c["params"]["place"]) for c in changes] == [
+            ("hidden", "mutated", "Savanna"),
+        ]
         distributed = next(line for line in lines if line.get("method") == "distributed")["params"]
-        assert distributed["produced"] == [], "the zebra's copy is hidden too"
+        assert distributed["produced"] == [], "the egret's copy is hidden too"
         # A token that comes to match is reported as added, one that stops matching as removed,
         # whatever moved it: here the filter names a net parameter, and the parameter changes.
         await harness.send("set_filter", {"filter": {"clauses": [{"key": "species", "param": "season"}]}})
         lines = await harness.send("set_param", {"param": "season", "value": "Robin"})
         assert methods(lines) == ["param_changed", "added", "added", "result"], "both robins come into view"
         assert {line["params"]["place"] for line in lines[1:3]} == {"Forest", "Wetland"}
-        await harness.send("disable", {"transition": "Spread Savanna Reef"})
-        lines = await harness.send("step")  # Decline Forest mutates the Forest robin, which stays in view
+        lines = await harness.send("set_param", {"param": "season", "value": "Deer"})
+        assert [(line.get("method"), line.get("params", {}).get("place")) for line in lines[1:-1]] == [
+            ("removed", "Forest"), ("removed", "Wetland"), ("added", "Forest"),
+        ], "the robins leave, the deer comes"
+        await harness.send("disable", {"transition": "Spread Savanna Wetland"})
+        lines = await harness.send("step")  # Decline Forest mutates the deer, which stays in view
+        assert result(lines)["transition"] == "Decline Forest"
         changes = [line for line in lines if line.get("method") in ("mutated", "hidden", "added", "removed")]
-        assert [c["method"] for c in changes] == ["mutated"] and changes[0]["params"]["keys"]["species"] == "Robin"
+        assert [c["method"] for c in changes] == ["mutated"] and changes[0]["params"]["keys"]["species"] == "Deer"
         lines = await harness.send("set_param", {"param": "season", "value": "Owl"})
-        assert methods(lines) == ["param_changed", "removed", "removed", "result"], "and leave it"
-        lines = await harness.send("step")  # Decline again: the robin is hidden now
+        assert methods(lines) == ["param_changed", "removed", "result"], "and leaves it"
+        lines = await harness.send("step")  # Decline again: the deer is hidden now
         changes = [line for line in lines if line.get("method") in ("mutated", "hidden", "added", "removed")]
         assert [(c["method"], c["params"].get("kind")) for c in changes] == [("hidden", "mutated")]
 

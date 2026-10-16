@@ -71,6 +71,15 @@ _FIRING_NOTEBOOKS = [
     # Nets as tokens: the transit city stepped from its seed until all seven passengers have
     # arrived (the vehicles never stop, so the notebook's fire_one stops on the passengers).
     (EXAMPLES_DIR / "tokens_as_nets" / "transit_journey.py", 45),
+    # Edges on empty places: the priced shop's example day, each delivery coming in when
+    # nothing is fireable (Price Order with no promotion running, then with two). Its
+    # receipts are pinned in tests/test_priced_shop.py.
+    (EXAMPLES_DIR / "edges_on_empty_places" / "shop_day.py", 2),
+    # The traffic light's schedule of arrivals: Change to green with nobody waiting, Change to
+    # amber, Change to red with Car 1 and Car 2 waiting, Change to green, Go draining both, Go
+    # taking Car 3 straight through on green. The light never stops, so the notebook's
+    # fire_one stops once every car has passed.
+    (EXAMPLES_DIR / "edges_on_empty_places" / "traffic_light_junction.py", 6),
 ]
 
 # Where the ending is the point of the example, pin the terminal marking as well: the right
@@ -85,6 +94,12 @@ _EXPECTED_TERMINAL_MARKINGS = {
         "Input Number": [],
         "Integer Lists": [],
         "Final Output": [100, 100, 101, 100, 101, 102],
+    },
+    # The light left green by Go's read, and every car past it in the order it went.
+    "traffic_light_junction.py": {
+        "Light": ["green"],
+        "Waiting": [],
+        "Passed": ["Car 1", "Car 2", "Car 3"],
     },
 }
 

@@ -50,16 +50,24 @@ SAVED_KEYS = ("template", "marking", "params", "enabled")
 class JsonForm:
     """Functions that decide and use a place's JSON form."""
 
+    def scalar(place_type: Any) -> Optional[type]:
+        """The JSON scalar type ``place_type`` is or derives from (``str`` for a
+        ``class Colour(str)``), else ``None``."""
+        if not isinstance(place_type, type):
+            return None
+        return next((scalar for scalar in JSON_SCALARS if issubclass(place_type, scalar)), None)
+
     def place_type(place_type: Any) -> bool:
         """True for a pydantic model (whose JSON schema builds, so it has a JSON
         form; ``ExecutableGraph`` and models holding one included) or a JSON
-        scalar type (``bool``, ``int``, ``float``, ``str``). Whether a nested
+        scalar type (``bool``, ``int``, ``float``, ``str``) or a subclass of one,
+        whose JSON form is its scalar's (``scalar``). Whether a nested
         token's inner nets have a JSON form is known only per net (it depends on
         their places), so a nested place of a model type counts as serializable
         and a token whose inner net will not save shows as text."""
         if not isinstance(place_type, type):
             return False
-        if place_type in JSON_SCALARS:
+        if JsonForm.scalar(place_type) is not None:
             return True
         if issubclass(place_type, BaseModel):
             try:
@@ -120,24 +128,31 @@ class JsonForm:
         ``str`` place only a string (never ``9``), a ``bool`` place only
         ``true``/``false`` (``bool("false")`` is ``True``), and a ``float``
         place a number, an integer included, as strict JSON mode does for a
-        model's float field. JSON's ``true`` is never ``1``."""
+        model's float field. JSON's ``true`` is never ``1``.
+
+        A subclass of a scalar (``class Colour(str)``) takes its scalar's JSON
+        type and is built by its own constructor, ``Colour("red")``, so a
+        token's JSON form can stay ``"red"`` while its type adds behaviour (a
+        ``color``); a constructor that refuses the value raises ``ValueError``
+        as a mismatch does."""
         if isinstance(place_type, type) and issubclass(place_type, BaseModel):
             return JsonForm.validate(place_type, payload)
-        if place_type not in JSON_SCALARS:
+        scalar = JsonForm.scalar(place_type)
+        if scalar is None:
             raise ValueError(f"{getattr(place_type, '__name__', place_type)} has no JSON form")
         if payload is None or not isinstance(payload, JSON_SCALARS):
             raise ValueError(f"expected a JSON scalar for {place_type.__name__}, got {type(payload).__name__}")
-        if place_type is bool:
+        if scalar is bool:
             if not isinstance(payload, bool):
                 raise ValueError(f"expected true or false, got {payload!r}")
             return payload
         if isinstance(payload, bool):
             raise ValueError(f"expected {place_type.__name__}, got a boolean")
-        if place_type is int and not isinstance(payload, int):
+        if scalar is int and not isinstance(payload, int):
             raise ValueError(f"expected an integer, got {payload!r}")
-        if place_type is float and not isinstance(payload, (int, float)):
+        if scalar is float and not isinstance(payload, (int, float)):
             raise ValueError(f"expected a number, got {payload!r}")
-        if place_type is str and not isinstance(payload, str):
+        if scalar is str and not isinstance(payload, str):
             raise ValueError(f"expected a string, got {payload!r}")
         try:
             return place_type(payload)
@@ -289,6 +304,9 @@ class NetJson:
         NetJson.import_marking(graph, saved.get("marking", {}))
         graph.params.update(params)
         graph.disabled = {name for name, on in enabled.items() if not on}
+        # The tie-break's and the deep step's cursors are not saved: a loaded net
+        # starts its rounds afresh.
+        graph.forget_cursors()
         return graph
 
     def restore(saved: dict) -> ExecutableGraph:

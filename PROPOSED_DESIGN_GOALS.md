@@ -113,6 +113,20 @@ notebook. **One way to define a net; one runner; selectable execution modes.**
 - **Transition selection defaults to first-defined-wins**, implemented directly (remove
   the double-reversal; delete the vestigial `next_transition`). `transition_selector`
   remains the override for priority / round-robin / random.
+- **The tie-break is a setting** (0.1.3; `round_robin` since 2026-10-12).
+  `ExecutableGraph.tie_break`, also a `construct_graph` keyword, decides which of the
+  top-priority fireable transitions the default selector fires: `"first_declared"` (the
+  default, the rule above), `"last_declared"`, or `"round_robin"`, the first one declared
+  after the transition it chose last in this net (its cursor), wrapping to the first, and
+  the first declared when there is no cursor yet (a fresh net, or one loaded from its saved
+  form: the cursor is kept in memory only, `_last_pick`). Only the default selector reads
+  the setting; it moves the cursor on every pick, whatever the tie-break, though only
+  `round_robin` reads it, so a tie-break switched to `round_robin` mid-run resumes after
+  the last pick, and a custom selector neither reads nor moves it; a disabled
+  transition is not fireable and so never a candidate; each net, inner nets included, has
+  its own. A FIFO pipeline runs in batches under the first, token by token under the
+  second, and its live stages in turn under the third. The Rust port's
+  `TieBreak::RoundRobin` is the same rule in the same words.
 
 ## Read arcs / non-consuming reads (implemented)
 
@@ -125,7 +139,9 @@ visible, pokable node):
 - **`MutateEdge`** — the transition receives the **live tokens** and may modify them in place;
   they stay (not consumed) but may be changed.
 
-Both require **presence** to enable (a token must exist to read) and never consume. The
+Both require **presence** to enable (a token must exist to read) and never consume (a
+`SurveyEdge`, a snapshot of every token that also reads an empty place, does not require it:
+"Input edges that accept an empty place", below). The
 argument receives all tokens (list-typed arg) or the single token (scalar arg). Rendered
 distinctly: `SnapshotEdge` is a dashed grey arrow into the transition; `MutateEdge` is a thicker
 bidirectional grey line with dot ends — read vs read/write at a glance. Both edges (and their
@@ -399,6 +415,22 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 ## Defaults taken from the design document (section 7)
 
 1. Driver policy: outer first, then inner nets in place, token and net order, repeated.
+   Since 2026-10-12 a setting, `ExecutableGraph.deep_policy`, also a `construct_graph`
+   keyword: `"outer_first"`, the default, is this rule; `"interleaved"` makes the nets a
+   cycle, the outer net and then the inner nets in the same order, and each deep step
+   starts from the net after the one the previous step fired in, goes round once and
+   fires in the first net with a firing, by that net's own selector, so an outer net that
+   can always fire no longer starves the inner ones (`NestedNets.deep_turns`). The cursor
+   is the `net_id` of the net that fired last (`_last_turn`), kept in memory only and
+   recorded under both policies whenever a deep step fires anywhere, outer or inner, in
+   success or failure, so a policy switched to `interleaved` mid-run resumes after the net
+   that fired last; the
+   policy of the net being stepped governs the whole step, at any depth; quiescence is
+   unchanged; the concurrent loops, which launch every fireable outer transition, are
+   unaffected. `fire_one_transition`, `execute_graph`, the sequential `Runner` and the
+   protocol runner honour it (`DESIGN_RUNNER.md`). The transit example keeps the default,
+   since its guards let the city fall quiet while a cabin has work; the Rust port's
+   `DeepPolicy::Interleaved` is the same rule.
 2. Both token-id paths and the stable nested id on the wire (PROTOCOL.md §12.1).
 3. Inner events wrapped in a new `Nested` record, not a path field on every record.
 4. Inner changes made by a failing body are not rolled back; `restore_tokens_on_failure` is
@@ -601,3 +633,60 @@ applied to the Graphviz renderer). The tabs and the filter bar of R4 are the Bev
 a notebook builds its own controls from `Query.distinct`: `examples/token_view_filtering/wildlife_filter.py`,
 one tab per `class` and per `diet`, a season switch that lets the keyed-edge migration fire,
 and the same question asked of the net as a `Query.matches` table.
+
+---
+
+# Input edges that accept an empty place
+
+Decided and built 2026-10-14 from `../petritype-rs/dev-docs/EDGES_ON_EMPTY_PLACES.md`
+(the Cyberpunk2020-Simulation game's proposal, revised after the owner's review; its "As
+built (Python)" section records what differs). The wire side is PROTOCOL.md §5.1. Every
+other input edge holds its transition back until its place has a token; that is right for a
+token the transition works *on*, and wrong for a place it only needs to *look at* when
+something is there ("every promotion running", where none is a good answer), which used to
+need an "empty twin" transition guarded on the place being empty, one more per such place.
+A collection that is an aggregate should stay one token holding a list; these edges are for
+members that must be tokens of their own.
+
+## As built, 2026-10-14
+
+- **`DrainEdge(place, transition, argument)`**, a subclass of `ArgumentEdgeToTransition`
+  (as `TakeWhereEdge` is, so `construct_graph`, the validators and the adjacency maps take it
+  as they are): the body gets every token of the place as a list, oldest first, possibly
+  empty, and they are consumed (a reset arc). A failed firing with
+  `restore_tokens_on_failure` puts them back at the front with their ids; `Fired.consumed`
+  lists them, and none from a place that was empty.
+- **`SurveyEdge(place, transition, argument)`**, a subclass of `SnapshotEdge`: a deep copy
+  of every token, oldest first, possibly none, nothing consumed, no ids touched.
+- **Both need a `list[T]` argument** for the place's `T`, checked when the graph is built
+  (`ExecutableGraphCheck.ensure_argument_takes_every_token`, a `TypeError` naming the edge,
+  the argument and the annotation wanted), since a plain `T` has nothing to receive from an
+  empty place; for these two the check is exact, so a place of lists drains into
+  `list[list[T]]`.
+- **Fireability.** `ExecutableGraphCheck.requires_presence(edge)` is false for the two kinds
+  and true for every other, and `sufficient_tokens_are_available` skips the presence check
+  where it is false. A guard still holds the transition back.
+- **The static checks** count a drain as moving nothing guaranteed, by hand since it is an
+  argument edge by class: `assert_no_source_transitions` names a transition whose only
+  argument edge is a drain (it fires for ever on an empty place), and `assert_acyclic` leaves
+  drains out of the token flow, as it leaves read edges out, since a loop closed only through
+  a drain cannot keep itself going (each round costs the draining transition a token taken
+  through another edge). Both docstrings give examples, the traffic light among them.
+- **The runner** lists the kinds as `drain` and `survey` (`DESIGN_RUNNER.md`, "As built,
+  2026-10-14"); **the visualiser** draws both with a hollow arrowhead (Graphviz
+  `arrowhead="empty"`), the drain otherwise as a consuming edge and the survey as a dashed
+  read edge.
+- The examples, split on 2026-10-16 so that each shows one mechanic (the design's section 2
+  net had a shop that priced orders with whatever promotions were running and drained them
+  all when the day closed, and "draining promotions" read badly):
+  `examples/edges_on_empty_places/shop.py` keeps the survey (a shop prices orders with
+  whatever promotions are running), and `examples/edges_on_empty_places/traffic_light.py`
+  shows the drain beside a plain read (cars wait at a light that cycles red, green and
+  amber; `Go` drains every car waiting while the light is green, reading the light and
+  guarded on green and someone waiting, so a car arriving at green goes straight through,
+  and `Change` cycles the light; since later the same day the light is one place whose token
+  is its colour, and the net has these two transitions). They are the conformance nets `shop`
+  and `traffic-light` of PROTOCOL.md §11, whose transcripts are
+  `tests/protocol/07_empty_place_edges.json` and `tests/protocol/08_traffic_light.json`;
+  the marimo notebooks `shop_day.py` (the shop with prices) and `traffic_light_junction.py`
+  run them, and the rest is `tests/test_empty_place_edges.py`.

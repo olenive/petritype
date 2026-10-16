@@ -1,5 +1,6 @@
 """From a petritype net to the protocol's vocabulary: type names, token labels and
-colours, JSON forms, transition detail and topology.
+colours, JSON forms, transition detail and topology, and the controls and place
+styles a net declares beside it.
 
 Moved from petritype-server's ``worker/net_runner.py`` and ``engine.py`` (the
 label rule, ``.color`` resolution, signature introspection, ``inject``
@@ -18,7 +19,9 @@ from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_a
 from pydantic import BaseModel, TypeAdapter
 
 from petritype.core import serialisation as _serialisation
-from petritype.core.executable_graph_components import ExecutableGraph, ListPlaceNode, MutateWhereEdge, TakeWhereEdge
+from petritype.core.executable_graph_components import (
+    DrainEdge, ExecutableGraph, ListPlaceNode, MutateWhereEdge, SurveyEdge, TakeWhereEdge,
+)
 from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
 from petritype.runner.protocol import ErrorCode, ProtocolError
@@ -48,6 +51,10 @@ COLOR_NAMES = {
 # a token saved by the library is a token the runner can inject; these names stay
 # for the runner's own modules.
 JSON_SCALARS = _serialisation.JSON_SCALARS
+
+# The control kinds whose ``config.value`` is an initial value (§5.1); a button's and a
+# text's ``value``, if any, stays off the wire.
+KINDS_WITH_INITIAL = frozenset({"toggle", "slider", "select"})
 
 
 class TypeNames:
@@ -295,8 +302,92 @@ class Details:
         return detail
 
 
+class Controls:
+    """Functions that put a net's declared controls on the wire and check the value a
+    ``press`` carries (PROTOCOL.md §5.1, §6). A control is a ``ControlSpec`` (read by
+    its fields, so this module needs no runtime import)."""
+
+    def wire(controls: dict, graph: ExecutableGraph) -> list[wire.Control]:
+        """The control-map as ``topology.controls``, in declaration order: ``node``,
+        ``action`` and ``config`` left out when absent or empty, and ``config.value``
+        when the kind has no initial value (``KINDS_WITH_INITIAL``). ``ValueError`` for a
+        ``node`` that is no place or transition of the net or a ``config`` that is not
+        plain JSON, and pydantic's (a ``ValueError`` too) for a kind or an action outside
+        the vocabulary."""
+        nodes = {place.name for place in graph.places} | {transition.name for transition in graph.transitions}
+        controls_on_the_wire = []
+        for name, spec in controls.items():
+            config = dict(spec.config or {})
+            if spec.kind not in KINDS_WITH_INITIAL:
+                config.pop("value", None)
+            try:
+                config = json.loads(json.dumps(config, allow_nan=False))
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"control {name!r}: config is not plain JSON: {error}") from error
+            if spec.node and spec.node not in nodes:
+                raise ValueError(f"control {name!r} names {spec.node!r}, no place or transition of the net")
+            controls_on_the_wire.append(wire.Control(
+                name=name, label=spec.label, kind=spec.kind, node=spec.node or None,
+                action=spec.action, config=config or None,
+            ))
+        return controls_on_the_wire
+
+    def value(spec: Any, params: dict) -> Any:
+        """The value a ``press`` of ``spec`` carries, checked by its kind: none for a
+        ``button``, which hands ``to_command`` ``True`` (clicked, as a notebook's button
+        does); a boolean for a ``toggle``; a number for a ``slider``, within
+        ``config.start`` and ``config.stop`` where they are given; one of
+        ``config.options`` for a ``select``; a string for a ``text``.
+        ``invalid_params`` otherwise. Pydantic is not used: the JSON type is the rule,
+        so ``true`` is no number and ``"3"`` no number either."""
+        kind, config = spec.kind, spec.config or {}
+        given, value = "value" in params, params.get("value")
+        if kind == "button":
+            if given:
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, "a button takes no value")
+            return True
+        if not given:
+            raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a {kind} control needs a value")
+        if kind == "toggle":
+            if not isinstance(value, bool):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a toggle's value is true or false, not {value!r}")
+            return value
+        if kind == "slider":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a slider's value is a number, not {value!r}")
+            start, stop = config.get("start"), config.get("stop")
+            if (start is not None and value < start) or (stop is not None and value > stop):
+                raise ProtocolError(
+                    ErrorCode.INVALID_PARAMS, f"{value!r} is outside the slider's range {start}..{stop}",
+                )
+            return value
+        if kind == "select":
+            options = list(config.get("options") or ())
+            if not isinstance(value, str) or value not in options:
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f"{value!r} is not one of the options {options}")
+            return value
+        if kind == "text":
+            if not isinstance(value, str):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a text's value is a string, not {value!r}")
+            return value
+        raise ProtocolError(ErrorCode.INTERNAL, f"the control has an unknown kind {kind!r}")
+
+
 class Topologies:
     """Functions that read a net's shape (PROTOCOL.md §5.1)."""
+
+    def declare(topology: wire.Topology, controls: list[wire.Control], place_styles: Optional[dict]) -> None:
+        """Put on ``topology`` what a net's entry declares beside the net: its
+        ``controls`` (left out when there are none) and the ``style`` of each place in
+        ``place_styles`` (``{place: PlaceStyle}``). ``ValueError`` for a style on a
+        place the net does not have."""
+        if place_styles:
+            places = {place.name: place for place in topology.places}
+            for name, style in place_styles.items():
+                if name not in places:
+                    raise ValueError(f"a place style names {name!r}, no place of the net")
+                places[name].style = wire.PlaceStyle(fill=getattr(style, "fill", None))
+        topology.controls = controls or None
 
     def takes_all(function: Callable, argument: str, place: ListPlaceNode) -> bool:
         """Whether an argument edge hands the body every token as a list, by the
@@ -311,6 +402,10 @@ class Topologies:
         )
 
     def of(graph: ExecutableGraph) -> wire.Topology:
+        """The net's shape. An input edge's ``kind`` is its class's (``take_where``,
+        ``drain``, ``snapshot``, ``survey``, ``mutate``, ``mutate_where``), or for a
+        plain argument edge ``take_all`` when its argument takes every token as a
+        list and ``take`` otherwise."""
         places = {place.name: place for place in graph.places}
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
@@ -319,6 +414,12 @@ class Topologies:
                 edges.append(wire.Edge(
                     place=edge.place_node_name, transition=edge.transition_node_name,
                     direction="in", kind="take_where", filter=Filters.to_wire(edge.where),
+                ))
+                continue
+            if isinstance(edge, DrainEdge):
+                edges.append(wire.Edge(
+                    place=edge.place_node_name, transition=edge.transition_node_name,
+                    direction="in", kind="drain",
                 ))
                 continue
             takes_all = Topologies.takes_all(
@@ -331,7 +432,7 @@ class Topologies:
         for edge in graph.snapshot_edges:
             edges.append(wire.Edge(
                 place=edge.place_node_name, transition=edge.transition_node_name,
-                direction="in", kind="snapshot",
+                direction="in", kind="survey" if isinstance(edge, SurveyEdge) else "snapshot",
             ))
         for edge in graph.mutate_edges:
             if isinstance(edge, MutateWhereEdge):

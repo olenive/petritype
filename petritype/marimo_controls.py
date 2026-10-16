@@ -20,7 +20,8 @@ _UNSET = object()
 
 
 def _widget(spec: ControlSpec):
-    """Build one marimo widget for a control, by ``kind``."""
+    """Build one marimo widget for a control, by ``kind``. A ``text`` control is a text box and
+    a run button beside it, labelled with the control's label, which sends what is typed."""
     cfg = spec.config
     if spec.kind == "button":
         return mo.ui.run_button(label=spec.label, kind=cfg.get("kind", "neutral"))
@@ -34,6 +35,11 @@ def _widget(spec: ControlSpec):
         )
     if spec.kind == "select":
         return mo.ui.dropdown(cfg["options"], value=cfg.get("value"), label=spec.label)
+    if spec.kind == "text":
+        return mo.ui.dictionary({
+            "text": mo.ui.text(value=cfg.get("value", ""), placeholder=cfg.get("placeholder", "")),
+            "send": mo.ui.run_button(label=spec.label, kind=cfg.get("kind", "neutral")),
+        })
     raise ValueError(f"unknown control kind: {spec.kind!r}")
 
 
@@ -44,21 +50,30 @@ def build_controls(control_map: dict[str, ControlSpec]):
 
 
 def controls_row(controls, control_map: dict[str, ControlSpec]):
-    """An ``hstack`` of the controls in declaration order, for display."""
-    return mo.hstack([controls[name] for name in control_map], justify="start")
+    """An ``hstack`` of the controls in declaration order, for display (a ``text`` control's box
+    and button side by side)."""
+    return mo.hstack([
+        mo.hstack([controls[name]["text"], controls[name]["send"]], justify="start")
+        if spec.kind == "text" else controls[name]
+        for name, spec in control_map.items()
+    ], justify="start")
 
 
 def drain_controls(
     control_map: dict[str, ControlSpec], controls, ctx: RunContext, last_values: dict
 ) -> None:
     """Enqueue commands for interacted controls. **Buttons** act when clicked (value truthy);
-    **stateful** controls (toggle / slider / select) act when their value *changes* (tracked in
+    a **text** control acts when its button is clicked, with what is typed; **stateful**
+    controls (toggle / slider / select) act when their value *changes* (tracked in
     ``last_values``, which the caller should persist across re-runs)."""
     for name, spec in control_map.items():
         value = controls[name].value
         if spec.kind == "button":
             if value:
                 apply_control(ctx, spec, True)
+        elif spec.kind == "text":
+            if value["send"]:
+                apply_control(ctx, spec, value["text"])
         elif last_values.get(name, _UNSET) != value:
             last_values[name] = value
             apply_control(ctx, spec, value)

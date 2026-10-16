@@ -212,8 +212,9 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
         priority: Optional (ExecutableGraph) -> float selection hint. The default
             selector fires the highest-priority fireable transition; transitions
             without one score 0.0, and ties go to the first-defined transition (or
-            the last-defined, under the graph's ``tie_break="last_declared"``). Only
-            called on fireable transitions at selection time.
+            the last-defined, under the graph's ``tie_break="last_declared"``, or
+            the next in turn, under ``"round_robin"``). Only called on fireable
+            transitions at selection time.
         activation_function: Deprecated — use ``guard`` (engine-enforced firing condition) or
             ``priority`` (selection ranking) instead. The engine never consults this
             field; it is only visible to custom transition selectors, and it will be
@@ -274,6 +275,18 @@ class TakeWhereEdge(ArgumentEdgeToTransition):
         return self
 
 
+class DrainEdge(ArgumentEdgeToTransition):
+    """A consuming edge that takes *every* token of the place, oldest first, zero
+    or more, and never holds the transition back: an empty place hands the body an
+    empty list (a reset arc, ``EDGES_ON_EMPTY_PLACES.md``). The argument must be
+    annotated ``list[T]`` for the place's ``T``, checked when the graph is built,
+    since a plain ``T`` has nothing to receive from an empty place. Firing consumes
+    what was there, as a ``list``-annotated ``ArgumentEdgeToTransition`` does on a
+    non-empty place, and a failed firing restores it to the front with its ids. A
+    drain may consume nothing, so ``assert_no_source_transitions`` and
+    ``assert_acyclic`` do not count it as moving a token."""
+
+
 class SnapshotEdge(PositionalArgsBaseModel):
     """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
     snapshot** of the place's tokens, so reading cannot disturb the place. Fireability requires
@@ -281,6 +294,15 @@ class SnapshotEdge(PositionalArgsBaseModel):
     place_node_name: PlaceNodeName
     transition_node_name: FunctionName
     argument: ArgumentName
+
+
+class SurveyEdge(SnapshotEdge):
+    """A snapshot edge that never holds the transition back: the body receives a
+    deep copy of every token of the place, oldest first, zero or more, and nothing
+    is consumed (``EDGES_ON_EMPTY_PLACES.md``). It differs from ``SnapshotEdge``
+    only in not requiring presence: an empty place hands the body an empty list. The
+    argument must be annotated ``list[T]`` for the place's ``T``, checked when the
+    graph is built, as a drain's is."""
 
 
 class MutateEdge(PositionalArgsBaseModel):
@@ -349,13 +371,46 @@ class ExecutableGraph(BaseModel):
         tie_break: Which fireable transition the default selector fires when several
             share the highest priority (including nets that set no priorities).
             ``"first_declared"`` (default) prefers the first-defined one;
-            ``"last_declared"`` prefers the last-defined one. With FIFO places the
-            two give different schedules for a pipeline: first-declared processes
+            ``"last_declared"`` prefers the last-defined one; ``"round_robin"``
+            (since 2026-10-12) prefers the first one declared *after* the
+            transition the default selector chose last in this net (its cursor),
+            wrapping to the first when none follows, and the first declared when
+            there is no cursor yet (a fresh net, or one loaded from its saved form:
+            the cursor is kept in memory only, never saved). With FIFO places the
+            three give different schedules for a pipeline: first-declared processes
             it in batches (every token through stage one before any reaches stage
-            two), while last-declared lets each token flow through before the next
-            enters. Neither is more correct, so it is a setting, and the default
-            keeps the original behaviour. Only the default selector reads it; a
-            custom ``transition_selector`` is unaffected.
+            two), last-declared lets each token flow through before the next
+            enters, and round robin alternates the stages. Neither is more correct,
+            so it is a setting, and the default keeps the original behaviour. Only
+            the default selector reads it. The default selector moves the cursor on
+            every pick, whatever the tie-break, though only round robin reads it, so
+            a tie-break switched to round robin mid-run resumes after the last pick;
+            a custom ``transition_selector`` neither reads nor moves it. Each net,
+            inner nets included, has its own setting and its own cursor.
+        deep_policy: How a deep step (``fire_one_transition`` with ``descend``, so
+            ``execute_graph`` and the sequential ``Runner`` too, and the protocol
+            runner's ``step``) shares its one firing between this net and the inner
+            nets of its nested tokens. ``"outer_first"`` (default): this net's own
+            selector first, then the inner nets in walk order (place order, token
+            order, net order, a net's own inner nets before the next token, passive
+            places skipped), so an inner net fires only when this net has nothing
+            to fire. ``"interleaved"`` (since 2026-10-12): the nets form a cycle,
+            this net then the inner nets in that same walk order, and a deep step
+            starts at the net after the one the previous deep step fired in (this
+            net when nothing has fired yet, after a load, or when that net is
+            gone), goes round once and fires in the first net that has a firing,
+            chosen by that net's own selector. So no live net waits longer than one
+            round while an always-live outer net or a sibling fires: the policy for
+            a net that cannot give its outer transitions guards. The cursor is the
+            ``net_id`` of the net that fired last, kept in memory only and recorded
+            under both policies whenever a deep step fires anywhere, outer or inner,
+            in success or failure, so a policy switched to interleaved mid-run
+            resumes after the net that fired last. The policy
+            of the net a deep step is taken on governs the whole step; an inner
+            net's own setting matters only when it is stepped itself. Quiescence is
+            the same under both. The concurrent ``Runner`` loops launch every
+            fireable outer transition and give an inner net its turn only when
+            nothing is in flight, under either setting.
         next_token_id: The id the next token to enter a place will get. Every token
             gets a stable integer id when it enters a place (seed tokens at
             construction, in place order, from 1; then deposits, ``Extend`` and
@@ -403,7 +458,8 @@ class ExecutableGraph(BaseModel):
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
     # Non-consuming read edges (place -> transition): SnapshotEdge passes a deep copy (place
-    # untouched); MutateEdge passes the live tokens (transition may modify them in place).
+    # untouched), and SurveyEdge, a SnapshotEdge, a deep copy of every token, possibly none;
+    # MutateEdge passes the live tokens (transition may modify them in place).
     snapshot_edges: Sequence[SnapshotEdge] = []
     mutate_edges: Sequence[MutateEdge] = []
     step_count: int = 0
@@ -444,9 +500,12 @@ class ExecutableGraph(BaseModel):
     transition_selector: Optional[Callable] = None
     # Tie-break for the default selector among equal-priority fireable transitions:
     # "first_declared" (default) fires the first-defined, "last_declared" the
-    # last-defined. FIFO pipelines run in batches under the former and token by
-    # token under the latter. Custom selectors ignore it.
-    tie_break: Literal["first_declared", "last_declared"] = "first_declared"
+    # last-defined, "round_robin" the first declared after its last pick (wrapping).
+    # FIFO pipelines run in batches under the first, token by token under the
+    # second, stage by stage in turn under the third. Custom selectors ignore it.
+    tie_break: Literal["first_declared", "last_declared", "round_robin"] = "first_declared"
+    # How a deep step shares its firing with the inner nets: see the class docstring.
+    deep_policy: Literal["outer_first", "interleaved"] = "outer_first"
     allow_token_copying: bool = False
     # When a firing fails after its input tokens were consumed, put them back
     # (best effort) before raising. Off by default: the body may have mutated
@@ -467,6 +526,15 @@ class ExecutableGraph(BaseModel):
     disabled: set[str] = set()
     # Event records waiting to be drained; never dumped with the model.
     _events: list[Event] = PrivateAttr(default_factory=list)
+    # The round-robin cursor (read by ``tie_break="round_robin"``): the declaration
+    # index of the default selector's last pick in this net, under any tie-break, or
+    # None before its first. Kept in memory only; a net loaded from its saved form
+    # starts without one.
+    _last_pick: Optional[int] = PrivateAttr(default=None)
+    # The deep-step cursor (read by ``deep_policy="interleaved"``): the ``net_id`` of
+    # the net (this one or an inner one) the last deep step fired in, recorded under
+    # either policy, in success or failure.
+    _last_turn: Optional[int] = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -546,6 +614,13 @@ class ExecutableGraph(BaseModel):
         events, self._events = self._events, []
         return events
 
+    def forget_cursors(self) -> None:
+        """Start the round-robin tie-break and the interleaved deep step afresh, as
+        a freshly built net does. Loading a saved form does this: the cursors are
+        kept in memory only."""
+        self._last_pick = None
+        self._last_turn = None
+
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
         if len(set(place_names_to_nodes.keys())) != len(place_names_to_nodes.keys()):
@@ -622,7 +697,10 @@ class ExecutableGraph(BaseModel):
                 raise NotImplementedError("Currently only FunctionTransitionNode is supported.")
             place_type = place.type  # This needs to be the value of the 'type' field of the place.
             argument_type = get_type_hints(transition.function).get(edge.argument)
-            if place_type is not None and argument_type is not None:
+            if isinstance(edge, DrainEdge):
+                # Exactly list[T] for the place's T, which also covers a place of lists.
+                ExecutableGraphCheck.ensure_argument_takes_every_token(edge, place, transition, argument_type)
+            elif place_type is not None and argument_type is not None:
                 if not CompareTypes.between_annotations_where_both_maybe_in_list(
                     annotation1=place_type,  # The place.type contains the inner type event if the place
                     # is a ListPlaceNode that holds a list of tokens.
@@ -713,7 +791,9 @@ class ExecutableGraph(BaseModel):
             transition = transition_names_to_nodes[edge.transition_node_name]
             place_type = place.type
             argument_type = get_type_hints(transition.function).get(edge.argument)
-            if place_type is not None and argument_type is not None:
+            if isinstance(edge, SurveyEdge):
+                ExecutableGraphCheck.ensure_argument_takes_every_token(edge, place, transition, argument_type)
+            elif place_type is not None and argument_type is not None:
                 if not CompareTypes.between_annotations_where_both_maybe_in_list(
                     annotation1=place_type,
                     annotation2=argument_type,
@@ -1027,28 +1107,138 @@ class NestedNets:
     ) -> Optional[str]:
         """Fire at most one transition of one inner net: the first that fires, in
         place order, token order, net order, each net by its own selector and
-        descending into its own inner nets before the next token is tried. Passive
-        places are skipped. Returns the firing's path and transition joined by
-        ``/`` (``"Depot/#17/cabin/Sit"``), which the outer graph counts as a firing
-        of its own under that name, or ``None``. The inner net's events are drained
-        into the outer log at once."""
+        descending into its own inner nets before the next token is tried (the
+        ``"outer_first"`` deep step below the outer net, whatever the inner nets'
+        own ``deep_policy``). Passive places are skipped. Returns the firing's path
+        and transition joined by ``/`` (``"Depot/#17/cabin/Sit"``), which the outer
+        graph counts as a firing of its own under that name, or ``None``; a net
+        between counts it likewise, under the path from it. The inner net's events
+        are drained into the outer log at once. The net that fired, or failed, is
+        recorded as this graph's deep-step cursor (``_last_turn``), and likewise on
+        every net between, so a ``deep_policy`` switched to ``"interleaved"``
+        resumes after it."""
         for path, _token, _name, inner in NestedNets.walk(executable_graph, passive=False):
-            inner.record_events = executable_graph.record_events
-            place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(inner)
-            fired = await ExecutableGraphOperations.fire_one_transition(
-                executable_graph=inner,
-                place_names_to_nodes=place_nodes,
-                transition_names_to_incoming_edges=incoming,
-                transition_names_to_outgoing_edges=outgoing,
-                transition_names_to_read_edges=read,
-                allow_token_copying=allow_token_copying,
-                restore_tokens_on_failure=restore_tokens_on_failure,
-                executor=executor,
-            )
+            try:
+                fired = await NestedNets.fire_alone(
+                    inner, executable_graph.record_events, executor=executor,
+                    allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
+                )
+                if fired is None and NestedNets.any_nested(inner):
+                    fired = await NestedNets.fire_one_inner(
+                        inner, executor=executor,
+                        allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
+                    )
+                    if fired is not None:
+                        NestedNets.count(inner, fired)
+            except TransitionFailedError:
+                # ``inner`` recorded which net took the turn: itself, or one inside it.
+                executable_graph._last_turn = inner._last_turn
+                raise
             if fired is not None:
+                executable_graph._last_turn = inner._last_turn
                 NestedNets.drain(executable_graph)
                 return "/".join((*path, fired))
         return None
+
+    async def fire_alone(
+        inner: ExecutableGraph,
+        record_events: bool,
+        executor=None,
+        allow_token_copying: Optional[bool] = None,
+        restore_tokens_on_failure: Optional[bool] = None,
+    ) -> Optional[str]:
+        """One firing of ``inner`` by its own selector, without descending into its
+        own inner nets, recording events when the outer net does. Returns the
+        transition's name or ``None``."""
+        inner.record_events = record_events
+        place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(inner)
+        return await ExecutableGraphOperations.fire_one_transition(
+            executable_graph=inner,
+            place_names_to_nodes=place_nodes,
+            transition_names_to_incoming_edges=incoming,
+            transition_names_to_outgoing_edges=outgoing,
+            transition_names_to_read_edges=read,
+            allow_token_copying=allow_token_copying,
+            restore_tokens_on_failure=restore_tokens_on_failure,
+            executor=executor,
+            descend=False,
+        )
+
+    def count(executable_graph: ExecutableGraph, name: str) -> None:
+        """Count an inner firing as a firing of ``executable_graph`` under ``name``,
+        its path from this graph and the transition (``"Depot/#17/cabin/Sit"``):
+        what ``step_count``, ``last_fired`` and ``fired_counts`` then say."""
+        executable_graph.step_count += 1
+        executable_graph.last_fired = name
+        executable_graph.fired_counts[name] = executable_graph.fired_counts.get(name, 0) + 1
+
+    # --- the interleaved deep step (``deep_policy="interleaved"``) ---
+
+    def deep_cycle(executable_graph: ExecutableGraph) -> list[tuple[tuple[str, ...], ExecutableGraph]]:
+        """The nets an interleaved deep step goes round, as ``(path, net)``: the net
+        itself (path ``()``), then its inner nets at any depth in walk order (place
+        order, token order, net order, a net's own inner nets before the next
+        token), passive places skipped. Paths are as the marking stands now."""
+        cycle: list[tuple[tuple[str, ...], ExecutableGraph]] = [((), executable_graph)]
+
+        def visit(graph: ExecutableGraph, prefix: tuple[str, ...]) -> None:
+            for path, _token, _name, inner in NestedNets.walk(graph, passive=False):
+                cycle.append(((*prefix, *path), inner))
+                visit(inner, (*prefix, *path))
+
+        visit(executable_graph, ())
+        return cycle
+
+    def deep_turns(executable_graph: ExecutableGraph) -> list[tuple[tuple[str, ...], ExecutableGraph]]:
+        """``deep_cycle`` in the order the next interleaved deep step tries it: from
+        the net after the one the previous deep step fired in (the cursor), round
+        to that net itself; from the net itself when there is no cursor or the net
+        it names is gone."""
+        cycle = NestedNets.deep_cycle(executable_graph)
+        last = executable_graph._last_turn
+        if last is not None:
+            for position, (_path, net) in enumerate(cycle):
+                if net.net_id == last:
+                    return cycle[position + 1:] + cycle[:position + 1]
+        return cycle
+
+    def took_turn(executable_graph: ExecutableGraph, net: ExecutableGraph) -> None:
+        """Move the interleaved deep step's cursor: ``net`` (``executable_graph``
+        itself or one of its inner nets) is the net the last deep step fired in."""
+        executable_graph._last_turn = net.net_id
+
+    async def fire_turn(
+        executable_graph: ExecutableGraph,
+        path: tuple[str, ...],
+        inner: ExecutableGraph,
+        executor=None,
+        allow_token_copying: Optional[bool] = None,
+        restore_tokens_on_failure: Optional[bool] = None,
+    ) -> Optional[str]:
+        """An interleaved deep step's turn in ``inner``, the inner net at ``path``
+        (any depth): one firing by its own selector, without descent. Every net
+        between ``executable_graph`` and ``inner`` counts it under the path from
+        it, as the outer-first descent does, and records ``inner`` as its
+        deep-step cursor; the inner events are drained into the outer log at
+        once. Returns the firing's name under ``executable_graph`` (which the
+        caller counts and whose cursor the caller moves), or ``None``."""
+        between = [NestedNets.resolve(executable_graph, path[:level]) for level in range(3, len(path), 3)]
+        try:
+            fired = await NestedNets.fire_alone(
+                inner, executable_graph.record_events, executor=executor,
+                allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
+            )
+        except TransitionFailedError:
+            for net in between:
+                NestedNets.took_turn(net, inner)
+            raise
+        if fired is None:
+            return None
+        for level, net in zip(range(3, len(path), 3), between):
+            NestedNets.count(net, "/".join((*path[level:], fired)))
+            NestedNets.took_turn(net, inner)
+        NestedNets.drain(executable_graph)
+        return "/".join((*path, fired))
 
     # --- reaching inside, for outer bodies ---
 
@@ -1249,6 +1439,44 @@ class KeyedEdges:
 class ExecutableGraphCheck:
     """Functions that do not alter the executable graph."""
 
+    def requires_presence(edge: Union[ArgumentEdgeToTransition, SnapshotEdge, MutateEdge]) -> bool:
+        """Whether an input edge holds its transition back until its place has a
+        token: true for every edge but the two that read every token, zero or more
+        (``DrainEdge``, ``SurveyEdge``), which accept an empty place."""
+        return not isinstance(edge, (DrainEdge, SurveyEdge))
+
+    def argument_takes_every_token(argument_type: Any, place_type: Any) -> bool:
+        """Whether an argument annotated ``argument_type`` receives every token of a
+        place of ``place_type`` as one list: ``list[T]`` for the place's ``T``, the
+        test stage 1 applies to a plain argument or read edge."""
+        return get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
+            annotation_not_in_list=place_type,
+            annotation_maybe_in_list=argument_type,
+        )
+
+    def ensure_argument_takes_every_token(
+        edge: Union[DrainEdge, SurveyEdge],
+        place: ListPlaceNode,
+        transition: FunctionTransitionNode,
+        argument_type: Any,
+    ) -> None:
+        """Raise ``TypeError`` unless the argument of a ``DrainEdge`` or ``SurveyEdge``
+        is annotated ``list[T]`` for its place's ``T``: the edge hands the body every
+        token, possibly none, and a plain ``T`` has nothing to receive from an empty
+        place."""
+        if ExecutableGraphCheck.argument_takes_every_token(argument_type, place.type):
+            return
+
+        def spelt(annotation: Any) -> str:
+            return annotation.__name__ if isinstance(annotation, type) else str(annotation)
+
+        given = "no annotation" if argument_type is None else spelt(argument_type)
+        raise TypeError(
+            f"{type(edge).__name__} from place '{place.name}' to transition '{transition.name}': "
+            f"argument '{edge.argument}' must be annotated list[{spelt(place.type)}], since the edge "
+            f"hands the body every token of the place, possibly none; it has {given}."
+        )
+
     def sufficient_tokens_are_available(
         transition: FunctionTransitionNode,
         transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
@@ -1259,13 +1487,17 @@ class ExecutableGraphCheck:
         """Every input place non-empty, and, for a keyed edge (``TakeWhereEdge``,
         ``MutateWhereEdge``), holding a token its filter keeps; ``executable_graph``
         supplies the parameters a filter may name (without it a keyed edge is
-        judged by presence alone)."""
+        judged by presence alone). A ``DrainEdge`` or ``SurveyEdge`` asks nothing of
+        its place (``requires_presence``): it reads every token, zero or more, so
+        an empty place never holds its transition back; a guard still can."""
         # Transitions with no incoming edges (generators) are always ready to fire
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
             transition.name, tuple()
         )
         params = executable_graph.params if executable_graph is not None else None
         for edge in incoming_edges:
+            if not ExecutableGraphCheck.requires_presence(edge):
+                continue
             place = place_names_to_nodes[edge.place_node_name]
             if len(place.tokens) == 0:
                 return False
@@ -1273,9 +1505,11 @@ class ExecutableGraphCheck:
                 if KeyedEdges.first_kept(edge, place, params) is None:
                     return False
         # Read edges (snapshot/mutate) require presence too — there must be a token to read —
-        # but firing does not consume them.
+        # but firing does not consume them. A survey reads whatever is there, possibly nothing.
         if transition_names_to_read_edges:
             for edge in transition_names_to_read_edges.get(transition.name, ()):
+                if not ExecutableGraphCheck.requires_presence(edge):
+                    continue
                 place = place_names_to_nodes[edge.place_node_name]
                 if len(place.tokens) == 0:
                     return False
@@ -1463,18 +1697,34 @@ class ExecutableGraphCheck:
         feed itself; mutate edges are excluded on the same conservative grounds
         (they modify tokens in place but move none).
 
+        Drain edges (``DrainEdge``) are excluded too, by hand, although a drain is
+        an argument edge: it takes every token, zero or more, so it moves nothing
+        guaranteed, and a loop closed only through a drain cannot keep itself
+        going. Each round needs the draining transition to fire, and that firing
+        is paid for by a token it takes through another edge (or the transition is
+        a source, which ``assert_no_source_transitions`` names). A transition
+        that takes a signal token and drains a queue, with another that puts what
+        it let through back into the queue, closes a loop through the drain; every
+        round costs a signal token, so the net still quiesces, and this check
+        passes it. The traffic light (``examples/edges_on_empty_places/traffic_light.py``)
+        drains its waiting cars while the light is green and is rejected all the
+        same, for its light: ``Change`` takes the light from ``Light`` and puts its
+        next colour back, through a take edge, a cycle by design.
+
         Passing proves **no token cycles** — not termination. A transition with no
-        ``ArgumentEdgeToTransition`` input (a source — possibly fed only by read
-        edges, which consume nothing) can fire forever in a perfectly acyclic net.
-        The static termination condition is acyclic *and* every transition
-        consumes: pair this with ``assert_no_source_transitions``. Nets that
-        legitimately run forever should be bounded at run time instead
-        (``RunContext.error_after_n_firings``).
+        ``ArgumentEdgeToTransition`` input other than drains (a source — possibly
+        fed only by read edges and drains, which may consume nothing) can fire
+        forever in a perfectly acyclic net. The static termination condition is
+        acyclic *and* every transition consumes: pair this with
+        ``assert_no_source_transitions``. Nets that legitimately run forever should
+        be bounded at run time instead (``RunContext.error_after_n_firings``).
         """
         # Nodes are namespaced (kind, name): unique-name enforcement is per kind,
         # so a place and a transition may legally share a name.
         adjacency: dict[tuple, list[tuple]] = {}
         for edge in executable_graph.argument_edges:
+            if isinstance(edge, DrainEdge):
+                continue  # moves nothing guaranteed (see above)
             adjacency.setdefault(("place", edge.place_node_name), []).append(
                 ("transition", edge.transition_node_name)
             )
@@ -1516,32 +1766,70 @@ class ExecutableGraphCheck:
         static termination proof: tokens only flow forward, and every firing
         consumes at least one.
 
+        A ``DrainEdge`` does not count either, although it is an argument edge: it
+        takes every token, zero or more, so it may consume nothing, and a
+        transition whose only argument edge is a drain is a source. The traffic
+        light's ``Go`` (``examples/edges_on_empty_places/traffic_light.py``) drains
+        ``Waiting`` and only reads ``Light``, so this check names it: unguarded, it
+        would fire at every green taking nothing. Its guard, green and someone
+        waiting, is what makes it safe, which the check cannot see, so that example
+        does not call it.
+
         Deliberate sources (generators, external-input transitions) are
         legitimate — don't assert this on such nets; bound them at run time with
         ``RunContext.error_after_n_firings`` or drive them via
         ``run_indefinitely``.
         """
-        consuming = {edge.transition_node_name for edge in executable_graph.argument_edges}
+        consuming = {
+            edge.transition_node_name for edge in executable_graph.argument_edges
+            if not isinstance(edge, DrainEdge)
+        }
         sources = [t.name for t in executable_graph.transitions if t.name not in consuming]
         if sources:
             raise ValueError(
-                "Source transitions (no ArgumentEdgeToTransition input — firing "
-                f"consumes nothing, so the net cannot quiesce): {', '.join(sources)}"
+                "Source transitions (no ArgumentEdgeToTransition input other than a DrainEdge — "
+                f"firing may consume nothing, so the net cannot quiesce): {', '.join(sources)}"
             )
 
 
 # Default selector: highest `priority` wins; transitions without one score 0.0.
 # `max` keeps the first maximum, so ties — including nets where nobody sets a
 # priority — go to the first-defined transition; for `tie_break="last_declared"`
-# we scan the fireable list reversed, so the last-defined one is that first maximum.
+# we scan the fireable list reversed, so the last-defined one is that first maximum;
+# for `tie_break="round_robin"` the first of the top-priority ones declared after
+# the cursor (the last pick), wrapping round.
 def default_transition_selector(
     graph: ExecutableGraph, fireable: list[FunctionTransitionNode]
 ) -> Optional[FunctionTransitionNode]:
-    """Default selector: highest-priority fireable transition, ties broken by ``graph.tie_break``."""
+    """Default selector: highest-priority fireable transition, ties broken by ``graph.tie_break``.
+    ``fireable`` is in declaration order. Every pick, under any tie-break, moves the
+    graph's cursor (``_last_pick``), which nothing else moves and only
+    ``"round_robin"`` reads, so a tie-break switched to round robin mid-run resumes
+    after the last pick."""
     if not fireable:
         return None
-    candidates = reversed(fireable) if graph.tie_break == "last_declared" else fireable
-    return max(candidates, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
+    if graph.tie_break == "round_robin":
+        chosen = _round_robin(graph, fireable)
+    else:
+        candidates = reversed(fireable) if graph.tie_break == "last_declared" else fireable
+        chosen = max(candidates, key=lambda t: t.priority(graph) if t.priority is not None else 0.0)
+    graph._last_pick = next((position for position, t in enumerate(graph.transitions) if t.name == chosen.name), None)
+    return chosen
+
+
+def _round_robin(graph: ExecutableGraph, fireable: list[FunctionTransitionNode]) -> FunctionTransitionNode:
+    """The first top-priority fireable transition declared after the cursor,
+    wrapping to the first; the first declared when there is no cursor yet."""
+    scores = [t.priority(graph) if t.priority is not None else 0.0 for t in fireable]
+    top = max(scores)
+    index = {t.name: position for position, t in enumerate(graph.transitions)}
+    candidates = [t for t, score in zip(fireable, scores) if score == top]
+    candidates.sort(key=lambda t: index.get(t.name, -1))
+    cursor = graph._last_pick
+    chosen = None
+    if cursor is not None:
+        chosen = next((t for t in candidates if index.get(t.name, -1) > cursor), None)
+    return chosen if chosen is not None else candidates[0]
 
 
 class ExecutableGraphOperations:
@@ -1571,10 +1859,11 @@ class ExecutableGraphOperations:
         allow_token_copying: bool = False,
         restore_tokens_on_failure: bool = False,
         expect_acyclic: bool = False,
-        tie_break: Literal["first_declared", "last_declared"] = "first_declared",
+        tie_break: Literal["first_declared", "last_declared", "round_robin"] = "first_declared",
         record_events: bool = False,
         params: Optional[dict[str, Any]] = None,
         template: Optional[str] = None,
+        deep_policy: Literal["outer_first", "interleaved"] = "outer_first",
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -1597,7 +1886,8 @@ class ExecutableGraphOperations:
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
-            record_events=record_events, params=dict(params or {}), template=template,
+            deep_policy=deep_policy, record_events=record_events, params=dict(params or {}),
+            template=template,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
@@ -1638,7 +1928,9 @@ class ExecutableGraphOperations:
         (per argument, in order) and the ids handed over through mutate edges are
         recorded on it; snapshot edges touch no ids. A keyed edge (``TakeWhereEdge``,
         ``MutateWhereEdge``) takes or hands over the oldest token its filter keeps,
-        with ``net_params`` the parameters a clause may name.
+        with ``net_params`` the parameters a clause may name. A ``DrainEdge`` takes
+        every token as a list and a ``SurveyEdge`` hands over a deep copy of every
+        token, either list possibly empty.
 
         A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
         """
@@ -1669,10 +1961,9 @@ class ExecutableGraphOperations:
                     firing_ids.consumed[edge.argument] = (place.name, taken_ids)
                 continue
             # Two cases - passing a single token or passing all tokens as a list.
-            argument_origin = get_origin(argument_type)
-            if argument_origin is list and CompareTypes.between_annotations_where_one_maybe_in_list(
-                annotation_not_in_list=place_type,
-                annotation_maybe_in_list=argument_type,
+            # A drain always passes the list, possibly empty.
+            if isinstance(edge, DrainEdge) or ExecutableGraphCheck.argument_takes_every_token(
+                argument_type, place_type,
             ):  # If the argument type is a list and the type inside the list matches the place type,
                 # pass all tokens as a list.
                 tokens = place.tokens
@@ -1696,7 +1987,8 @@ class ExecutableGraphOperations:
 
         # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
         # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
-        # guaranteed by the fireability check, so place.tokens is non-empty here.
+        # guaranteed by the fireability check, so place.tokens is non-empty here, except for a
+        # SurveyEdge, which hands over a deep copy of every token, possibly none.
         for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
@@ -1709,9 +2001,8 @@ class ExecutableGraphOperations:
                     firing_ids.mutated.append((place.name, place._token_ids[index]))
                 input_edge_names_to_tokens[edge.argument] = place.tokens[index]
                 continue
-            if get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
-                annotation_not_in_list=place.type,
-                annotation_maybe_in_list=argument_type,
+            if isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
+                argument_type, place.type,
             ):
                 value = place.tokens  # all tokens, as a list
                 read_ids = list(place._token_ids)
@@ -1741,8 +2032,9 @@ class ExecutableGraphOperations:
 
         Used when restore_tokens_on_failure is enabled and a firing fails
         after extraction. Single tokens go back to the front of their place
-        (they were consumed FIFO from the front) and whole-list extractions
-        are prepended, so the pre-firing order is restored. This is
+        (they were consumed FIFO from the front) and whole-list extractions,
+        a drain's included (possibly empty), are prepended, so the pre-firing
+        order is restored. This is
         conservation, not rollback: a body that mutated a token before
         failing leaves it mutated, and external side effects and in-place
         mutation via MutateEdge are not undone — which is why this is opt-in.
@@ -1754,9 +2046,9 @@ class ExecutableGraphOperations:
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
             # Mirror the extraction cases of stage 1 (a keyed take goes back to the front).
-            if not isinstance(edge, TakeWhereEdge) and get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
-                annotation_not_in_list=place.type,
-                annotation_maybe_in_list=argument_type,
+            if isinstance(edge, DrainEdge) or (
+                not isinstance(edge, TakeWhereEdge)
+                and ExecutableGraphCheck.argument_takes_every_token(argument_type, place.type)
             ):  # All tokens were extracted as a list.
                 place.tokens[:0] = input_edge_names_to_tokens[edge.argument]
             else:  # A single token was popped from the front.
@@ -2109,7 +2401,12 @@ class ExecutableGraphOperations:
         order then token order then net order, passive places skipped); an inner
         firing counts as a firing of this graph under its path,
         ``"Depot/#17/cabin/Sit"``, which is what ``last_fired``, ``fired_counts``
-        and the return value then say.
+        and the return value then say. That is the graph's default
+        ``deep_policy="outer_first"``; under ``"interleaved"`` the one firing goes
+        round the cycle of nets instead (this net, then the inner nets in the same
+        order), starting after the net the previous deep step fired in
+        (``NestedNets.deep_turns``), and ``transition_selector`` chooses for this
+        net's own turn only.
         """
         TokenIds.resync(executable_graph)
         NestedNets.drain(executable_graph)
@@ -2122,6 +2419,45 @@ class ExecutableGraphOperations:
             or executable_graph.transition_selector
             or default_transition_selector
         )
+
+        if descend and executable_graph.deep_policy == "interleaved" and NestedNets.any_nested(executable_graph):
+            # One deep step round the cycle of nets (``deep_policy``): this net's turn
+            # is a firing of its own without descent, an inner net's a firing of that
+            # net alone; the first net with a firing fires, and is the cursor. A
+            # firing that fails took its turn too.
+            for path, net in NestedNets.deep_turns(executable_graph):
+                try:
+                    if net is executable_graph:
+                        fired = await ExecutableGraphOperations.fire_one_transition(
+                            executable_graph=executable_graph,
+                            place_names_to_nodes=place_names_to_nodes,
+                            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                            transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
+                            transition_names_to_read_edges=transition_names_to_read_edges,
+                            transition_selector=transition_selector,
+                            allow_token_copying=allow_token_copying,
+                            restore_tokens_on_failure=restore_tokens_on_failure,
+                            executor=executor,
+                            transition_history_length=transition_history_length,
+                            place_history_length=place_history_length,
+                            token_history_length=token_history_length,
+                            descend=False,
+                        )
+                    else:
+                        fired = await NestedNets.fire_turn(
+                            executable_graph, path, net, executor=executor,
+                            allow_token_copying=allow_token_copying,
+                            restore_tokens_on_failure=restore_tokens_on_failure,
+                        )
+                        if fired is not None:
+                            NestedNets.count(executable_graph, fired)
+                except TransitionFailedError:
+                    NestedNets.took_turn(executable_graph, net)
+                    raise
+                if fired is not None:
+                    NestedNets.took_turn(executable_graph, net)
+                    return fired
+            return None
 
         # Get all fireable transitions (sufficient tokens and a passing guard), in
         # definition order.
@@ -2138,6 +2474,10 @@ class ExecutableGraphOperations:
 
         # Let selector choose which transition to fire
         transition = selector(executable_graph, fireable_transitions)
+        if transition is not None:
+            # This net takes the turn, whatever comes of the firing: the deep-step
+            # cursor, recorded under either ``deep_policy`` (``NestedNets.deep_turns``).
+            executable_graph._last_turn = executable_graph.net_id
         if transition is None:
             if not descend or not NestedNets.any_nested(executable_graph):
                 return None
@@ -2147,9 +2487,7 @@ class ExecutableGraphOperations:
             )
             if fired_inside is None:
                 return None
-            executable_graph.step_count += 1
-            executable_graph.last_fired = fired_inside
-            executable_graph.fired_counts[fired_inside] = executable_graph.fired_counts.get(fired_inside, 0) + 1
+            NestedNets.count(executable_graph, fired_inside)
             return fired_inside
 
         firing_ids = FiringTokenIds()

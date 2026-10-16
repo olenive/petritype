@@ -42,16 +42,16 @@ def fired_events(graph):
 class TestTakeWhere:
 
     def test_migrate_takes_the_bird_alone_and_leaves_the_fox_with_its_id(self):
-        graph = build_wildlife()
-        NetParams.set(graph, "season", "Autumn")
+        graph = build_wildlife()  # autumn by default
         forest = graph.place_named("Forest")
-        fox_id = forest.token_ids[1]
+        others = forest.token_ids[1:]
         graph.drain_events()
         run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
         assert graph.last_fired == "Migrate Forest Wetland"
         (fired,) = fired_events(graph)
         assert fired.consumed == (("Forest", 1),) and [p for p, _ in fired.produced] == ["Migrating"]
-        assert names(graph, "Forest") == ["Fox"] and forest.token_ids == (fox_id,), "the fox never moved"
+        assert names(graph, "Forest") == ["Fox", "Deer", "Woodpecker"]
+        assert forest.token_ids == others, "the fox, the deer and the woodpecker never moved"
         assert names(graph, "Migrating") == ["Robin"]
 
     def test_fireable_only_with_a_matching_token(self):
@@ -63,23 +63,34 @@ class TestTakeWhere:
         forest = graph.place_named("Forest")
         forest.tokens[:] = [s for s in forest.tokens if s.class_ != "Bird"]
         assert not ExecutableGraphCheck.transition_is_fireable(migrate, graph, maps[1], maps[0], maps[3]), \
-            "a fox alone: present, but matching nothing"
+            "a fox and a deer: present, but matching nothing"
         assert ExecutableGraphCheck.sufficient_tokens_are_available(migrate, maps[1], maps[0], maps[3]), \
             "without the graph, presence alone is judged"
 
     def test_the_guard_still_decides(self):
         graph = build_wildlife()
+        NetParams.set(graph, "season", "Summer")
         _, fired = run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
-        assert graph.last_fired != "Migrate Forest Wetland", "not autumn"
+        assert graph.last_fired == "Spread Savanna Wetland" and names(graph, "Migrating") == [], "not autumn"
 
     def test_the_oldest_matching_token_is_taken_wherever_it_stands(self):
         graph = build_wildlife()
         forest = graph.place_named("Forest")
         forest.tokens.insert(0, Species(name="Boar", class_="Mammal", diet="Omnivore", population=9))
         forest.tokens.append(Species(name="Owl", class_="Bird", diet="Carnivore", population=2))
-        NetParams.set(graph, "season", "Autumn")
         run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
-        assert names(graph, "Migrating") == ["Robin"] and names(graph, "Forest") == ["Boar", "Fox", "Owl"]
+        assert names(graph, "Migrating") == ["Robin"]
+        assert names(graph, "Forest") == ["Boar", "Fox", "Deer", "Woodpecker", "Owl"]
+        run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
+        assert names(graph, "Migrating") == ["Robin", "Woodpecker"], "the next bird, behind the fox and the deer"
+        assert names(graph, "Forest") == ["Boar", "Fox", "Deer", "Owl"]
+
+    def test_the_tundra_gives_up_its_owl_from_the_back(self):
+        graph = build_wildlife()
+        graph.disabled.add("Migrate Forest Wetland")
+        run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
+        assert graph.last_fired == "Migrate Tundra Wetland"
+        assert names(graph, "Migrating") == ["Snowy Owl"] and names(graph, "Tundra") == ["Fox", "Arctic Hare", "Lemming"]
 
     def test_a_param_clause_on_the_edge(self):
         taken = []
@@ -166,9 +177,11 @@ class TestOverTheWire:
         edge = next(e for e in state["topology"]["edges"] if e["transition"] == "Migrate Forest Wetland" and e["direction"] == "in")
         assert edge == {"place": "Forest", "transition": "Migrate Forest Wetland", "direction": "in",
                         "kind": "take_where", "filter": {"clauses": [{"key": "class", "values": ["Bird"]}]}}
-        robin, fox = state["marking"]["places"]["Forest"]["tokens"]
-        await send(3, "set_param", {"param": "season", "value": "Autumn"})
-        lines = await send(4, "step")
+        decline = next(e for e in state["topology"]["edges"] if e["transition"] == "Decline Forest" and e["direction"] == "in")
+        assert decline == {"place": "Forest", "transition": "Decline Forest", "direction": "in",
+                           "kind": "mutate_where", "filter": {"clauses": [{"key": "diet", "values": ["Herbivore"]}]}}
+        robin, fox, deer, woodpecker = state["marking"]["places"]["Forest"]["tokens"]
+        lines = await send(3, "step")  # autumn by default
         assert lines[0]["method"] == "launched" and lines[0]["params"]["consumed"] == [["Forest", robin["id"]]]
-        after = (await send(5, "get_state"))[-1]["result"]
-        assert [t["id"] for t in after["marking"]["places"]["Forest"]["tokens"]] == [fox["id"]]
+        after = (await send(4, "get_state"))[-1]["result"]
+        assert [t["id"] for t in after["marking"]["places"]["Forest"]["tokens"]] == [fox["id"], deer["id"], woodpecker["id"]]

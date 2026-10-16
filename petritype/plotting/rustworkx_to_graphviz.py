@@ -274,16 +274,21 @@ class RustworkxToGraphviz:
                         'penwidth': '2',
                     }
                 # SnapshotEdge: a dashed arrow towards the transition — a non-consuming read.
+                # SurveyEdge: the same with a hollow head — it reads an empty place too.
                 return {
                     'style': 'dashed',
                     'color': colour,
-                    'arrowhead': 'normal',
+                    'arrowhead': 'empty' if edge.survey else 'normal',
                     'penwidth': '1',
                 }
 
             if should_be_magenta(edge):
-                return {'color': 'magenta', 'penwidth': '2'}
+                attrs = {'color': 'magenta', 'penwidth': '2'}
             else:
-                return {'color': 'black', 'penwidth': '1'}
+                attrs = {'color': 'black', 'penwidth': '1'}
+            if isinstance(edge, RustworkxArgumentEdgeData) and edge.drain:
+                # DrainEdge: a consuming arrow with a hollow head — it takes from an empty place too.
+                attrs['arrowhead'] = 'empty'
+            return attrs
 
         return node_attr_fn, edge_attr_fn

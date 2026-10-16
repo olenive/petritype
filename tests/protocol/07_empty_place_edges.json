@@ -1,0 +1,647 @@
+{
+ "net": "shop",
+ "params": {},
+ "exchanges": [
+  {
+   "send": {
+    "method": "describe"
+   },
+   "expect": [
+    {
+     "id": "1",
+     "result": {
+      "protocol_version": 1,
+      "runtime": "<label>",
+      "runtime_version": "<label>",
+      "nets": [
+       {
+        "name": "shop",
+        "description": "Price orders with whatever promotions are running",
+        "mode": "manual",
+        "params": []
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "load",
+    "params": {
+     "net": "shop"
+    }
+   },
+   "expect": [
+    {
+     "method": "load_progress",
+     "params": {
+      "step": "build",
+      "message": "<label>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "method": "reloaded",
+     "params": {
+      "generation": 1,
+      "reason": "load",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "2",
+     "result": {
+      "status": "loaded",
+      "generation": 1,
+      "marking_version": "<version>"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_state"
+   },
+   "expect": [
+    {
+     "id": "3",
+     "result": {
+      "protocol_version": 1,
+      "runtime": "<label>",
+      "net": "shop",
+      "generation": 1,
+      "marking_version": "<version>",
+      "running": false,
+      "topology": {
+       "places": [
+        {
+         "name": "Orders",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Promotions",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Priced",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Discounts Applied",
+         "type_name": "<label>",
+         "serializable": true
+        }
+       ],
+       "transitions": [
+        {
+         "name": "Price Order",
+         "detail": "<any>"
+        }
+       ],
+       "edges": {
+        "<unordered>": [
+         {
+          "place": "Orders",
+          "transition": "Price Order",
+          "direction": "in",
+          "kind": "take"
+         },
+         {
+          "place": "Promotions",
+          "transition": "Price Order",
+          "direction": "in",
+          "kind": "survey"
+         },
+         {
+          "place": "Priced",
+          "transition": "Price Order",
+          "direction": "out",
+          "slot": 0
+         },
+         {
+          "place": "Discounts Applied",
+          "transition": "Price Order",
+          "direction": "out",
+          "slot": 1
+         }
+        ]
+       }
+      },
+      "transitions": {
+       "Price Order": {
+        "enabled": true,
+        "fireable": false,
+        "in_flight": false,
+        "priority": 0.0
+       }
+      },
+      "marking": {
+       "places": {
+        "Orders": {
+         "count": 0,
+         "tokens": []
+        },
+        "Promotions": {
+         "count": 0,
+         "tokens": []
+        },
+        "Priced": {
+         "count": 0,
+         "tokens": []
+        },
+        "Discounts Applied": {
+         "count": 0,
+         "tokens": []
+        }
+       }
+      },
+      "progress": {
+       "step_count": 0,
+       "last_fired": null,
+       "fired_counts": {},
+       "last_progress_at": null
+      }
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "inject",
+    "params": {
+     "place": "Orders",
+     "token": "Order 1"
+    }
+   },
+   "expect": [
+    {
+     "method": "added",
+     "params": {
+      "place": "Orders",
+      "id": "<id:order>",
+      "label": "<label>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "method": "fireable",
+     "params": {
+      "transitions": [
+       "Price Order"
+      ],
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "4",
+     "result": {
+      "status": "injected",
+      "id": "<id:order>",
+      "marking_version": "<version>"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "step"
+   },
+   "expect": [
+    {
+     "method": "fired",
+     "params": {
+      "transition": "Price Order",
+      "consumed": [
+       [
+        "Orders",
+        "<id:order>"
+       ]
+      ],
+      "produced": [
+       [
+        "Priced",
+        "<id:order_priced>",
+        "<label>"
+       ]
+      ],
+      "duration_ms": "<ms>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "method": "fireable",
+     "params": {
+      "transitions": [],
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "5",
+     "result": {
+      "fired": true,
+      "transition": "Price Order",
+      "marking_version": "<version>",
+      "running": false
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "inject",
+    "params": {
+     "place": "Promotions",
+     "token": "10% off"
+    }
+   },
+   "expect": [
+    {
+     "method": "added",
+     "params": {
+      "place": "Promotions",
+      "id": "<id:10_off>",
+      "label": "<label>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "6",
+     "result": {
+      "status": "injected",
+      "id": "<id:10_off>",
+      "marking_version": "<version>"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "inject",
+    "params": {
+     "place": "Promotions",
+     "token": "Free shipping"
+    }
+   },
+   "expect": [
+    {
+     "method": "added",
+     "params": {
+      "place": "Promotions",
+      "id": "<id:free_shipping>",
+      "label": "<label>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "7",
+     "result": {
+      "status": "injected",
+      "id": "<id:free_shipping>",
+      "marking_version": "<version>"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "inject",
+    "params": {
+     "place": "Orders",
+     "token": "Order 2"
+    }
+   },
+   "expect": [
+    {
+     "method": "added",
+     "params": {
+      "place": "Orders",
+      "id": "<id:order_orders>",
+      "label": "<label>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "method": "fireable",
+     "params": {
+      "transitions": [
+       "Price Order"
+      ],
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "8",
+     "result": {
+      "status": "injected",
+      "id": "<id:order_orders>",
+      "marking_version": "<version>"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "step"
+   },
+   "expect": [
+    {
+     "method": "fired",
+     "params": {
+      "transition": "Price Order",
+      "consumed": [
+       [
+        "Orders",
+        "<id:order_orders>"
+       ]
+      ],
+      "produced": [
+       [
+        "Priced",
+        "<id:order_priced_2>",
+        "<label>"
+       ],
+       [
+        "Discounts Applied",
+        "<id:10_off_on_order>",
+        "<label>"
+       ],
+       [
+        "Discounts Applied",
+        "<id:free_shipping_on_order>",
+        "<label>"
+       ]
+      ],
+      "duration_ms": "<ms>",
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "method": "fireable",
+     "params": {
+      "transitions": [],
+      "marking_version": "<version>",
+      "running": false
+     }
+    },
+    {
+     "id": "9",
+     "result": {
+      "fired": true,
+      "transition": "Price Order",
+      "marking_version": "<version>",
+      "running": false
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "step"
+   },
+   "expect": [
+    {
+     "id": "10",
+     "result": {
+      "fired": false,
+      "marking_version": "<version>",
+      "running": false
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_state"
+   },
+   "expect": [
+    {
+     "id": "11",
+     "result": {
+      "protocol_version": 1,
+      "runtime": "<label>",
+      "net": "shop",
+      "generation": 1,
+      "marking_version": "<version>",
+      "running": false,
+      "topology": {
+       "places": [
+        {
+         "name": "Orders",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Promotions",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Priced",
+         "type_name": "<label>",
+         "serializable": true
+        },
+        {
+         "name": "Discounts Applied",
+         "type_name": "<label>",
+         "serializable": true
+        }
+       ],
+       "transitions": [
+        {
+         "name": "Price Order",
+         "detail": "<any>"
+        }
+       ],
+       "edges": {
+        "<unordered>": [
+         {
+          "place": "Orders",
+          "transition": "Price Order",
+          "direction": "in",
+          "kind": "take"
+         },
+         {
+          "place": "Promotions",
+          "transition": "Price Order",
+          "direction": "in",
+          "kind": "survey"
+         },
+         {
+          "place": "Priced",
+          "transition": "Price Order",
+          "direction": "out",
+          "slot": 0
+         },
+         {
+          "place": "Discounts Applied",
+          "transition": "Price Order",
+          "direction": "out",
+          "slot": 1
+         }
+        ]
+       }
+      },
+      "transitions": {
+       "Price Order": {
+        "enabled": true,
+        "fireable": false,
+        "in_flight": false,
+        "priority": 0.0
+       }
+      },
+      "marking": {
+       "places": {
+        "Orders": {
+         "count": 0,
+         "tokens": []
+        },
+        "Promotions": {
+         "count": 2,
+         "tokens": [
+          {
+           "id": "<id:10_off>",
+           "label": "<label>"
+          },
+          {
+           "id": "<id:free_shipping>",
+           "label": "<label>"
+          }
+         ]
+        },
+        "Priced": {
+         "count": 2,
+         "tokens": [
+          {
+           "id": "<id:order_priced>",
+           "label": "<label>"
+          },
+          {
+           "id": "<id:order_priced_2>",
+           "label": "<label>"
+          }
+         ]
+        },
+        "Discounts Applied": {
+         "count": 2,
+         "tokens": [
+          {
+           "id": "<id:10_off_on_order>",
+           "label": "<label>"
+          },
+          {
+           "id": "<id:free_shipping_on_order>",
+           "label": "<label>"
+          }
+         ]
+        }
+       }
+      },
+      "progress": {
+       "step_count": 2,
+       "last_fired": "Price Order",
+       "fired_counts": {
+        "Price Order": 2
+       },
+       "last_progress_at": "<time>"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_token",
+    "params": {
+     "id": "<id:order_priced>"
+    }
+   },
+   "expect": [
+    {
+     "id": "12",
+     "result": {
+      "id": "<id:order_priced>",
+      "place": "Priced",
+      "type_name": "<label>",
+      "kind": "json",
+      "value": "Order 1"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_token",
+    "params": {
+     "id": "<id:order_priced_2>"
+    }
+   },
+   "expect": [
+    {
+     "id": "13",
+     "result": {
+      "id": "<id:order_priced_2>",
+      "place": "Priced",
+      "type_name": "<label>",
+      "kind": "json",
+      "value": "Order 2"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_token",
+    "params": {
+     "id": "<id:10_off_on_order>"
+    }
+   },
+   "expect": [
+    {
+     "id": "14",
+     "result": {
+      "id": "<id:10_off_on_order>",
+      "place": "Discounts Applied",
+      "type_name": "<label>",
+      "kind": "json",
+      "value": "10% off on Order 2"
+     }
+    }
+   ]
+  },
+  {
+   "send": {
+    "method": "get_token",
+    "params": {
+     "id": "<id:free_shipping_on_order>"
+    }
+   },
+   "expect": [
+    {
+     "id": "15",
+     "result": {
+      "id": "<id:free_shipping_on_order>",
+      "place": "Discounts Applied",
+      "type_name": "<label>",
+      "kind": "json",
+      "value": "Free shipping on Order 2"
+     }
+    }
+   ]
+  }
+ ]
+}

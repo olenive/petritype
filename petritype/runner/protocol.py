@@ -39,6 +39,7 @@ class ErrorCode(StrEnum):
     UNKNOWN_PLACE = "unknown_place"
     UNKNOWN_TRANSITION = "unknown_transition"
     UNKNOWN_TOKEN = "unknown_token"
+    UNKNOWN_CONTROL = "unknown_control"
     NOT_SERIALIZABLE = "not_serializable"
     INVALID_TOKEN = "invalid_token"
     UNSUPPORTED = "unsupported"
@@ -102,11 +103,20 @@ class Malformed:
     message: str
 
 
+# The request fields whose ``null`` is a value, not an absence: the token an
+# ``inject`` carries and the value a ``set_param`` sets (a parameter may be cleared).
+NULL_IS_A_VALUE: dict[str, frozenset[str]] = {
+    "inject": frozenset({"token"}),
+    "set_param": frozenset({"value"}),
+}
+
+
 class Requests:
     """Functions that read requests."""
 
     def parse(raw: Any) -> Union[Request, Malformed]:
-        """A decoded JSON value as a request, or why it is not one."""
+        """A decoded JSON value as a request, or why it is not one. A ``null``
+        field of its params counts as absent (``null_as_absent``)."""
         if not isinstance(raw, dict):
             return Malformed("", "a request must be a JSON object")
         request_id = raw.get("id")
@@ -116,7 +126,20 @@ class Requests:
         if not isinstance(method, str):
             return Malformed(request_id, 'a request needs a string "method"')
         params = raw.get("params")
-        return Request(request_id, method, {} if params is None else params)
+        return Request(request_id, method, Requests.null_as_absent(method, {} if params is None else params))
+
+    def null_as_absent(method: str, params: Any) -> Any:
+        """``params`` without its ``null`` fields: ``null`` for an optional field of
+        a request counts as the field's absence (PROTOCOL.md §2, since 2026-10-12),
+        so ``query {filter: null}`` is ``query {}`` and ``get_state {token_limit:
+        null}`` is ``get_state {}``. A required field given ``null`` is then
+        missing, which is ``invalid_params`` as a ``null`` of the wrong type was.
+        The fields whose ``null`` is a value (``NULL_IS_A_VALUE``) are kept. Only
+        the top level: a ``null`` inside a filter or a token is the value's own."""
+        if not isinstance(params, dict):
+            return params
+        kept = NULL_IS_A_VALUE.get(method, frozenset())
+        return {key: value for key, value in params.items() if value is not None or key in kept}
 
 
 class Lines:
@@ -167,6 +190,13 @@ class Describe(Wire):
 # --- state (§5) -----------------------------------------------------------------------------
 
 
+class PlaceStyle(Wire):
+    """How a viewer draws a place (§5.1): ``fill: "token"`` fills it with the colour
+    of its one token while it holds exactly one that has a colour."""
+
+    fill: Literal["token"]
+
+
 class Place(Wire):
     name: str
     type_name: str
@@ -174,6 +204,7 @@ class Place(Wire):
     nested: Optional[bool] = None
     passive: Optional[bool] = None
     key_names: Optional[list[str]] = None
+    style: Optional[PlaceStyle] = None
 
 
 class Transition(Wire):
@@ -185,9 +216,24 @@ class Edge(Wire):
     place: str
     transition: str
     direction: Literal["in", "out"]
-    kind: Optional[Literal["take", "take_all", "snapshot", "mutate", "take_where", "mutate_where"]] = None
+    kind: Optional[Literal[
+        "take", "take_all", "snapshot", "mutate", "take_where", "mutate_where", "drain", "survey",
+    ]] = None
     slot: Optional[int] = None
     filter: Optional[dict[str, Any]] = None
+
+
+class Control(Wire):
+    """A control the net declares (§5.1), which ``press`` runs (§6): a ``ControlSpec``
+    without its ``to_command``. ``node``, ``action`` and ``config`` are left out when
+    absent or empty; ``config.value`` is the initial value of a kind that has one."""
+
+    name: str
+    label: str
+    kind: Literal["button", "toggle", "slider", "select", "text"]
+    node: Optional[str] = None
+    action: Optional[Literal["inject", "fire", "enable"]] = None
+    config: Optional[dict[str, Any]] = None
 
 
 class Topology(Wire):
@@ -195,6 +241,7 @@ class Topology(Wire):
     transitions: list[Transition]
     edges: list[Edge]
     hints: Optional[dict[str, Any]] = None
+    controls: Optional[list[Control]] = None
 
 
 class TransitionState(Wire):
@@ -312,6 +359,15 @@ class DistinctResult(Wire):
     marking_version: int
     key: str
     values: list[Union[str, int, bool]]
+
+
+class PressResult(Wire):
+    """``press`` (§6): ``"pressed"`` when the control applied something, ``"nothing"``
+    with a ``reason`` when it chose not to."""
+
+    status: Literal["pressed", "nothing"]
+    reason: Optional[str] = None
+    marking_version: int
 
 
 class StepResult(Wire):

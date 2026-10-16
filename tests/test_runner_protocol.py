@@ -58,7 +58,7 @@ def test_envelopes():
 def test_the_error_codes_are_the_closed_set():
     assert {str(code) for code in ErrorCode} == {
         "unknown_method", "invalid_params", "not_loaded", "unknown_net", "load_failed",
-        "unknown_place", "unknown_transition", "unknown_token", "not_serializable",
+        "unknown_place", "unknown_transition", "unknown_token", "unknown_control", "not_serializable",
         "invalid_token", "unsupported", "internal",
     }
 
@@ -183,5 +183,29 @@ def test_serializable_and_decode():
     assert Serializable.decode(float, 2) == 2.0
     assert Serializable.decode(bool, False) is False
     for place_type, payload in [(bool, "false"), (int, True), (int, 1.5), (str, None), (int, "x")]:
+        with pytest.raises(ValueError):
+            Serializable.decode(place_type, payload)
+
+
+def test_a_subclass_of_a_scalar_has_its_scalars_json_form():
+    """``class Colour(str)``: serializable, decoded by its own constructor from its
+    scalar's JSON type only, encoded as the plain scalar (the traffic light's light)."""
+    from petritype.core.serialisation import JsonForm
+
+    class Colour(str):
+        def __new__(cls, value):
+            if value not in ("red", "green"):
+                raise ValueError(f"no colour {value!r}")
+            return super().__new__(cls, value)
+
+    class Count(int):
+        pass
+
+    assert Serializable.place_type(Colour) and Serializable.place_type(Count)
+    red = Serializable.decode(Colour, "red")
+    assert type(red) is Colour and red == "red"
+    assert JsonForm.encode(red) == "red" and type(JsonForm.encode(red)) is str
+    assert type(Serializable.decode(Count, 3)) is Count
+    for place_type, payload in [(Colour, 7), (Colour, "purple"), (Colour, None), (Count, "3"), (Count, True)]:
         with pytest.raises(ValueError):
             Serializable.decode(place_type, payload)

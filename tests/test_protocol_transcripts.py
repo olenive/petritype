@@ -1,6 +1,6 @@
 """The shared protocol transcripts in ``tests/protocol/*.json`` (PROTOCOL.md §11),
-replayed through ``Owner`` with no process, and one of them over pipes against
-``python -m petritype.runner``.
+replayed through ``Owner`` with no process, and those in ``OVER_PIPES`` over pipes
+against ``python -m petritype.runner`` too.
 
 The transcript format and the matching rules are the Rust harness's
 (``petritype-rs/petritype-runner/tests/transcripts.rs``), so a transcript means
@@ -17,11 +17,17 @@ the same to both:
   number). Numbers compare by value (``0`` matches ``0.0``); objects must have
   exactly the expected keys; arrays must have the expected length and match
   element by element; anything else compares equal.
-- A ``launched`` immediately followed by its ``distributed`` (same transition) is
-  folded into one ``fired {transition, consumed, produced, duration_ms}`` stamped
-  with the ``distributed``'s ``marking_version`` and ``running`` before comparing.
-  Both runners split every firing (the Python one since 2026-10-04); the fold is
-  what lets a transcript read the same for any runtime, one-piece ones included.
+- A ``launched`` and the next ``distributed`` of the same transition are folded
+  into one ``fired {transition, consumed, produced, duration_ms}`` stamped with
+  the ``distributed``'s ``marking_version`` and ``running``, standing where the
+  ``distributed`` stood, before comparing. Both runners split every firing (the
+  Python one since 2026-10-04); the fold is what lets a transcript read the same
+  for any runtime, one-piece ones included. Only the firing's own lines may stand
+  between the two pieces (``BETWEEN_PIECES``), and they keep their places before
+  the ``fired`` (PROTOCOL.md §11, 2026-10-12, as the Rust harness folds). A
+  ``launched`` whose firing failed is left as it is, before its ``failed``. The
+  expected lines are folded as well as the actual ones, so a transcript may hold
+  either shape.
 
 Three additions over the Rust harness, each needed for a transcript that holds
 against both runtimes:
@@ -39,9 +45,10 @@ against both runtimes:
   (``get_token``) must name the id the runner handed out.
 
 With nested nets (§12) two more: ``"<path>"`` matches any string, for a path
-that embeds a token id; and a ``nested`` wrapping a ``launched`` followed at
-once by a ``nested`` wrapping its ``distributed`` (same path and nested id) is
-folded into a ``nested`` wrapping a ``fired``, as the outer pair is.
+that embeds a token id; and a ``nested`` wrapping a ``launched`` and the next
+``nested`` wrapping its ``distributed`` (same path and nested id) are folded
+into a ``nested`` wrapping a ``fired``, as the outer pair is, over the same
+kinds of line wrapped for that net or for the nets inside it.
 
 A transcript is replayed against a registry reduced to the net it names
 (§11), so each may pin ``describe`` in full.
@@ -75,10 +82,13 @@ NET_MODULES = {
     "parcel-distribution": "tests.protocol_nets.parcel_distribution",
     "transit": "tests.protocol_nets.transit",
     "wildlife": "tests.protocol_nets.wildlife",
+    "shop": "tests.protocol_nets.shop",
+    "traffic-light": "tests.protocol_nets.traffic_light",
 }
-# The process-mode transcripts: a running net, whose lines arrive after the response,
-# and the nested-net one, whose example module and templates must import in the process.
-OVER_PIPES = ("04_start_run.json", "05_nested_nets.json")
+# The process-mode transcripts: a running net, whose lines arrive after the response;
+# the nested-net one, whose example module and templates must import in the process; and
+# the two over the edges that accept an empty place, whose example modules must too.
+OVER_PIPES = ("04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json")
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
 STEP = timedelta(seconds=1)  # ``now`` moves on by this much per exchange
@@ -212,36 +222,86 @@ def _same_inner_net(a: dict, b: dict) -> bool:
     return a["params"].get("path") == b["params"].get("path") and a["params"].get("nested_id") == b["params"].get("nested_id")
 
 
+# The lines a firing's own body causes, which may stand between its ``launched``
+# and its ``distributed`` (PROTOCOL.md §11): what it did inside the tokens it holds
+# (``nested``), its own mutations, and, under a connection's filter, the ``hidden``,
+# ``added`` or ``removed`` that stand in for a mutation (§13.4). The Rust harness's
+# ``BETWEEN_PIECES``. For an inner net's pair the same lines, wrapped for that net,
+# and anything wrapped for another net (the nets inside it).
+BETWEEN_PIECES = frozenset({"nested", "mutated", "hidden", "added", "removed"})
+
+
+def _event(line: dict) -> dict:
+    return line.get("params", {}).get("event", {}) if line.get("method") == "nested" else {}
+
+
+def _between(line: dict, nested_id=None) -> bool:
+    """Whether ``line`` may stand between the two pieces of a firing of the outer
+    net (``nested_id`` None) or of the inner net with that nested id."""
+    if nested_id is None:
+        return line.get("method") in BETWEEN_PIECES
+    if line.get("method") != "nested":
+        return False
+    if line["params"].get("nested_id") != nested_id:
+        return True
+    return _event(line).get("method") in BETWEEN_PIECES - {"nested"}
+
+
+def _launched_before(folded: list[dict], nested_id=None) -> int:
+    """The index in ``folded`` just past the firing's own lines at its end (those
+    that may stand between the pieces): where its ``launched`` must stand, less one."""
+    at = len(folded)
+    while at > 0 and _between(folded[at - 1], nested_id):
+        at -= 1
+    return at
+
+
 def fold(lines: list[dict]) -> list[dict]:
-    """``launched`` + its ``distributed`` as one ``fired``; the same inside a pair
-    of ``nested`` wrappers for one inner net (§12.4)."""
+    """A ``launched`` and the next ``distributed`` of the same transition as one
+    ``fired`` where the ``distributed`` stood, the firing's own lines between them
+    keeping their places before it; the same inside ``nested`` wrappers for one
+    inner net (§11, §12.4). Idempotent, so it applies to expected lines too."""
     folded: list[dict] = []
     for line in lines:
-        previous = folded[-1] if folded else None
-        if (
-            line.get("method") == "distributed"
-            and previous is not None
-            and previous.get("method") == "launched"
-            and previous["params"].get("transition") == line["params"].get("transition")
-        ):
-            folded.append(_fired(folded.pop()["params"], line["params"]))
-            continue
-        if (
-            line.get("method") == "nested"
-            and previous is not None
-            and previous.get("method") == "nested"
-            and _same_inner_net(previous, line)
-            and line["params"]["event"].get("method") == "distributed"
-            and previous["params"]["event"].get("method") == "launched"
-            and previous["params"]["event"]["params"].get("transition") == line["params"]["event"]["params"].get("transition")
-        ):
-            launched = folded.pop()
-            folded.append({"method": "nested", "params": {
-                **line["params"], "event": _fired(launched["params"]["event"]["params"], line["params"]["event"]["params"]),
-            }})
-            continue
+        if line.get("method") == "distributed":
+            at = _launched_before(folded)
+            if (
+                at > 0
+                and folded[at - 1].get("method") == "launched"
+                and folded[at - 1]["params"].get("transition") == line["params"].get("transition")
+            ):
+                launched = folded.pop(at - 1)
+                folded.append(_fired(launched["params"], line["params"]))
+                continue
+        if line.get("method") == "nested" and _event(line).get("method") == "distributed":
+            at = _launched_before(folded, line["params"].get("nested_id"))
+            previous = folded[at - 1] if at > 0 else None
+            if (
+                previous is not None
+                and previous.get("method") == "nested"
+                and _same_inner_net(previous, line)
+                and _event(previous).get("method") == "launched"
+                and _event(previous)["params"].get("transition") == _event(line)["params"].get("transition")
+            ):
+                launched = folded.pop(at - 1)
+                folded.append({"method": "nested", "params": {
+                    **line["params"], "event": _fired(_event(launched)["params"], _event(line)["params"]),
+                }})
+                continue
         folded.append(line)
     return folded
+
+
+def _waiting(folded: list[dict]) -> bool:
+    """Whether a firing told in two pieces still waits for its second piece."""
+    waiting: set = set()
+    for line in folded:
+        event, net = (_event(line), line["params"].get("nested_id")) if line.get("method") == "nested" else (line, None)
+        if event.get("method") == "launched":
+            waiting.add(net)
+        elif event.get("method") in ("distributed", "failed", "fired"):
+            waiting.discard(net)
+    return bool(waiting)
 
 
 def _pretty(line) -> str:
@@ -317,7 +377,7 @@ async def test_transcript_holds(path: Path):
         where = f"{path.name}, exchange {index}"
         line = request(exchange, index, bindings, where)
         actual = fold(await run(owner, line, START + index * STEP))
-        check_exchange(path.name, index, line["method"], exchange["expect"], actual, bindings)
+        check_exchange(path.name, index, line["method"], fold(exchange["expect"]), actual, bindings)
 
 
 # --- shared-safe: what a transcript over both runtimes may pin -----------------------------
@@ -338,6 +398,14 @@ MASKED_KEYS = {
 }
 
 
+# A colour both runtimes give alike (§11): Rust writes ``#rrggbb`` in lowercase.
+HEX_COLOUR = re.compile(r"#[0-9a-f]{6}")
+
+
+def _hex(colour) -> bool:
+    return isinstance(colour, str) and HEX_COLOUR.fullmatch(colour) is not None
+
+
 def _unsafe(value, path: str, top: bool = False) -> list[str]:
     problems = []
     if isinstance(value, dict):
@@ -345,8 +413,11 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
             here = f"{path}.{key}"
             if key == "value":
                 continue  # a token's own JSON (get_token): the net's data, the same in both
+            if key == "controls":
+                continue  # what the net declares (§5.1), labels included: the same in both
             if key == "color":
-                problems.append(f"{here}: a shared transcript uses no color")
+                if not _hex(item):
+                    problems.append(f"{here}: a shared transcript carries a colour only as #rrggbb")
             elif key in MASKED_KEYS and item not in MASKED_KEYS[key]:
                 problems.append(f"{here}: {item!r} must be one of {sorted(MASKED_KEYS[key])}")
             elif key in ("id", "nested_id") and not top and not (item == "<id>" or _capture_name(item)):
@@ -358,8 +429,8 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
                         problems.append(f"{here}[{n}]: token id must be masked")
                     elif len(pair) > 2 and pair[2] not in STRING_MASKS:
                         problems.append(f"{here}[{n}]: label must be masked")
-                    elif len(pair) == 4 or (len(pair) == 5 and pair[3] is not None):
-                        problems.append(f"{here}[{n}]: a shared transcript uses no color")
+                    elif len(pair) >= 4 and not (pair[3] is None and len(pair) == 5) and not _hex(pair[3]):
+                        problems.append(f"{here}[{n}]: a shared transcript carries a colour only as #rrggbb")
                     elif len(pair) > 5:
                         problems.append(f"{here}[{n}]: a produced entry has at most five elements")
             else:
@@ -373,7 +444,8 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
 @pytest.mark.parametrize("path", TRANSCRIPTS, ids=[path.stem for path in TRANSCRIPTS])
 def test_transcript_is_shared_safe(path: Path):
     """Every token id, version, label, duration, time, type name and ``detail``
-    masked, and no ``color`` (§11), so the Rust runner can replay it too."""
+    masked, and a ``color`` only as a hex ``#rrggbb`` (§11), so the Rust runner can
+    replay it too."""
     transcript = load_transcript(path)
     problems = []
     for index, exchange in enumerate(transcript["exchanges"]):
@@ -419,9 +491,80 @@ def test_the_nested_fold():
     assert len(fold([wrap(launched), wrap(distributed, nid="4")])) == 2, "another inner net's distributed"
 
 
+def test_the_fold_keeps_the_firings_own_lines_in_their_places():
+    """The fold of PROTOCOL.md §11 (2026-10-12), as the Rust harness folds: the
+    lines a firing's body causes may stand between its two pieces and keep their
+    places; the ``fired`` stands where the ``distributed`` stood."""
+    stamp = lambda version: {"marking_version": version, "running": False}
+    launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], **stamp(1)}}
+    inner = {"method": "nested", "params": {"path": "n/P/#1/c", "nested_id": "3", "event": {
+        "method": "added", "params": {"place": "Door", "id": "1", "label": "x", **stamp(1)}}, **stamp(1)}}
+    mutated = {"method": "mutated", "params": {"place": "P", "id": "1", **stamp(2)}}
+    hidden = {"method": "hidden", "params": {"kind": "mutated", "place": "P", **stamp(3)}}
+    added = {"method": "added", "params": {"place": "P", "id": "2", "label": "y", **stamp(4)}}
+    distributed = {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 2.0, **stamp(5)}}
+    fireable = {"method": "fireable", "params": {"transitions": [], **stamp(5)}}
+    fired = {"method": "fired", "params": {
+        "transition": "T", "consumed": [["A", "1"]], "produced": [], "duration_ms": 2.0, **stamp(5)}}
+    folded = fold([launched, inner, mutated, hidden, added, distributed, fireable])
+    assert folded == [inner, mutated, hidden, added, fired, fireable]
+    assert fold(folded) == folded, "idempotent: an expected transcript may hold either shape"
+    assert fold([launched, fireable, distributed]) == [launched, fireable, distributed], "not a line of the firing's"
+    failed = {"method": "failed", "params": {"transition": "T", "error": "boom", "restored": True,
+                                             "consumed": [["A", "1"]], **stamp(3)}}
+    assert fold([launched, mutated, failed]) == [launched, mutated, failed], "a failed firing stays in two pieces"
+
+
+def test_the_nested_fold_keeps_the_firings_own_lines_in_their_places():
+    wrap = lambda event, nid="3": {"method": "nested", "params": {
+        "path": f"n/P/#1/c{nid}", "nested_id": nid, "event": event, "marking_version": 9, "running": False}}
+    launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
+    mutated = {"method": "mutated", "params": {"place": "B", "id": "4", "marking_version": 2, "running": False}}
+    deeper = {"method": "added", "params": {"place": "C", "id": "1", "label": "z", "marking_version": 1, "running": False}}
+    distributed = {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 2.0, "marking_version": 3, "running": False}}
+    fireable = {"method": "fireable", "params": {"transitions": [], "marking_version": 3, "running": False}}
+    folded = fold([wrap(launched), wrap(mutated), wrap(deeper, nid="5"), wrap(distributed)])
+    assert folded == [wrap(mutated), wrap(deeper, nid="5"), wrap({"method": "fired", "params": {
+        "transition": "T", "consumed": [["A", "1"]], "produced": [], "duration_ms": 2.0, "marking_version": 3, "running": False,
+    }})]
+    assert len(fold([wrap(launched), wrap(fireable), wrap(distributed)])) == 3, "the net's own fireable is no line of the firing's"
+
+
 def test_embedded_captures():
     b = {"bus": "7"}
     assert substitute({"path": "transit/Depot/#<id:bus>/cabin"}, b, "here") == {"path": "transit/Depot/#7/cabin"}
+
+
+def test_a_shared_colour_is_hex_and_controls_are_pinned():
+    """A colour is shared only as ``#rrggbb`` in lowercase, which both runtimes give
+    alike (§11, since 2026-10-16): on a token, an ``added``, and as the fourth element
+    of a produced entry (``null`` there only before keys). ``topology.controls`` is
+    the net's declaration and is pinned as it stands, labels included."""
+    assert not _unsafe({"color": "#ff6347"}, "x", top=True)
+    assert _unsafe({"color": "red"}, "x", top=True) and _unsafe({"color": "#FF6347"}, "x", top=True)
+
+    def produced(*rest):
+        return {"produced": [["Light", "<id:light>", "<label>", *rest]]}
+
+    assert not _unsafe(produced("#32cd32"), "x") and not _unsafe(produced(None, {"k": 1}), "x")
+    assert _unsafe(produced("green"), "x") and _unsafe(produced(None), "x")
+    assert not _unsafe({"topology": {"controls": [{"name": "car", "label": "+ Car", "kind": "text"}]}}, "x")
+
+
+def test_the_recorder_keeps_a_hex_colour_and_the_controls():
+    from tests.record_transcript import Masker
+
+    masker = Masker()
+    line = masker.line({"method": "distributed", "params": {
+        "transition": "Change", "produced": [["Light", "2", "'green'", "#32cd32"]], "duration_ms": 0.1,
+        "marking_version": 2, "running": False,
+    }})
+    assert line["params"]["produced"] == [["Light", "<id:green>", "<label>", "#32cd32"]]
+    controls = [{"name": "car", "label": "+ Car", "kind": "text", "node": "Waiting"}]
+    state = masker.line({"id": "3", "result": {"topology": {"controls": controls}}})
+    assert state["result"]["topology"]["controls"] == controls
+    with pytest.raises(ValueError, match="#rrggbb"):
+        masker.line({"method": "added", "params": {"place": "P", "id": "9", "label": "x", "color": "red"}})
 
 
 def test_the_fold():
@@ -489,7 +632,7 @@ class Process:
         """Lines until ``count`` remain after folding (and no ``launched`` waits
         for its ``distributed``)."""
         lines: list[dict] = []
-        while len(fold(lines)) < count or (lines and lines[-1].get("method") == "launched"):
+        while len(fold(lines)) < count or _waiting(fold(lines)):
             line = self.next_line()
             assert line is not None, f"stdout closed early; saw {lines}; stderr:\n{self.stderr.decode()}"
             lines.append(line)
@@ -508,7 +651,8 @@ class Process:
 @pytest.mark.parametrize("name", OVER_PIPES)
 def test_a_transcript_over_pipes(name: str):
     """The owner-level replay and the real process agree, on a transcript whose
-    firings arrive after the response that set them off, and on the nested one."""
+    firings arrive after the response that set them off, on the nested one, and on
+    the two over the edges that accept an empty place."""
     path = ROOT / "tests" / "protocol" / name
     transcript = load_transcript(path)
     runner = Process(transcript["net"])
@@ -517,8 +661,9 @@ def test_a_transcript_over_pipes(name: str):
         for index, exchange in enumerate(transcript["exchanges"]):
             line = request(exchange, index, bindings, f"{path.name}, exchange {index}")
             runner.send(line)
-            actual = runner.read(len(exchange["expect"]))
-            check_exchange(f"{path.name} over pipes", index, line["method"], exchange["expect"], actual, bindings)
+            expected = fold(exchange["expect"])
+            actual = runner.read(len(expected))
+            check_exchange(f"{path.name} over pipes", index, line["method"], expected, actual, bindings)
         assert runner.close() == [], "lines after the last exchange"
         assert runner.process.returncode == 0
     finally:
