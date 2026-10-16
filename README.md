@@ -15,7 +15,7 @@ A Petri net has two kinds of nodes connected by directed edges:
 - **Places** (blue ovals) — typed containers that hold tokens
 - **Transitions** (green rectangles) — functions that consume tokens from input places and produce tokens into output places
 
-A transition can only fire when all of its input places have tokens available. When it fires, it pops tokens from input places, calls its function, and routes the result to output places based on type matching. The current set of tokens across all places represents the live state of the system.
+A transition can only fire when all of its input places have tokens available, though a [drain or survey edge](#edges-that-accept-an-empty-place) accepts an empty place. When it fires, it pops tokens from input places, calls its function, and routes the result to output places based on type matching. The current set of tokens across all places represents the live state of the system.
 
 Petritype adds a type system on top of this: each place declares the Python type it accepts, and every token is checked against that type. This means the graph itself encodes the shape of your data pipeline — what types flow where, what each function expects, and where different outcomes end up.
 
@@ -307,7 +307,7 @@ def traffic_light() -> ExecutableGraph:
     return build_traffic_light()
 ```
 
-The [protocol runner](#net-protocol--run-a-net-as-a-process) serves them in the topology and runs a control when a viewer sends `press` (PROTOCOL.md §5.1, §6.6), so a viewer draws the buttons without knowing the net and the code stays with it: `car` adds the car `car(name, graph)` makes (the name typed, or `Car N` read off the marking), and `change` fires `Change` when it can (the `Fire` command). A token's `.color` is its colour on the wire, and `PlaceStyle(fill="token")` fills a place with the colour of its one token; the light's token is a `Colour`, a `str` whose `color` is the lamp's hex, so its JSON form stays `"red"`. The same control-map renders in a marimo notebook through `petritype.marimo_controls`.
+The [protocol runner](#net-protocol--run-a-net-as-a-process) serves them in the topology, as `topology.controls` and `places[].style`, and runs a control when a viewer sends `press` (PROTOCOL.md §5.1, §6.6), so a viewer draws the buttons without knowing the net and the code stays with it: `car` adds the car `car(name, graph)` makes (the name typed, or `Car N` read off the marking), and `change` fires `Change` when it can (the `Fire` command). Beside `ControlSpec.inject` and `ControlSpec.fire`, `ControlSpec.enable(transition, label)` makes a toggle that switches a transition on and off (`Enable` / `Disable`). A token's `.color` is its colour on the wire, and `PlaceStyle(fill="token")` fills a place with the colour of its one token; the light's token is a `Colour`, a `str` whose `color` is the lamp's hex. A subclass of a JSON scalar is serializable with its scalar's JSON form, so a `Colour` travels as `"red"`. The same control-map renders in a marimo notebook through `petritype.marimo_controls`.
 
 ## Runtime — observable, interactive nets
 
@@ -322,14 +322,14 @@ await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefin
 
 - **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs independent transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes.
 - **Observation** — `observers` are plain callables handed the *live graph* after each state change, so any renderer (a marimo notebook, a web frontend) can redraw at its own pace. In-flight transitions are exposed via `graph.in_flight`, so a renderer could for example highlight them by changing their colour while their bodies run. To know *what fired since you last looked*, snapshot `graph.fired_counts` and diff it at the next notification with `fired_since(previous, current)` — lossless in every mode, unlike `graph.last_fired`, which names only one completion per concurrent batch.
-- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` (transitions). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
+- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` / `Fire` (transitions; `Fire` fires one now if it is fireable), `SetNetParam` (the net's own parameters). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
 - **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
 - **Limits** — `Runner.run(ctx, stop_after_n_firings=N)` paces: it always returns a `RunSummary` whose `quiesced` flag tells "stopped by the limit, call again to continue" from "nothing left to fire". `RunContext.error_after_n_firings` is a run-wide fuse for nets that should quiesce quickly: `TooManyFiringsError` is raised *before* the net fires past it (a net that fires exactly n and quiesces is fine).
 - **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
 - **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox (needs the `marimo` extra: `pip install 'petritype[marimo]'`).
 - **Token ids and events** — every token carries a stable integer id (`place.token_ids`, handed out once and never reused), and with `record_events=True` the graph records `Fired`, `Failed`, `Added`, `Removed`, `Mutated`, `Toggled` and `ParamChanged` for `graph.drain_events()`: what fired, what it consumed and produced, by id, in both execution modes. Off by default, so existing programs see no change.
 
-Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler) — open with `uv run --extra examples marimo edit <notebook>`.
+Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler). Open the parcel sorter with `uv run --extra examples marimo edit examples/interactive/parcel_sorter.py`, and any other notebook by its path.
 
 ## Net protocol — run a net as a process
 
@@ -339,12 +339,12 @@ python -m petritype.runner --describe --module your.nets # list the nets it carr
 ```
 
 `petritype.runner` serves the nets a module declares with `@petri_net` over the
-[net protocol](PROTOCOL.md): newline-delimited JSON on stdin and stdout, the
+[net protocol](https://github.com/olenive/petritype/blob/main/PROTOCOL.md): newline-delimited JSON on stdin and stdout, the
 same protocol the Rust port's `petritype-runner` speaks. A host or viewer —
 petritype-server, the Bevy visualiser, a test harness — therefore drives
-either runtime the same way: `describe`, `load`, `get_state`, `step`,
-`start`/`stop`, `inject`, `enable`/`disable`, `set_param`, `get_token`,
-`get_log`, with `fired`, `added`, `toggled` and the other notifications as the
+either runtime the same way:
+`describe`, `load`, `get_state`, `get_place_tokens`, `get_token`, `step`, `start`, `stop`, `reset`, `inject`, `enable`, `disable`, `set_param`, `press`, `get_log`, `query`, `distinct`, `set_filter`, `shutdown`,
+with `fired`, `added`, `toggled` and the other notifications as the
 net changes. Inner nets of nested tokens are addressed by `path`
 (`transit/Depot/#17/cabin`) or by their stable `nested_id`, each with its own
 versions and log view, their events wrapped in `nested` notifications. A
@@ -372,7 +372,7 @@ It has been particularly useful for processes involving many calls to stateful e
 
 A [Petri net](https://en.wikipedia.org/wiki/Petri_net) is a bipartite directed graph used to model concurrent processes. It was originally developed by Carl Adam Petri in 1962 and has been applied across chemistry, logistics, manufacturing, protocol verification, and many other fields.
 
-The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is fireable when all its input places contain at least one token (and its guard, if any, passes). Petri net texts say "enabled" for what this library calls "fireable"; "enabled" here is the on/off switch set by the `Enable` / `Disable` commands. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
+The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is fireable when all its input places contain at least one token (and its guard, if any, passes), though here a [drain or survey edge](#edges-that-accept-an-empty-place) accepts an empty place. Petri net texts say "enabled" for what this library calls "fireable"; "enabled" here is the on/off switch set by the `Enable` / `Disable` commands. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
 
 What makes Petri nets powerful is that they can model concurrency, synchronisation, and resource contention in a way that is both formally analysable and visually intuitive.
 
@@ -406,19 +406,20 @@ The `viz` extra also needs the Graphviz `dot` binary on your PATH
 
 See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) directory:
 
-- **Caching** — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
-- **ML Training** — multi-step model training pipeline with evaluation and retraining loops
-- **Time Series** — statistical processing of time series data
+- **Caching** (`examples/caching/relationship_and_execution_graphs.py`) — database retrieval with cache fallback, demonstrating typed routing for cache hits vs misses
+- **ML Training** (`examples/ml_model/fine_tune.py`) — multi-step model training pipeline with evaluation and retraining loops
+- **Time Series** (`examples/time_series_stats/stats_executable_graph.py`) — statistical processing of time series data
+- **Rooms** (`examples/toy/state_machines/01_rooms.py`) — a state machine: a character moves between rooms, which are the places, and each room's way out is a transition whose distribution function sends the character to the room a **Go to** button names (a `SetNetParam` command)
 - **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, running its journey under plain stepping (each vehicle's state is where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read), with the followed bus's cabin drawn beside the city
 - **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 - **Shop** (`examples/edges_on_empty_places/shop_day.py`) — an edge that accepts an empty place: switch promotions on and off and place orders, and each order is priced with whatever promotions are running through a survey edge, its receipt showing what each one took off. The example day also plays by itself
 - **Traffic light** (`examples/edges_on_empty_places/traffic_light_junction.py`) — the edge that takes every token, zero or more: cars wait at a light that cycles red, green and amber (one place, whose token is its colour). Two transitions: `Change` cycles the light by itself, and `Go` drains every car waiting past the light while it is green, reading the light and guarded on green and someone waiting, so a car arriving at green goes straight through. Cars arrive on a schedule or by hand
 
-The notebooks live in the repository — they are not part of the pip package — so
-run them from a clone:
+The notebooks live in the repository, not in the pip package, so run them from a
+clone. Each opens with the same command, given its path from the list above:
 
 ```bash
 git clone https://github.com/olenive/petritype
 cd petritype
-uv run --extra examples marimo edit examples/toy/parcel_distribution.py
+uv run --extra examples marimo edit <path>   # e.g. examples/toy/state_machines/01_rooms.py
 ```

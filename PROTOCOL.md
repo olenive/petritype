@@ -28,7 +28,7 @@ other repositories link here and do not restate the shapes:
 - viewers: `../petritype-bevy/DESIGN.md`,
   `../petrivelte/implementation_docs/PROTOCOL_V1_FRONTEND.md`
 
-Canonical URL once merged: <https://github.com/olenive/petritype/blob/main/PROTOCOL.md>.
+Canonical URL: <https://github.com/olenive/petritype/blob/main/PROTOCOL.md>.
 
 ---
 
@@ -381,7 +381,8 @@ before it moves to `describe`.
   `fired`, `distributed` or `failed`), so a caller waiting on `step` waits
   for the body. `step` is the one request answered out of order (with a
   `press` that fires, §6.6): `get_state`, `get_place_tokens`, `get_token`,
-  `get_log` and `stop` that arrive while its body runs are answered before it.
+  `get_log`, `query`, `distinct` and `stop` that arrive while its body runs
+  are answered before it.
 - `start` runs on the net process's own clock until `stop`. A net whose
   `mode` is `"24/7"` idles when nothing is fireable (emitting `idle` once
   per idle spell) and keeps polling; any other net stops at quiescence and

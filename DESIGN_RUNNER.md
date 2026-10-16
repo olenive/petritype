@@ -2,9 +2,9 @@
 
 Status: **design of 2026-10-03; token ids, events, the runner's state
 machine and its process layer built the same day** ("As built" sections
-below). `python -m petritype.runner` works and the four shared transcripts
-replay against it. Version bumped to 0.2.0 on 2026-10-03; the `v0.2.0` tag
-cuts the release. The protocol
+below). `python -m petritype.runner` works and the eight shared transcripts
+replay against it. Version bumped to 0.2.0 on 2026-10-03, and 0.2.0 shipped
+on 2026-10-04 (the `v0.2.0` tag). The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -135,7 +135,7 @@ Token ids and events landed as designed, with these settlements:
 | `transitions[].detail` | `function_name`, `signature`, `docstring` by introspection (moved from the server) |
 | `progress` | `step_count`, `last_fired`, `fired_counts` (already on the graph) plus `last_progress_at` kept by the runner |
 | token `label`, `color` | pydantic `model_dump_json` or `repr`, cut at 1000 characters; `.color` resolved to hex (moved from the server) |
-| `places[].serializable` | the place type is a pydantic model or a JSON scalar |
+| `places[].serializable` | the place type is a pydantic model, or a JSON scalar or a subclass of one |
 | edges | argument edges (`take`, or `take_all` for a `list[...]` argument; `take_where` for a `TakeWhereEdge`, `drain` for a `DrainEdge`), `snapshot_edges` (`snapshot`, or `survey` for a `SurveyEdge`), `mutate_edges` (`mutate`, `mutate_where`), return edges (`slot` from `return_index`) |
 
 ## The runner module
@@ -271,15 +271,18 @@ The conformance net `tests/protocol_nets/parcel_distribution.py` is the
 Rust example copied exactly, because the Python original under
 `examples/toy/` creates parcels from nothing, uses wall-clock guards and
 randomness, and cannot be replayed. A second shared-safety test asserts
-each transcript masks what differs by runtime and carries no `color`.
+each transcript masks what differs by runtime and carries a `color` only
+where both runtimes give the same hex, lowercase `#rrggbb` (since
+2026-10-16; until then it carried none).
 
-Rust-side follow-ups before the shared set runs there: register the
-conformance net in the Rust runner example under the name
-`parcel-distribution` and the same description (the demo net now using that
-name needs another), mark its four places serializable and derive
-`Serialize`/`Deserialize` on `Parcel`. Covering `not_serializable` in the
-shared set needs a second token type in the conformance net, since Python
-decides serializability per type.
+Rust-side follow-ups, done on 2026-10-03: the Rust runner example registers
+the conformance net under the name `parcel-distribution` and the same
+description, marks its four places serializable and derives
+`Serialize`/`Deserialize` on `Parcel`, and both runtimes replay the shared
+set (PROTOCOL.md §11). `not_serializable` is covered by this library's own
+tests (`tests/test_runner_owner.py`); covering it in the shared set needs a
+second token type in a conformance net, since Python decides
+serializability per type.
 
 ## Release
 
@@ -287,6 +290,10 @@ A minor version (0.2.0): everything above is additive for library users.
 `record_events` off and ids kept beside the tokens mean an existing program
 sees no change. The protocol transcripts under `tests/protocol/`
 (`PROTOCOL.md` §11) are the runner's acceptance tests.
+
+*2026-10-17:* the work from 2026-10-09 to 2026-10-16 (nested nets, keys, drain
+and survey, notebooks, controls and `press`) is unreleased and goes out as the
+next minor version (`CHANGELOG.md`).
 
 ## As built, 2026-10-09: nested nets (PROTOCOL.md §12)
 

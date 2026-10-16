@@ -27,7 +27,9 @@ a running net's state and respond to input promptly, it isn't done.
 - **Tier 1 (application):** input places + output places + clock + lifecycle.
   Data-only, safe, portable. The normal way to use a net.
 - **Tier 2 (operator/debug):** force-fire, change guard/selector, edit topology,
-  snapshot/restore. Privileged.
+  snapshot/restore. Privileged. Snapshot/restore exists in the library as the JSON save
+  and restore (`NetJson.save` / `NetJson.restore`, "Nets as tokens", phase 2). The
+  `Fire` command fires a named transition only when it is fireable; forcing one stays Tier 2.
 
 ## Scope discipline
 
@@ -88,7 +90,8 @@ notebook. **One way to define a net; one runner; selectable execution modes.**
   - Places: `Extend(place, tokens)` — append a list of tokens (single token = `[token]`;
     the argument is *always* a list); `SetTokens(place, tokens)` — replace all tokens
     (`[]` clears the place).
-  - Transitions: `SetParam(transition, …)` (over `kwargs`); `Enable` / `Disable`.
+  - Transitions: `SetParam(transition, …)` (over `kwargs`); `Enable` / `Disable`;
+    `Fire(transition)`, which fires it once now if it is fireable (since 2026-10-16).
   - The append/extend ambiguity (one list-valued token vs many tokens) is resolved by
     *always* treating the argument as a list of tokens. Guardrails: require an actual
     `list` (kills the `str`-is-iterable footgun) plus a per-element type-check against
@@ -151,10 +154,12 @@ edges. Wired into the engine, both run modes, and the input layer (update a read
 
 ## Co-located controls — node-keyed panel + control-map
 
-- A control is bound to a node via a separate **control-map** `{node_name: ControlSpec}`,
-  authored by the app and kept *off* the net (the `ExecutableGraph` stays pure data).
+- A control is bound to a node via a separate **control-map** `{name: ControlSpec}`, keyed
+  by the control's own name, authored by the app and kept *off* the net (the
+  `ExecutableGraph` stays pure data).
 - `ControlSpec` is a passive record: target `node`, `kind` (toggle / button / slider /
-  select), `label`, and `to_command(value) -> Command` (UI value → inbox command).
+  select / text), `label`, and `to_command(value) -> Command` (UI value → inbox command),
+  or `to_command(value, graph) -> Command` for a command that depends on the marking.
 - The UI renders a **panel keyed by node name** beside the diagram, binds each widget to
   its `to_command`, and enqueues onto `ctx.inbox` (see Input) — never touching the graph.
 - Needs **no renderer change** (node-keyed = names we already have). Pixel-on-node overlay
@@ -349,13 +354,17 @@ awaited future — same `strict` / log-drop policy.
 
 - **Control-map (#5)** — `ControlSpec` + `apply_control` (framework, in `runtime.py`) and
   `petritype/marimo_controls.py` (`build_controls` / `controls_row` / `drain_controls`): a
-  declarative `{name: ControlSpec}` map, kept off the net, rendered as marimo widgets that only
-  *produce inbox commands* (buttons on click, toggles / sliders / selects on change).
-  `examples/interactive/parcel_sorter.py` refactored onto it. Verified.
+  declarative `{name: ControlSpec}` map keyed by control name, kept off the net, rendered as
+  marimo widgets that only *produce inbox commands* (buttons on click, toggles / sliders /
+  selects on change, a text box on its send button). A `to_command` that takes a second
+  argument is handed the net as well, `(value, graph)`; the text kind and the net argument
+  came on 2026-10-16. `examples/interactive/parcel_sorter.py` refactored onto it. Verified.
 
 **Status: the runtime spec (concerns #1–#11) is fully built and verified.** Possible future
 work, none blocking: **pixel-on-node** co-located controls (vs the current node-keyed panel);
-**operator / Tier-2** capabilities (force-fire, topology editing, snapshot / restore); the
+**operator / Tier-2** capabilities (force-fire and topology editing; `Fire`, since 2026-10-16,
+fires a named transition only when it is fireable, and snapshot / restore is built as the
+JSON save and restore, `NetJson.save` / `NetJson.restore`, since 2026-10-09); the
 **serializing observer** for a cross-process / web frontend; and the fuller reserved-token
 in-flight model (the current cue is the gold transition highlight).
 

@@ -278,7 +278,7 @@ class TakeWhereEdge(ArgumentEdgeToTransition):
 class DrainEdge(ArgumentEdgeToTransition):
     """A consuming edge that takes *every* token of the place, oldest first, zero
     or more, and never holds the transition back: an empty place hands the body an
-    empty list (a reset arc, ``EDGES_ON_EMPTY_PLACES.md``). The argument must be
+    empty list (a reset arc, PROTOCOL.md §5.1 and §11). The argument must be
     annotated ``list[T]`` for the place's ``T``, checked when the graph is built,
     since a plain ``T`` has nothing to receive from an empty place. Firing consumes
     what was there, as a ``list``-annotated ``ArgumentEdgeToTransition`` does on a
@@ -299,7 +299,7 @@ class SnapshotEdge(PositionalArgsBaseModel):
 class SurveyEdge(SnapshotEdge):
     """A snapshot edge that never holds the transition back: the body receives a
     deep copy of every token of the place, oldest first, zero or more, and nothing
-    is consumed (``EDGES_ON_EMPTY_PLACES.md``). It differs from ``SnapshotEdge``
+    is consumed (PROTOCOL.md §5.1 and §11). It differs from ``SnapshotEdge``
     only in not requiring presence: an empty place hands the body an empty list. The
     argument must be annotated ``list[T]`` for the place's ``T``, checked when the
     graph is built, as a drain's is."""

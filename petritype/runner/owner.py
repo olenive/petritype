@@ -11,15 +11,15 @@ taken, body started) when it is launched and ``distributed`` (outputs placed)
 or ``failed`` when it lands, a fast body's two lines in the same batch. Before
 2026-10-04 this runner reported a firing once, as ``fired``, when it landed.
 
-A firing is handed to the caller, not run here. ``handle`` for ``step`` or
-``start`` (and ``completed`` or ``tick`` while running) may return an
-``Outgoing.launch``: a ``Launch`` whose coroutine the caller awaits (as a task,
-so it can keep handling requests meanwhile) and whose ``Landing`` it passes back
-through ``completed``. One firing is airborne at a time. While it is, the reads
-(``get_state``, ``get_place_tokens``, ``get_token``, ``get_log``), ``stop``,
-``describe`` and ``shutdown`` are answered at once and every other request waits,
-in arrival order, for the landing; a second ``step`` therefore waits for the
-first.
+A firing is handed to the caller, not run here. ``handle`` for ``step``,
+``start`` or a ``press`` of a ``fire`` control (and ``completed`` or ``tick``
+while running) may return an ``Outgoing.launch``: a ``Launch`` whose coroutine
+the caller awaits (as a task, so it can keep handling requests meanwhile) and
+whose ``Landing`` it passes back through ``completed``. One firing is airborne
+at a time. While it is, the reads (``get_state``, ``get_place_tokens``,
+``get_token``, ``get_log``, ``query``, ``distinct``), ``stop``, ``describe`` and
+``shutdown`` are answered at once and every other request waits, in arrival
+order, for the landing; a second ``step`` therefore waits for the first.
 
 Nested nets (PROTOCOL.md §12)
 -----------------------------

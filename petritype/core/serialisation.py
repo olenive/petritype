@@ -2,10 +2,11 @@
 the saved form of a net that a nested token carries (nets as tokens, R5).
 
 - ``JsonForm``: which place types have a JSON form (a pydantic model, a JSON
-  scalar, or ``ExecutableGraph`` itself), how a token is encoded and how one
-  is decoded back, strictly, from the JSON it arrived as. The protocol runner's
-  ``inject`` and ``get_token`` use these rules (``petritype.runner.translate``
-  re-exports them), so a token saved here is a token the runner can inject.
+  scalar or a subclass of one, or ``ExecutableGraph`` itself), how a token is
+  encoded and how one is decoded back, strictly, from the JSON it arrived as.
+  The protocol runner's ``inject`` and ``get_token`` use these rules
+  (``petritype.runner.translate`` re-exports them), so a token saved here is a
+  token the runner can inject.
 - ``Templates``: a process-wide registry of named factories that build nets,
   ``Templates.register("Cabin", build_cabin)`` or ``@Templates.template("Cabin")``.
   A net records the template that built it (``ExecutableGraph.template``), which
