@@ -22,6 +22,15 @@ on:
     # Mondays 06:00 UTC. Catches a dependency release that breaks us.
     - cron: "0 6 * * 1"
 
+env:
+  # A fresh release takes a few minutes to reach every edge of PyPI's content
+  # network: 0.3.1 took longer than the old two-minute budget on three of six
+  # runners. Both install loops below poll at this interval for this many
+  # attempts, ten minutes in all. A short fixed interval finds the earliest
+  # moment the version appears; the probe is a tiny index fetch that fails fast.
+  INSTALL_ATTEMPTS: "20"
+  INSTALL_RETRY_SECONDS: "30"
+
 jobs:
   # Until the first release, a scheduled run would fail red every Monday and
   # train everyone to ignore the workflow meant to catch real breakage. On a
@@ -77,19 +86,23 @@ jobs:
           set -euo pipefail
           SPEC="petritype"
           if [ -n "$VERSION" ]; then SPEC="petritype==${VERSION#v}"; fi
-          # A freshly published release takes a moment to reach the CDN.
+          # A freshly published release takes a few minutes to reach every
+          # edge of PyPI's content network (the budget is set at the top).
           ok=""
-          for i in 1 2 3 4 5 6; do
+          waited=0
+          for i in $(seq 1 "$INSTALL_ATTEMPTS"); do
             if pip install "$SPEC"; then ok=1; break; fi
-            echo "not installable yet, retrying in 20s ($i/6)"
-            sleep 20
+            echo "not installable yet after ${waited}s, retrying in ${INSTALL_RETRY_SECONDS}s ($i/$INSTALL_ATTEMPTS)"
+            sleep "$INSTALL_RETRY_SECONDS"
+            waited=$((waited + INSTALL_RETRY_SECONDS))
           done
           # A bare retry loop exits 0 when every attempt failed (its status is
           # the last `sleep`), so failure has to be raised explicitly.
           if [ -z "$ok" ]; then
-            echo "::error::$SPEC not installable from PyPI after 6 attempts"
+            echo "::error::$SPEC not installable from PyPI after $INSTALL_ATTEMPTS attempts over ${waited}s"
             exit 1
           fi
+          echo "installed after ${waited}s of waiting"
           pip show petritype
 
       - name: Base install imports
@@ -140,15 +153,18 @@ jobs:
           SPEC="petritype[viz]"
           if [ -n "$VERSION" ]; then SPEC="petritype[viz]==${VERSION#v}"; fi
           ok=""
-          for i in 1 2 3 4 5 6; do
+          waited=0
+          for i in $(seq 1 "$INSTALL_ATTEMPTS"); do
             if pip install "$SPEC"; then ok=1; break; fi
-            echo "not installable yet, retrying in 20s ($i/6)"
-            sleep 20
+            echo "not installable yet after ${waited}s, retrying in ${INSTALL_RETRY_SECONDS}s ($i/$INSTALL_ATTEMPTS)"
+            sleep "$INSTALL_RETRY_SECONDS"
+            waited=$((waited + INSTALL_RETRY_SECONDS))
           done
           if [ -z "$ok" ]; then
-            echo "::error::$SPEC not installable from PyPI after 6 attempts"
+            echo "::error::$SPEC not installable from PyPI after $INSTALL_ATTEMPTS attempts over ${waited}s"
             exit 1
           fi
+          echo "installed after ${waited}s of waiting"
 
       - name: Rendering imports and draws
         shell: bash
