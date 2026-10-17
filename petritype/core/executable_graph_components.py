@@ -2,7 +2,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
-from typing import Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
+from typing import Awaitable, Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, PrivateAttr, model_serializer, model_validator
 import asyncio
 import functools
@@ -68,6 +68,30 @@ class TransitionFailedError(RuntimeError):
         super().__init__(
             f"Firing of transition '{transition_name}' failed; {tokens_note}. "
             f"Consumed arguments: {sorted(consumed)}."
+        )
+
+
+class LaunchNotificationError(RuntimeError):
+    """An observer raised at a sequential firing's launch notification, after the
+    inputs were consumed and before the body ran (``on_launch`` in
+    ``ExecutableGraphOperations.fire_one_transition``, where the Runner notifies its
+    observers).
+
+    The firing fails as a raising body does, so this error is the ``__cause__`` of the
+    ``TransitionFailedError`` that follows, the ``Failed`` record's ``error`` names it,
+    and the observer's own exception is this error's ``__cause__``.
+
+    Attributes:
+        transition_name: Name of the transition that was launching.
+        observer_error: The exception the observer raised.
+    """
+
+    def __init__(self, transition_name: str, observer_error: Exception):
+        self.transition_name = transition_name
+        self.observer_error = observer_error
+        super().__init__(
+            f"an observer raised at the launch notification of {transition_name!r}, "
+            f"before its body ran: {observer_error!r}"
         )
 
 
@@ -2371,6 +2395,7 @@ class ExecutableGraphOperations:
         place_history_length=1,
         token_history_length=0,
         descend: bool = True,
+        on_launch: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Optional[TransitionName]:
         """Fire at most one fireable transition, using prebuilt adjacency maps.
 
@@ -2393,6 +2418,15 @@ class ExecutableGraphOperations:
         Token ids move with the tokens (``TokenIds``); places whose tokens were
         assigned directly are resynced first. With ``record_events`` on, a firing
         records its ``Mutated`` events then one ``Fired`` (or ``Failed``).
+
+        ``on_launch``, if given, is awaited once when one of this net's own
+        transitions fires, after its inputs are consumed and ``in_flight`` names it
+        and before its body runs; the Runner notifies its observers there. A firing
+        inside an inner net, reached by descent, awaits nothing. An ``on_launch``
+        that raises fails the firing as a raising body does, with a
+        ``LaunchNotificationError`` carrying its exception: the consumed tokens are
+        restored when ``restore_tokens_on_failure`` says so, ``Failed`` is recorded
+        and ``TransitionFailedError`` is raised.
 
         Nested tokens (``NestedNets``): the undrained events of every inner net are
         gathered into this graph's log first, so a firing that consumes a token
@@ -2442,6 +2476,7 @@ class ExecutableGraphOperations:
                             place_history_length=place_history_length,
                             token_history_length=token_history_length,
                             descend=False,
+                            on_launch=on_launch,
                         )
                     else:
                         fired = await NestedNets.fire_turn(
@@ -2507,8 +2542,16 @@ class ExecutableGraphOperations:
         # write assigns a fresh set: replacing the reference is atomic, whereas
         # mutating the set in place could be seen half-done.
         executable_graph.in_flight = {transition.name}
-        started = time.perf_counter()
         try:
+            if on_launch is not None:
+                # The launch notification. Inside the outer ``try`` so that an
+                # observer that raises fails the firing as a raising body does.
+                try:
+                    await on_launch()
+                except Exception as error:
+                    raise LaunchNotificationError(transition.name, error) from error
+            # The clock starts after the notification: ``duration_ms`` is the body's.
+            started = time.perf_counter()
             output_place_names_to_tokens = await ExecutableGraphOperations.stage_2_call_transition_function(
                 transition=transition,
                 tokens_kwargs=input_args_to_tokens,

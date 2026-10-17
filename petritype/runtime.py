@@ -83,6 +83,18 @@ from petritype.core.type_comparisons import CompareTypes
 _log = logging.getLogger(__name__)
 
 # An observer is handed the live graph after each state change. Sync or async.
+#
+# In sequential mode the calls come in this order: the initial marking (``step`` has
+# none), the effect of drained input, then for each firing one call at launch and one
+# after completion. At the launch call ``in_flight`` holds the one transition's name, the
+# consumed tokens are out of their places and not yet anywhere else, ``last_fired`` is
+# None, ``step_count`` and ``fired_counts`` are unchanged, and the log holds no ``Fired``
+# for the firing yet. An inline body holds the loop until it returns, so an observer's
+# own work completes before the body starts and anything it only schedules runs after
+# the body returns; an async body lets that scheduled work run at its awaits, and a body
+# marked ``execution="thread"`` leaves the loop free. A firing inside an inner net gets
+# only the call after it, and a ``Fire`` command's firing only the call after the drain.
+# The concurrent loops call observers when the set in flight changes and after deposits.
 Observer = Callable[[ExecutableGraph], Union[None, Awaitable[None]]]
 
 
@@ -396,7 +408,10 @@ def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
     the graph, not in flight, inputs there, guard passing), fire it once through
     ``fire_one_transition`` with a selector pinned to it and no descent into inner nets,
     counted against the fuse; otherwise do nothing. Returns True iff it fired. A body that
-    fails raises ``TransitionFailedError``, as a step's would."""
+    fails raises ``TransitionFailedError``, as a step's would. It passes no ``on_launch``,
+    so observers hear of the firing after the drain: ``drain_inbox`` is synchronous, and
+    ``_run_now`` may run the firing on a helper thread's loop, where an observer would be
+    called off the loop's thread."""
     graph = ctx.graph
     transition = _transition_named(graph, cmd.transition)
     if transition is None:
@@ -604,6 +619,7 @@ async def _fire_one(ctx: RunContext, place_nodes: dict, incoming: dict, outgoing
         transition_names_to_read_edges=read,
         transition_selector=_selector_for(ctx),
         executor=ctx.thread_pool,
+        on_launch=lambda: _notify(ctx),
     )
     if fired_name is None:
         return False

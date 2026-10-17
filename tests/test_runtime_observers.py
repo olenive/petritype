@@ -13,16 +13,20 @@ import asyncio
 import threading
 
 import pytest
+from pydantic import BaseModel
 
+from petritype.core.events import Failed, Fired
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    ExecutableGraph,
     ExecutableGraphOperations,
     FunctionTransitionNode,
+    LaunchNotificationError,
     ListPlaceNode,
     ReturnedEdgeFromTransition,
     TransitionFailedError,
 )
-from petritype.runtime import ExecutionMode, RunContext, Runner, fired_since
+from petritype.runtime import ExecutionMode, Fire, RunContext, Runner, fired_since
 
 
 def increment(x: int) -> int:
@@ -222,3 +226,187 @@ class TestSequentialInFlight:
         assert captured[0] == {'Work'}
         assert graph.in_flight == set()
         assert graph.in_flight is not captured[0]
+
+
+def _in_flight_recorder():
+    """An observer that appends ``set(graph.in_flight)`` on each call, and keeps a
+    snapshot of the graph at each launch call (one where the set is non-empty).
+
+    Returns ``(observe, calls, launches)``.
+    """
+    calls, launches = [], []
+
+    def observe(graph):
+        calls.append(set(graph.in_flight))
+        if graph.in_flight:
+            launches.append({
+                'tokens': {place.name: list(place.tokens) for place in graph.places},
+                'step_count': graph.step_count,
+                'last_fired': graph.last_fired,
+                'fired_counts': dict(graph.fired_counts),
+            })
+
+    return observe, calls, launches
+
+
+class _Box(BaseModel):
+    """A token holding one inner net, ``counter``."""
+
+    inner: ExecutableGraph
+
+    def __petritype_nets__(self) -> dict[str, ExecutableGraph]:
+        return {'counter': self.inner}
+
+
+class TestSequentialLaunchNotification:
+    """Sequential firing notifies observers once more per firing, as the
+    transition goes in flight and before its body runs, so an observer on the
+    event loop sees the set non-empty as the concurrent loop already lets it."""
+
+    @pytest.mark.asyncio
+    async def test_run_notifies_at_marking_launch_and_completion(self):
+        graph = _single_transition_graph(increment)
+        observe, calls, launches = _in_flight_recorder()
+        await Runner.run(RunContext(graph=graph, observers=(observe,)))
+        assert calls == [set(), {'Work'}, set()]
+        assert launches == [{
+            'tokens': {'In': [], 'Out': []},
+            'step_count': 0,
+            'last_fired': None,
+            'fired_counts': {},
+        }]
+
+    @pytest.mark.asyncio
+    async def test_step_notifies_at_launch_and_completion(self):
+        graph = _single_transition_graph(increment)
+        observe, calls, _launches = _in_flight_recorder()
+        assert await Runner.step(RunContext(graph=graph, observers=(observe,))) == 1
+        assert calls == [{'Work'}, set()]
+
+    @pytest.mark.asyncio
+    async def test_thread_body_agrees_with_the_launch_call(self):
+        holder = {}
+        seen_inside = []
+
+        def body(x: int) -> int:
+            seen_inside.append(set(holder['graph'].in_flight))
+            return x
+
+        graph = _single_transition_graph(body, execution='thread')
+        holder['graph'] = graph
+        observe, calls, _launches = _in_flight_recorder()
+        assert await Runner.step(RunContext(graph=graph, observers=(observe,))) == 1
+        assert calls == [{'Work'}, set()]
+        assert seen_inside == [{'Work'}]
+
+    @pytest.mark.asyncio
+    async def test_raising_body_is_seen_at_launch_and_still_raises(self):
+        def body(x: int) -> int:
+            raise ValueError('boom')
+
+        graph = _single_transition_graph(body)
+        observe, calls, _launches = _in_flight_recorder()
+        with pytest.raises(TransitionFailedError):
+            await Runner.run(RunContext(graph=graph, observers=(observe,)))
+        assert calls == [set(), {'Work'}]
+        assert graph.in_flight == set()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('restore', [True, False])
+    async def test_observer_raising_at_launch_fails_the_firing(self, restore):
+        ran = []
+
+        def body(x: int) -> int:
+            ran.append(x)
+            return x
+
+        graph = _single_transition_graph(body)
+        graph.restore_tokens_on_failure = restore
+        graph.record_events = True
+        boom = ValueError('boom')
+        raised = []
+
+        def observe(graph):
+            if graph.in_flight and not raised:
+                raised.append(True)
+                raise boom
+
+        with pytest.raises(TransitionFailedError) as caught:
+            await Runner.run(RunContext(graph=graph, observers=(observe,)))
+        launch_error = caught.value.__cause__
+        assert isinstance(launch_error, LaunchNotificationError)
+        assert launch_error.transition_name == 'Work'
+        assert launch_error.observer_error is boom
+        assert launch_error.__cause__ is boom
+        assert str(launch_error) == (
+            "an observer raised at the launch notification of 'Work', before its body ran: "
+            "ValueError('boom')"
+        )
+        assert ran == [], 'the body never ran'
+        assert caught.value.restored is restore
+        assert graph.place_named('In').tokens == ([1] if restore else [])
+        assert graph.place_named('Out').tokens == []
+        assert graph.in_flight == set()
+        events = graph.drain_events()
+        failed = [event for event in events if isinstance(event, Failed)]
+        assert len(failed) == 1
+        assert failed[0].restored is restore
+        assert 'launch notification' in failed[0].error
+        assert not any(isinstance(event, Fired) for event in events)
+
+    @pytest.mark.asyncio
+    async def test_bookkeeping_is_unchanged_by_the_launch_call(self):
+        """The counts, the summary and the log are what a run gave before the
+        launch notification existed; the observer saw one launch per firing."""
+        graph = _chain_graph(3)
+        graph.record_events = True
+        observe, calls, launches = _in_flight_recorder()
+        summary = await Runner.run(RunContext(graph=graph, observers=(observe,)))
+        assert summary.n_fired == 3
+        assert summary.fired == {'T1': 1, 'T2': 1, 'T3': 1}
+        assert graph.step_count == 3
+        assert graph.fired_counts == {'T1': 1, 'T2': 1, 'T3': 1}
+        events = graph.drain_events()
+        assert all(isinstance(event, Fired) for event in events)
+        assert [(event.transition, event.consumed, event.produced) for event in events] == [
+            ('T1', (('P0', 1),), (('P1', 2),)),
+            ('T2', (('P1', 2),), (('P2', 3),)),
+            ('T3', (('P2', 3),), (('P3', 4),)),
+        ]
+        assert [call for call in calls if call] == [{'T1'}, {'T2'}, {'T3'}]
+        assert [launch['step_count'] for launch in launches] == [0, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_an_inner_firing_has_no_launch_call(self):
+        """An inner net's launch notifies nothing: the outer observer sees the
+        marking and the completion, and the outer set stays empty throughout."""
+        holder = {}
+        outer_in_flight = []
+
+        def body(x: int) -> int:
+            outer_in_flight.append(set(holder['outer'].in_flight))
+            return x
+
+        outer = ExecutableGraphOperations.construct_graph([
+            ListPlaceNode('Shelf', _Box, [_Box(inner=_single_transition_graph(body))], nested=True),
+        ])
+        holder['outer'] = outer
+        observe, calls, _launches = _in_flight_recorder()
+        summary = await Runner.run(RunContext(graph=outer, observers=(observe,)), stop_after_n_firings=1)
+        assert calls == [set(), set()]
+        assert outer_in_flight == [set()]
+        assert summary.fired == {'Shelf/#1/counter/Work': 1}
+        assert outer.fired_counts == {'Shelf/#1/counter/Work': 1}
+
+    @pytest.mark.asyncio
+    async def test_a_fire_command_has_no_launch_call(self):
+        """``Fire`` fires inside the synchronous drain, possibly on a helper
+        thread's loop, so observers hear of it once, after the drain."""
+        graph = _single_transition_graph(increment)
+        observe, calls, _launches = _in_flight_recorder()
+        ctx = RunContext(graph=graph, observers=(observe,), inbox=asyncio.Queue())
+        ctx.inbox.put_nowait(Fire('Work'))
+        assert await Runner.step(ctx) == 0, 'the Fire took the one token; the step found nothing'
+        assert calls == [set()]
+        assert ctx.n_fired == 1
+        assert graph.fired_counts == {'Work': 1}
