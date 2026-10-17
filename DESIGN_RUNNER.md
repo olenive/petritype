@@ -292,8 +292,9 @@ sees no change. The protocol transcripts under `tests/protocol/`
 (`PROTOCOL.md` §11) are the runner's acceptance tests.
 
 *2026-10-17:* the work from 2026-10-09 to 2026-10-16 (nested nets, keys, drain
-and survey, notebooks, controls and `press`) is unreleased and goes out as the
-next minor version (`CHANGELOG.md`).
+and survey, notebooks, controls and `press`) shipped as 0.3.0, and 0.3.1 the
+same day added the launch notification for sequential observers
+(`CHANGELOG.md`).
 
 ## As built, 2026-10-09: nested nets (PROTOCOL.md §12)
 

@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.1, 2026-10-17
+
+The [`v0.3.1` tag](https://github.com/olenive/petritype/tree/v0.3.1).
 
 - Sequential runs notify observers as a transition goes in flight, before its body runs, as concurrent runs already did, so a renderer on the event loop can show it working; an observer that raises at that notification fails the firing as a raising body does, with a `LaunchNotificationError` as the `TransitionFailedError`'s cause.
 
 ## 0.3.0, 2026-10-17
+
+The [`v0.3.0` tag](https://github.com/olenive/petritype/tree/v0.3.0).
 
 - Nets as tokens: a `nested=True` place holds tokens that carry Petri nets of their own, which the outer net runs, logs and reaches inside, and a net saves and restores as JSON through a registered template (PROTOCOL.md §12).
 - Token keys, queries and filters: places derive keys from their tokens, `Filter` and `Query` select by them (`Query.distinct` lists a key's values), `TakeWhereEdge` and `MutateWhereEdge` act on matching tokens only, and the protocol runner answers `query`, `distinct` and `set_filter` (PROTOCOL.md §13).
