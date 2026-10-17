@@ -11,6 +11,11 @@ Layers built so far:
   ``graph.in_flight`` names the transitions whose bodies are running, in both modes: in
   sequential mode it holds the one firing transition for the length of its body, so a
   thread reading the graph during a long synchronous body can tell what is working.
+  Observers are also notified when a transition goes in flight, in both modes, so one on
+  the event loop sees it working before its body runs (the order of calls is at
+  ``Observer``). An inline body holds the loop until it returns, so anything an observer
+  only schedules runs after the body; an async body lets that work run at its awaits, and
+  a body marked ``execution="thread"`` leaves the loop free.
 - **Input (#4):** typed commands placed on `RunContext.inbox` (an `asyncio.Queue` the caller
   owns) and **drained between steps** — the runner is the only thing that mutates the graph.
   A control/UI produces commands; it never touches the net.
@@ -225,7 +230,8 @@ class RunContext:
 
     - ``graph``     — the single source of truth (mutated in place).
     - ``mode``      — selects the firing orchestrator.
-    - ``observers`` — notified with the live graph after each state change.
+    - ``observers`` — notified with the live graph after each state change, and when a
+                      transition goes in flight.
     - ``inbox``     — an ``asyncio.Queue`` of input commands; drained between steps.
     - ``stop``      — an ``asyncio.Event``; set it to end ``run_indefinitely``.
     - ``strict``    — if True, a malformed command raises; otherwise it is dropped-and-logged.

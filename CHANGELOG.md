@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Sequential runs notify observers as a transition goes in flight, before its body runs, as concurrent runs already did, so a renderer on the event loop can show it working; an observer that raises at that notification fails the firing as a raising body does, with a `LaunchNotificationError` as the `TransitionFailedError`'s cause.
+
+## 0.3.0, 2026-10-17
+
 - Nets as tokens: a `nested=True` place holds tokens that carry Petri nets of their own, which the outer net runs, logs and reaches inside, and a net saves and restores as JSON through a registered template (PROTOCOL.md §12).
 - Token keys, queries and filters: places derive keys from their tokens, `Filter` and `Query` select by them (`Query.distinct` lists a key's values), `TakeWhereEdge` and `MutateWhereEdge` act on matching tokens only, and the protocol runner answers `query`, `distinct` and `set_filter` (PROTOCOL.md §13).
 - `DrainEdge` and `SurveyEdge`, input edges that accept an empty place: a drain takes every token and a survey copies every token, zero or more either way.
