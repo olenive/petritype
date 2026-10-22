@@ -32,6 +32,10 @@ jobs:
 
       - uses: astral-sh/setup-uv@v7
         with:
+          # uv checks PyPI's certificate against the root bundle compiled into its
+          # binary; 0.13.4 is the first release without the compromised
+          # eMudhra/emSign roots (October 2026).
+          version: ">=0.13.4"
           enable-cache: true
           # Without a suffix every matrix leg computes the same key (the python
           # component resolves .python-version, identical across legs), so the
@@ -61,6 +65,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
+          # uv checks PyPI's certificate against the root bundle compiled into its
+          # binary; 0.13.4 is the first release without the compromised
+          # eMudhra/emSign roots (October 2026).
+          version: ">=0.13.4"
           enable-cache: true
           cache-suffix: package
 

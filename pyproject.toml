@@ -77,6 +77,12 @@ addopts = "-m 'not notebooks'"
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# Nothing in the resolved tree depends on certifi today. Should a dependency ever
+# pull it in, it must resolve to a bundle without the compromised eMudhra/emSign
+# roots (GHSA-6q48-6c7w-9gw2, October 2026). Recorded in uv.lock under [manifest].
+constraint-dependencies = ["certifi>=2026.10.19"]
+
 [tool.uv.build-backend]
 # Flat layout: the package sits at the repo root, not under src/.
 module-root = ""
