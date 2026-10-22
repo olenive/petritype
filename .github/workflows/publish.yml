@@ -29,6 +29,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
+          # uv checks PyPI's certificate against the root bundle compiled into its
+          # binary; 0.13.4 is the first release without the compromised
+          # eMudhra/emSign roots (October 2026).
+          version: ">=0.13.4"
           enable-cache: true
           cache-suffix: publish
 
@@ -96,10 +100,12 @@ jobs:
         with:
           name: dist
           path: dist/
-      # Pinned to a commit (v1.14.2). This action holds id-token: write, so a
-      # mutable branch ref would let the credential-exchange code change with
-      # no diff here. Dependabot keeps the pin current.
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+      # Pinned to a commit (v1.14.3: the first release whose bundled certifi and
+      # sigstore are free of the compromised eMudhra/emSign roots, October 2026).
+      # This action holds id-token: write, so a mutable branch ref would let the
+      # credential-exchange code change with no diff here. Dependabot keeps the
+      # pin current.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           repository-url: https://test.pypi.org/legacy/
           # TestPyPI filenames are immutable, so a re-run (or an earlier dry
@@ -121,6 +127,15 @@ jobs:
         with:
           name: dist
           path: dist/
+
+      # The runner's OS bundle and pip's own copy of certifi are what the pip
+      # calls below verify TestPyPI and PyPI against. Upgrade both, so the
+      # compromised eMudhra/emSign roots (October 2026) are gone even on a runner
+      # image built before the fix shipped.
+      - name: Upgrade the OS CA bundle
+        run: sudo apt-get update && sudo apt-get install -y --only-upgrade ca-certificates
+      - name: Upgrade pip
+        run: python -m pip install --upgrade "pip>=26.2.2"
 
       # Fetch the wheel back from TestPyPI and check it is byte-identical to
       # the one this run built. That is what makes two failure modes
@@ -204,7 +219,7 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           # twine uploads the wheel and sdist as separate requests, so a
           # transient failure between them can leave the release half-uploaded.
