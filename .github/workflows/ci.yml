@@ -17,7 +17,9 @@ concurrency:
 jobs:
   test:
     name: tests (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # Named, not `ubuntu-latest`: the Graphviz package below has this name on
+    # Ubuntu 26.04 and does not exist on 24.04.
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -27,8 +29,11 @@ jobs:
 
       # rustworkx.visualization.graphviz_draw shells out to `dot`; the notebook
       # tests assert on the PNG bytes it produces, so the binary is required.
+      # Two example notebooks lay out with `sfdp`. Since Ubuntu 26.04 the
+      # `graphviz` package brings the `dot` engine alone, and the others are in
+      # `libgvplugin-neato-layout8`.
       - name: Install Graphviz
-        run: sudo apt-get update && sudo apt-get install -y graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz libgvplugin-neato-layout8
 
       - uses: astral-sh/setup-uv@v7
         with:
