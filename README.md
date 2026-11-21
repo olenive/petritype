@@ -378,6 +378,8 @@ What makes Petri nets powerful is that they can model concurrency, synchronisati
 
 Petritype builds on this foundation by making places typed (so tokens must match a declared Python type) and making transitions executable (so they call real functions). The result is a system where the Petri net is not just a model of your process — it *is* your process.
 
+In the literature's terms petritype builds *coloured Petri nets*: a token's value is its colour and the type a place holds is its colour set, with guards as guards and a transition's function in place of arc expressions. Two things differ from the textbook form: a place is a first-in, first-out list where the textbook has an unordered bag, and the net is run as the program itself, with no state-space analysis. A token that carries a net of its own ([Nets as tokens](#nets-as-tokens)) is what the literature calls *nets within nets*, or object nets. Modules with ports, the hierarchical coloured nets, are not here. Colour in that sense has nothing to do with the display colour a token may be given.
+
 ## Installation
 
 ```bash
