@@ -26,7 +26,11 @@ Python runner came to serve subnet places, which settled four points the
 text had left open (§5.1, where a topology shows `port`; §12.3, a read of
 the net around a subnet while a firing of the subnet on its port is in
 flight; §12.7, what counts as a change of a port place; §13.2, the shape of
-a port in a filter's `places`) and fixed the conformance net `levels` (§11). Both
+a port in a filter's `places`) and fixed the conformance net `levels` (§11). Later
+the same day it gained groups, a label on parts of a net that only drawings read,
+carried as optional fields of the topology (§5.1, §12.7), with a conformance net
+and a transcript for them (§11), written before either runtime implemented them,
+from `../petritype-rs/dev-docs/group-spec.md`; the version stays 2 (§10). Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -224,13 +228,17 @@ once per generation and lays it out.
   holds exactly one token and that token has a `color` (§5.3), the place is
   filled with that colour; a firing's input or output highlight wins while it
   lasts; otherwise the theme's fill. No notification carries a style: the
-  viewer already has the token's colour. A subnet place, which holds a net
-  of its own and no tokens, is `{name, type_name, subnet: true, ports,
-  stepping}`, with its port places listed in `ports` (§12.7).
+  viewer already has the token's colour. `group?`, the name of the group the
+  place is in, present only when it is in one (`groups?`, below; since
+  2026-11-21). A subnet place, which holds a net of its own and no tokens, is
+  `{name, type_name, subnet: true, ports, stepping, group?}`, with its port
+  places listed in `ports` (§12.7).
 - `transitions[]`: `name`; `detail?`, a free object of runtime-specific
   introspection (Python: `function_name`, `signature`, `docstring`; Rust:
   `params`, the parameter type names, and `detachable`). A viewer may show
-  `detail`; it must not depend on any key in it.
+  `detail`; it must not depend on any key in it. `group?`, the name of the
+  group the transition is in, present only when it is in one (since
+  2026-11-21).
 - `edges[]`: `place`, `port?` (one of the place's ports, when `place` is a
   subnet place, §12.7), `transition`, `direction` (`"in"` place to transition,
   `"out"` transition to place); `kind?` for input edges, one of `"take"`,
@@ -251,6 +259,23 @@ once per generation and lays it out.
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
   No runtime is required to compute a layout.
+- `groups?`: the names of the net's groups, in the order its definition
+  declares them, absent when it declares none (since 2026-11-21). A group is
+  a named set of places and transitions of one net, set in the net's
+  definition, that only drawings read. It has no effect on how the net runs:
+  firing, stepping, token ids, saving and every notification are those of
+  the same net with no groups. A place, a subnet place or a transition is in
+  at most one group, named by its `group?`, and may be in none; a group holds
+  no group; a group's name is unique among its net's groups and may hold any
+  character, and a node keeps its own name whatever group it is in. A viewer
+  may draw groups, as a frame around each group's members or as one box that
+  stands for them, and may ignore them. Each net's own topology carries its
+  own groups: an inner net read by `path` or `nested_id` (§12.3), a subnet
+  or a net a token carries, shows the groups its own definition declares,
+  and the topology of the net around it shows none of them. A port listed in
+  a subnet place's `ports` carries no `group`, since any group it is in is
+  its subnet's (§12.7). Nothing else names a group: no request, no
+  notification, no marking entry and no log entry.
 - `controls?`: the controls the net declares, in declaration order, absent
   when it declares none (since 2026-10-16). A net declares as data the
   buttons it wants; a viewer renders them with widgets it already has, never
@@ -1121,6 +1146,17 @@ dated where the net is described.
   which is no port (`unknown_place`), and `get_place_tokens` naming the port
   `Lobby` of `Door`, an ordinary place (`unknown_place`); reads the log, whose
   world entries name the ports by the object; and resets.
+- Groups (§5.1) join the shared set on 2026-11-21 with one transcript,
+  `11_groups.json`, over a new conformance net `groups`, fixed here when the
+  transcript is recorded, as the nets above are: a net with two groups, a
+  transition in each, a place in no group, and a subnet place in one of the
+  groups whose subnet declares a group of its own. The transcript shows
+  `describe`; `load`; `get_state` of the net, whose topology lists its two
+  groups and the `group` of each member; `get_state` of the subnet,
+  addressed by path, whose topology lists the subnet's own group and none of
+  the net's; one `step`, whose lines name no group; and `reset`. No other
+  conformance net declares a group, so no other transcript carries `groups`
+  or `group`.
 
 ## 12. Nested nets
 
@@ -1423,14 +1459,18 @@ own. In this section the outer net is the net that holds the subnet place,
 at whatever depth, and the loaded net is the one the process loaded.
 
 - **Topology.** In the outer net's `topology.places[]`, a subnet place is
-  `{name, type_name, subnet: true, ports, stepping}`. `type_name` is the
-  name of the template that built the subnet, or `""` when it was built
+  `{name, type_name, subnet: true, ports, stepping, group?}`. `type_name` is
+  the name of the template that built the subnet, or `""` when it was built
   without one. `ports` lists its port places in the subnet's declaration
   order, each with the fields that place has in the subnet's own topology
   (`name`, `type_name`, `serializable`, `nested?`, `stepping?`,
-  `key_names?`, `style?`) apart from `port`. `stepping` is the place's
-  stepping rule (§12.3). In the subnet's own topology, which `get_state`
-  addressed to the subnet returns, each port place carries `port: true`. The
+  `key_names?`, `style?`) apart from `port` and `group`: a port is drawn in
+  its subnet place's box and goes where the box goes, and a group it is in
+  is its subnet's, shown in the subnet's own topology (§5.1, since
+  2026-11-21). `stepping` is the place's stepping rule (§12.3), and `group`
+  the outer net's group the subnet place is in, when it is in one. In the
+  subnet's own topology, which `get_state` addressed to the subnet returns,
+  each port place carries `port: true`. The
   outer topology lists no other place of the subnet, and an edge of the
   outer net names a port with `port` beside `place`:
 
