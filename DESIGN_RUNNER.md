@@ -857,3 +857,32 @@ The levels example gained a factory the runner serves, `levels-world`.
 inside a token's net and a token's net inside a port, the versions rule in each
 of its cases, and the reads that wait or are served from a snapshot;
 `tests/test_runner_process.py` serves `levels` as a process.
+
+## As built, 2026-11-21: groups in the runner (PROTOCOL.md §5.1)
+
+The spec's step 3 for Python (`../petritype-rs/dev-docs/group-spec.md` §3). A
+group is a label on parts of one net that only drawings read, so the runner's
+whole share is the topology; nothing else on the wire changes.
+
+- **Topology.** `Topologies.of` writes the net's `ExecutableGraph.groups` as
+  `groups`, in their order, and each place's, subnet place's and transition's
+  `group`, each left out when absent (the wire models drop `None`). The owner
+  builds every net's topology with it, the loaded net's and every inner net's,
+  a subnet's and a token's net's, so each shows its own groups and none of the
+  net around it. A port listed in a subnet place's `ports` is given no `group`:
+  its group is the subnet's, shown in the subnet's own topology, and the net
+  around it could not name that group (written into PROTOCOL.md §5.1 and §12.7).
+- **Nothing else.** No request, notification, marking entry or log entry names a
+  group, and the engine reads none, so firing, stepping, ids and versions are
+  those of the same net with no groups.
+- **The transcripts.** The recorder needed no change: a group's name is the
+  net's own, the same in every runtime, and is kept as it stands. The new
+  conformance net `groups` (`tests/protocol_nets/groups.py`, fixed in
+  PROTOCOL.md §11) stamps its box with the template name `Box` without
+  registering it, as `levels` does. `tests/protocol/11_groups.json` was recorded
+  over it and is replayed through the owner and over pipes; every transcript, 11
+  included, re-records to the same bytes, and none of the others changed.
+
+`tests/test_runner_groups.py` covers the fields for the loaded net, a subnet by
+path and by nested id, a token's net, a net with no groups, and the firings and
+log that name none; `tests/test_runner_process.py` serves `groups` as a process.

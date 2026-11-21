@@ -290,7 +290,7 @@ FunctionTransitionNode("Walk", walk, guard=can_walk, group="Walk")
 SubnetPlaceNode("Level 1", build_level(), group="Dungeon")       # a subnet place may be in one too
 ```
 
-A group exists from its first mention, and `graph.groups` lists the groups in that order, reading the places in declaration order and then the transitions; `node.group` is the group a node is in, or `None`. A node is in one group or none, a group holds no group, a name may hold any character, and a node keeps its own name. A subnet, or a net a token carries, has groups of its own, given on its own nodes, and a port's group is its subnet's. Groups are part of the definition: a copy or a template carries them, and a saved net never mentions them, so a net fires, steps, numbers its tokens and saves exactly as it would with no groups. The Graphviz drawing frames each group with a dashed line titled with its name (`SimpleGraphvizVisualization.graph`, or `RustworkxToGraphviz.draw` with attributes of your own). A group is a label on parts of one net whose places it shares freely; a part that is really separate, with its own tokens and turns and reached only through ports, is a subnet place. `examples/groups/hike.py` is the worked example: a hiker whose walking, eating and resting all read and change one store of energy, each concern a group and the energy in none.
+A group exists from its first mention, and `graph.groups` lists the groups in that order, reading the places in declaration order and then the transitions; `node.group` is the group a node is in, or `None`. A node is in one group or none, a group holds no group, a name may hold any character, and a node keeps its own name. A subnet, or a net a token carries, has groups of its own, given on its own nodes, and a port's group is its subnet's. Groups are part of the definition: a copy or a template carries them, and a saved net never mentions them, so a net fires, steps, numbers its tokens and saves exactly as it would with no groups. The Graphviz drawing frames each group with a dashed line titled with its name (`SimpleGraphvizVisualization.graph`, or `RustworkxToGraphviz.draw` with attributes of your own), and the [protocol runner](#net-protocol--run-a-net-as-a-process) lists a net's groups in its topology, for a viewer to draw. A group is a label on parts of one net whose places it shares freely; a part that is really separate, with its own tokens and turns and reached only through ports, is a subnet place. `examples/groups/hike.py` is the worked example: a hiker whose walking, eating and resting all read and change one store of energy, each concern a group and the energy in none.
 
 ### Token keys and queries
 
@@ -388,7 +388,9 @@ progress and log view, their events wrapped in `nested` notifications. A
 subnet is one more inner net, its path step the subnet place alone
 (`[{"place": "Level 1"}]`); the net around it names a port with `port` beside
 `place` (`{"place": "Level 1", "port": "Lobby"}`), and a change of a port moves
-the versions of both nets that see it (PROTOCOL.md §12.7). A
+the versions of both nets that see it (PROTOCOL.md §12.7). Each net's topology
+lists its own [groups](#groups) as `groups`, with `group` on each member
+(PROTOCOL.md §5.1). A
 `print` in a body goes to stderr; stdout belongs to the protocol. No extra is needed: the runner is the standard library plus
 `pydantic`. Conformance is checked by the recorded transcripts under
 `tests/protocol/`, which are written to run against both runtimes.

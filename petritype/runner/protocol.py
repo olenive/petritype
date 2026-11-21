@@ -210,7 +210,8 @@ SteppingName = Literal["inner_first", "take_turns", "outer_first", "passive"]
 class Place(Wire):
     """``stepping`` is present exactly on a place that holds nets, its stepping
     rule (§5.1, §12.3); ``port`` on a port place in its subnet's own topology
-    (§12.7)."""
+    (§12.7); ``group`` on a place in a group, in its own net's topology, never
+    on a port listed in its subnet place's ``ports`` (§5.1)."""
 
     name: str
     type_name: str
@@ -220,24 +221,30 @@ class Place(Wire):
     port: Optional[bool] = None
     key_names: Optional[list[str]] = None
     style: Optional[PlaceStyle] = None
+    group: Optional[str] = None
 
 
 class SubnetPlace(Wire):
     """A subnet place in the topology of the net around it (§5.1, §12.7):
     ``type_name`` the template that built its subnet (``""`` for none), ``ports``
     its port places in the subnet's declaration order, each as a ``Place`` of the
-    subnet's own topology without ``port``, and its stepping rule."""
+    subnet's own topology without ``port`` and ``group``, its stepping rule, and
+    the outer net's group it is in, when it is in one (§5.1)."""
 
     name: str
     type_name: str
     subnet: Literal[True] = True
     ports: list[Place]
     stepping: SteppingName
+    group: Optional[str] = None
 
 
 class Transition(Wire):
+    """``group`` on a transition in a group (§5.1)."""
+
     name: str
     detail: Optional[dict[str, Any]] = None
+    group: Optional[str] = None
 
 
 class Edge(Wire):
@@ -269,9 +276,13 @@ class Control(Wire):
 
 
 class Topology(Wire):
+    """``groups``: the net's groups in declared order, absent when it has none,
+    each net's own (§5.1)."""
+
     places: list[Union[Place, SubnetPlace]]
     transitions: list[Transition]
     edges: list[Edge]
+    groups: Optional[list[str]] = None
     hints: Optional[dict[str, Any]] = None
     controls: Optional[list[Control]] = None
 

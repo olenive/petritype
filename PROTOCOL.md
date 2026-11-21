@@ -30,8 +30,9 @@ a port in a filter's `places`) and fixed the conformance net `levels` (§11). La
 the same day it gained groups, a label on parts of a net that only drawings read,
 carried as optional fields of the topology (§5.1, §12.7), with a conformance net
 and a transcript for them (§11), written before either runtime implemented them,
-from `../petritype-rs/dev-docs/group-spec.md`; the version stays 2 (§10). Both
-runners implement it, the Rust one (`petritype-runner`, in
+from `../petritype-rs/dev-docs/group-spec.md`; the version stays 2 (§10). The
+Python runner came to serve them the same day, which fixed the conformance net
+`groups` (§11). Both runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
@@ -1146,15 +1147,43 @@ dated where the net is described.
   which is no port (`unknown_place`), and `get_place_tokens` naming the port
   `Lobby` of `Door`, an ordinary place (`unknown_place`); reads the log, whose
   world entries name the ports by the object; and resets.
-- Groups (§5.1) join the shared set on 2026-11-21 with one transcript,
-  `11_groups.json`, over a new conformance net `groups`, fixed here when the
-  transcript is recorded, as the nets above are: a net with two groups, a
-  transition in each, a place in no group, and a subnet place in one of the
-  groups whose subnet declares a group of its own. The transcript shows
-  `describe`; `load`; `get_state` of the net, whose topology lists its two
-  groups and the `group` of each member; `get_state` of the subnet,
-  addressed by path, whose topology lists the subnet's own group and none of
-  the net's; one `step`, whose lines name no group; and `reset`. No other
+- Groups (§5.1) got their conformance net and transcript on 2026-11-21,
+  `11_groups.json` over `tests/protocol_nets/groups.py`: a net with two
+  groups, a transition in each, a place in no group, and a subnet place in one
+  of the groups whose subnet declares a group of its own. Its names, places,
+  transitions, groups, template and seed are fixed here, since the transcript
+  depends on them:
+
+  **`groups`** ("Letters are sorted in one group and packed in another, into
+  a box that seals them in a group of its own"), hosted `manual`, with no
+  load parameters and no net parameters. Every place of it, in the net and in
+  its subnet, holds strings and is serializable; a letter's JSON form is the
+  string, and its label is the runtime's own. The net's places, in this
+  order: `Inbox`, in no group; `Sorted`, in the group `Sorting`; and `Box`, a
+  subnet place in the group `Packing`, holding a net the template `Box`
+  builds, with the default stepping rule, `inner_first`. The net's
+  transitions, in this order: `Sort`, in `Sorting`, which takes the front of
+  `Inbox` (a `take` edge) and produces it unchanged into `Sorted`; and
+  `Pack`, in `Packing`, which takes the front of `Sorted` and produces it
+  unchanged into the port `Tray` of `Box`. The net's groups, in this order:
+  `Sorting` (`Sorted` and `Sort`) and `Packing` (`Box` and `Pack`). The
+  template `Box` takes no parameters and builds a net holding no tokens, with
+  places, in this order, `Tray` (a port, in the group `Sealing`) and `Sealed`
+  (in no group); one transition, `Seal`, in `Sealing`, which takes the front
+  of `Tray` and produces it unchanged into `Sealed`; and one group, `Sealing`
+  (`Tray` and `Seal`). Seed: `Inbox` holds one letter, `"Letter"`, and every
+  other place is empty. No transition has a guard or a priority, no body
+  fails, and every net chooses by the default selector. The transcript reads
+  `describe`, whose one net is `{name: "groups", description, mode:
+  "manual", params: []}`; loads the net; reads its state, whose topology
+  lists `groups` `["Sorting", "Packing"]`, `group` on `Sorted`, `Box`,
+  `Sort` and `Pack` and none on `Inbox`, and `Box`'s one port, `Tray`,
+  without a `group`, since that group is the subnet's; reads the subnet's
+  state by path `[{"place": "Box"}]`, whose `net` and `template` are `Box`
+  and whose topology lists `groups` `["Sealing"]`, `group` on `Tray`, which
+  carries `port: true` as well, and on `Seal`, and none on `Sealed`; steps
+  once, which fires `Sort`, the box being at rest, in lines that name no
+  group, after which `Pack` alone is fireable; and resets. No other
   conformance net declares a group, so no other transcript carries `groups`
   or `group`.
 

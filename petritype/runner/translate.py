@@ -515,9 +515,10 @@ class Topologies:
             annotation_maybe_in_list=argument_type,
         )
 
-    def place(place: ListPlaceNode, port: bool = False) -> wire.Place:
+    def place(place: ListPlaceNode, port: bool = False, group: Optional[str] = None) -> wire.Place:
         """One place as the topology lists it; ``port`` for a port place in its
-        subnet's own topology."""
+        subnet's own topology, and ``group`` the group it is in there. A port
+        listed in its subnet place's ``ports`` is given neither (§5.1, §12.7)."""
         return wire.Place(
             name=place.name,
             type_name=TypeNames.of(place.type),
@@ -526,6 +527,7 @@ class Topologies:
             stepping=place.stepping if place.nested else None,
             port=True if port else None,
             key_names=list(place.key_names) if place.keys else None,
+            group=group,
         )
 
     def of(graph: ExecutableGraph, subnet: bool = False) -> wire.Topology:
@@ -540,7 +542,10 @@ class Topologies:
         as its ``place`` and the port as its ``port``. An input edge's ``kind`` is
         its class's (``take_where``, ``drain``, ``snapshot``, ``survey``, ``mutate``,
         ``mutate_where``), or for a plain argument edge ``take_all`` when its argument
-        takes every token as a list and ``take`` otherwise."""
+        takes every token as a list and ``take`` otherwise. The net's own groups are
+        ``groups``, in declared order, and each place, subnet place and transition in
+        one carries its ``group``; a port in ``ports`` carries none, its group being
+        its subnet's (§5.1)."""
         places = MapPlaceNames.to_list_place_nodes(graph)
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
@@ -580,15 +585,17 @@ class Topologies:
                     type_name=place.graph.template or "",
                     ports=[Topologies.place(port) for port in place.ports],
                     stepping=place.stepping,
+                    group=place.group,
                 )
                 if isinstance(place, SubnetPlaceNode)
-                else Topologies.place(place, port=subnet and place.port)
+                else Topologies.place(place, port=subnet and place.port, group=place.group)
                 for place in graph.places
             ],
             transitions=[
-                wire.Transition(name=transition.name, detail=Details.of(transition.function))
+                wire.Transition(name=transition.name, detail=Details.of(transition.function), group=transition.group)
                 for transition in graph.transitions
             ],
             edges=edges,
+            groups=list(graph.groups) or None,
         )
 

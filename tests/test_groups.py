@@ -5,7 +5,8 @@ node, that only drawings read.
 These tests are, in turn: declaring and reading; the order of the groups; a subnet's
 own groups and a token's net's; what the build accepts; copies, templates and saving;
 a net built twice, with and without groups, stepping the same; the Graphviz frames;
-and the example.
+and the example. The protocol runner's topology fields are
+``tests/test_runner_groups.py``.
 """
 
 import asyncio

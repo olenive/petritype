@@ -228,6 +228,22 @@ def test_a_net_with_subnet_places_is_served_by_the_process(spawn):
     assert runner.finish() == 0
 
 
+def test_a_net_with_groups_is_served_by_the_process(spawn):
+    """The conformance net ``groups`` (PROTOCOL.md §5.1, §11): the net's groups and
+    the subnet's own, each in its own topology."""
+    runner = spawn("--module", "tests.protocol_nets.groups")
+    assert kinds(runner.request("load", {"net": "groups"})) == ["load_progress", "reloaded", "result"]
+    topology = runner.request("get_state")[-1]["result"]["topology"]
+    assert topology["groups"] == ["Sorting", "Packing"]
+    assert [place.get("group") for place in topology["places"]] == [None, "Sorting", "Packing"]
+    assert [transition["group"] for transition in topology["transitions"]] == ["Sorting", "Packing"]
+    inside = runner.request("get_state", {"path": [{"place": "Box"}]})[-1]["result"]["topology"]
+    assert inside["groups"] == ["Sealing"]
+    runner.request("shutdown")
+    runner.process.stdin.close()
+    assert runner.finish() == 0
+
+
 def test_a_continuous_net_runs_idles_and_keeps_beating(spawn):
     runner = spawn("--module", "runner_process_nets")
     runner.request("load", {"net": "watcher"})
