@@ -75,6 +75,10 @@ _FIRING_NOTEBOOKS = [
     # each (Enter, Fight and Win in level 1, Climb, Fight and Win in level 2, Leave), until
     # the world is at rest. Its ending is pinned in tests/test_subnet_places.py.
     (EXAMPLES_DIR / "subnet_places" / "levels_journey.py", 21),
+    # Groups: a hiker's day, three concerns drawn as frames around one shared store of
+    # energy: Walk, Eat, Walk, Walk, Rest, Rest, Walk, the guards leaving one transition
+    # fireable at a time. Its ending is pinned in tests/test_groups.py.
+    (EXAMPLES_DIR / "groups" / "hike_day.py", 7),
     # Edges on empty places: the priced shop's example day, each delivery coming in when
     # nothing is fireable (Price Order with no promotion running, then with two). Its
     # receipts are pinned in tests/test_priced_shop.py.

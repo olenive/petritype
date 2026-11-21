@@ -633,6 +633,61 @@ same day (PROTOCOL.md §12.7, `DESIGN_RUNNER.md`), the example as `levels-world`
 
 ---
 
+# Groups
+
+Decided 2026-11-21 in `petritype-rs/dev-docs/group-spec.md`, for both runtimes; the wire side
+is PROTOCOL.md §5.1. A group is a named set of places and transitions of one net, set in the
+net's definition, that only drawings read. It replaces the viewer's clusters by name prefix:
+no character in a name has a meaning, so nothing is found by splitting one.
+
+## A group and a subnet place
+
+A net whose rules all read and change one shared place cannot be split into subnets without
+moving those rules into the net around them, which leaves the first view no simpler. Such a
+net stays flat, and is read by gathering its parts under names. The two are kept apart in
+name, in the definition and in the picture:
+
+| | Group | Subnet place |
+|---|---|---|
+| What it is | a label on parts of one net | a separate net held by a place |
+| Token logic | the flat net's, unchanged | its own net, its own ids and turns |
+| Shared places | yes, freely | no, only ports |
+| What it is for | reading a large flat net | a part that is really separate |
+
+## As built, 2026-11-21
+
+- **Declaring.** `group=` on `ListPlaceNode`, `SubnetPlaceNode` and `FunctionTransitionNode`
+  names the group the node is in, or `None` for none. A group exists from its first mention
+  and that is its place in the order, reading the definition as the graph holds it: the
+  places in declaration order, subnet places among them, then the transitions. The order in
+  which places and transitions are declared is never touched, since it decides stepping and
+  ties. A subnet, or a net a token carries, has groups of its own, and a port's group is one
+  of its subnet's.
+- **Reading.** `ExecutableGraph.groups`, the names in order, is computed from the nodes, so
+  it cannot disagree with them; `node.group` is each node's.
+- **Errors.** None of the spec's build errors can arise in Python: a node names one group,
+  so it is never in two; a group is its name, so two of one name are one group; there are
+  no group handles to bring from another net; and an outer net has no node for a port to
+  put in a group. A name that is not a string is refused by the node's validation.
+- **Running and saving.** Nothing in the engine, the runtimes or `NetJson` reads a group. A
+  net built with and without groups fires the same transitions in the same order under each
+  tie-break, mints the same ids, records the same events and saves to the same text. A deep
+  copy carries the groups, as it carries the rest of the definition, and a template carries
+  them by building them.
+- **Drawing.** `RustworkxToGraphviz.dot_source` is `to_dot`'s source with each group added
+  as a Graphviz cluster, a dashed frame titled with the group's name, in order, holding its
+  places, subnet places and transitions; a frame is named by its position and its title
+  quoted, so no character of a name reaches the syntax. A net with no groups gets `to_dot`'s
+  source unchanged. `RustworkxToGraphviz.draw` renders it as `graphviz_draw` does, and
+  `SimpleGraphvizVisualization` draws through it. Closing a group is the viewer's and is not
+  drawn here.
+
+Example: `examples/groups/hike.py`, a hiker whose walking, eating and resting all read and
+change one store of energy, each concern a group and the energy in none, with its notebook
+`hike_day.py` (7 firings, pinned by `tests/test_notebooks.py`). Tests: `tests/test_groups.py`.
+
+---
+
 # Token keys, queries and filters
 
 Decided and built 2026-10-09 from `Cyberpunk2020-Simulation/dev-docs/TOKEN_QUERYING_AND_FILTERING.md`

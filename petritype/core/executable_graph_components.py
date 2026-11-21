@@ -171,14 +171,20 @@ class ListPlaceNode(PositionalArgsBaseModel):
     net's own, with its one list of tokens and its ids, minted by this net,
     whichever net looks at it. A port is an ordinary place or a nested one; its
     keys and its stepping rule are this net's to declare.
+
+    ``group`` names the group the place is in, or is ``None`` for none
+    (``ExecutableGraph.groups``): a label on parts of a net that only drawings
+    read. It changes nothing about how the net runs, and nothing about the
+    place's own name. A port's group is a group of its own net, the subnet.
     """
     name: PlaceNodeName
-    type: Any  # Temporarily accept any value  
+    type: Any  # Temporarily accept any value
     tokens: list[Any] = []
     nested: bool = False
     stepping: Optional[Stepping] = None
     keys: Optional[dict[str, Callable[[Any], Any]]] = None
     port: bool = False
+    group: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -253,6 +259,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
     def copy_sans_tokens(self) -> "ListPlaceNode":
         return ListPlaceNode(
             self.name, self.type, nested=self.nested, stepping=self.stepping, keys=self.keys, port=self.port,
+            group=self.group,
         )
 
     @property
@@ -293,6 +300,9 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
             ``priority`` (selection ranking) instead. The engine never consults this
             field; it is only visible to custom transition selectors, and it will be
             removed in a future release.
+        group: The name of the group the transition is in, or None for none
+            (``ExecutableGraph.groups``). Only drawings read it: it changes nothing
+            about firing, selection or the transition's own name.
     """
     name: str
     function: Callable
@@ -306,6 +316,7 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
     # bodies already yield and ignore this. Process-level parallelism is the function's own
     # concern (bring your own process pool inside the body) — the engine never pickles a token.
     execution: Literal["inline", "thread"] = "inline"
+    group: Optional[str] = None
 
     @model_validator(mode="after")
     def _warn_if_activation_function(self) -> "FunctionTransitionNode":
@@ -522,6 +533,10 @@ class ExecutableGraph(BaseModel):
     life. This net's edges reach a subnet through its port places only, named by
     ``Port(subnet place, port)``; ``place_named`` takes such a pair too, and
     ``subnet`` gives the net a subnet place holds.
+
+    Groups: a place, a subnet place or a transition may name the group it is in
+    (``group=``), and ``groups`` lists the net's groups in order. Only drawings
+    read them.
     """
     places: Sequence[Union[ListPlaceNode, "SubnetPlaceNode"]]
     transitions: Sequence[FunctionTransitionNode]
@@ -720,6 +735,23 @@ class ExecutableGraph(BaseModel):
             if transition.name == name:
                 return transition
         return None
+
+    @property
+    def groups(self) -> tuple[str, ...]:
+        """The names of this net's groups, in the order they are declared: a group
+        exists from its first mention by a node's ``group``, reading the places in
+        declaration order (subnet places among them) and then the transitions.
+
+        A group is a named set of places and transitions of this net that only
+        drawings read: firing, stepping, token ids, saving and the events are
+        those of the same net with no groups. A node is in one group or none, a
+        group holds no group, and a name may hold any character. A subnet's
+        groups are its own, read from it (``subnet(name).groups``), and a port's
+        group is one of them. Part of the definition, so a copy or a template
+        carries them, and a saved form does not mention them."""
+        return tuple(dict.fromkeys(
+            node.group for node in (*self.places, *self.transitions) if node.group is not None
+        ))
 
     def __petritype_nets__(self) -> dict[str, "ExecutableGraph"]:
         """A graph used as a token holds itself as its one inner net, unnamed."""
@@ -931,11 +963,16 @@ class SubnetPlaceNode(PositionalArgsBaseModel):
     it carries the template's name, and the outer net can then be saved,
     restored and copied with it (``NetJson``); built without one it runs, and
     the outer net cannot be saved.
+
+    ``group`` names the outer net's group the subnet place is in, or is
+    ``None`` for none (``ExecutableGraph.groups``); its ports go where it goes.
+    The subnet has groups of its own, given on its own nodes.
     """
 
     name: PlaceNodeName
     graph: ExecutableGraph
     stepping: Stepping = "inner_first"
+    group: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod

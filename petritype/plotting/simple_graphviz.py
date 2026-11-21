@@ -12,7 +12,6 @@ require("matplotlib", "viz")
 # Guarded imports: these must follow require() so an absent extra is reported
 # with the install hint rather than a bare ModuleNotFoundError.
 import matplotlib.pyplot as plt  # noqa: E402
-from rustworkx.visualization import graphviz_draw  # noqa: E402
 
 from petritype.core.executable_graph_components import (
     ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
@@ -65,9 +64,10 @@ class SimpleGraphvizVisualization:
 
     def graph(executable_pydigraph, method: str = 'dot'):
         """The drawing of a net's rustworkx graph; an edge on a port of a subnet
-        place ends at the port's cell."""
+        place ends at the port's cell, and each group is a dashed frame titled
+        with its name (``RustworkxToGraphviz.draw``)."""
         cells = NodeLabel.port_cells(executable_pydigraph.nodes())
-        return graphviz_draw(
+        return RustworkxToGraphviz.draw(
             executable_pydigraph,
             node_attr_fn=SimpleGraphvizVisualization.flow_node_attr_fn,
             edge_attr_fn=lambda edge: NodeLabel.edge_port(edge, cells),
@@ -108,7 +108,7 @@ class SimpleGraphvizVisualization:
             node_attr_fn, edge_attr_fn = RustworkxToGraphviz.activation_coloured_attr_functions(
                 executable_graph
             )
-            diagram = graphviz_draw(
+            diagram = RustworkxToGraphviz.draw(
                 executable_pydigraph,
                 node_attr_fn=node_attr_fn,
                 edge_attr_fn=edge_attr_fn,

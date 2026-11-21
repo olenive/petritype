@@ -1,3 +1,5 @@
+import io
+import subprocess
 from typing import Any, Callable, Optional, Sequence, Union
 from petritype._optional import require
 
@@ -77,6 +79,14 @@ class NodeLabel:
         backslash, and each line break written as the record's ``\\n``, so a name
         is drawn as it is, whatever characters it holds."""
         escaped = "".join("\\" + character if character in '\\{}|<>"' else character for character in text)
+        return escaped.replace("\n", "\\n")
+
+    def quoted_text(text: str) -> str:
+        """Text for a Graphviz quoted string, such as a frame's title: the
+        characters a quoted string gives a meaning (``\\`` and ``"``) escaped with
+        a backslash, and each line break written as ``\\n``, so a name is drawn as
+        it is, whatever characters it holds."""
+        escaped = "".join("\\" + character if character in '\\"' else character for character in text)
         return escaped.replace("\n", "\\n")
 
     def port_cells(places) -> dict[Port, str]:
@@ -365,3 +375,77 @@ class RustworkxToGraphviz:
             return attrs
 
         return node_attr_fn, edge_attr_fn
+
+    def group_frames(pydigraph: PyDiGraph) -> list[tuple[str, list[NodeIndex]]]:
+        """The groups of the net a rustworkx graph shows
+        (``RustworkxGraph.from_executable_graph``), each with the indices of its
+        nodes, read off the ``group`` of the place, subnet place or transition a
+        node holds. In the net's order (``ExecutableGraph.groups``), since the
+        graph holds the places in declaration order and then the transitions.
+        Empty for a net with no groups."""
+        frames: dict[str, list[NodeIndex]] = {}
+        for index in pydigraph.node_indices():
+            group = getattr(pydigraph[index], "group", None)
+            if group is not None:
+                frames.setdefault(group, []).append(index)
+        return list(frames.items())
+
+    def dot_source(
+        pydigraph: PyDiGraph,
+        node_attr_fn: Optional[Callable] = None,
+        edge_attr_fn: Optional[Callable] = None,
+        graph_attr: Optional[dict[str, str]] = None,
+    ) -> str:
+        """The Graphviz source of a net's rustworkx graph: what ``to_dot`` writes,
+        with each group drawn as a cluster, a dashed frame whose title is the
+        group's name, holding the group's places, subnet places and transitions,
+        the clusters in the groups' order. A frame is named by its position
+        (``cluster_0``, ``cluster_1``, ...) and its title is quoted
+        (``NodeLabel.quoted_text``), so no character of a group's name reaches
+        the drawing's syntax. A net with no groups gets ``to_dot``'s source as it
+        is."""
+        source = pydigraph.to_dot(node_attr_fn, edge_attr_fn, graph_attr)
+        frames = RustworkxToGraphviz.group_frames(pydigraph)
+        if not frames:
+            return source
+        body = source.rstrip()
+        if not body.endswith("}"):
+            raise ValueError("to_dot wrote no closing brace to put the groups' frames before")
+        clusters = "".join(
+            f'subgraph cluster_{position} {{\nlabel="{NodeLabel.quoted_text(name)}";\nstyle=dashed;\n'
+            + "".join(f"{index};\n" for index in members)
+            + "}\n"
+            for position, (name, members) in enumerate(frames)
+        )
+        return body[:-1] + clusters + "}\n"
+
+    def draw(
+        pydigraph: PyDiGraph,
+        node_attr_fn: Optional[Callable] = None,
+        edge_attr_fn: Optional[Callable] = None,
+        graph_attr: Optional[dict[str, str]] = None,
+        method: str = "dot",
+    ):
+        """A net's rustworkx graph drawn as a PIL image from ``dot_source``, so its
+        groups are framed; for a net with no groups, the image
+        ``rustworkx.visualization.graphviz_draw`` makes. ``method`` is the Graphviz
+        layout program: ``dot``, ``neato``, ``fdp``, ``sfdp``, ``twopi`` or
+        ``circo``."""
+        from PIL import Image  # the viz extra's, needed only to draw
+
+        if method not in LAYOUT_PROGRAMS:
+            raise ValueError(f"method is one of {', '.join(LAYOUT_PROGRAMS)}, not {method!r}")
+        source = RustworkxToGraphviz.dot_source(pydigraph, node_attr_fn, edge_attr_fn, graph_attr)
+        try:
+            result = subprocess.run(
+                [method, "-T", "png"], input=source.encode("utf-8"), capture_output=True, check=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"Graphviz's {method!r} is not on PATH; drawing needs the Graphviz programs installed"
+            ) from error
+        return Image.open(io.BytesIO(result.stdout))
+
+
+# The Graphviz layout programs ``RustworkxToGraphviz.draw`` runs, as graphviz_draw takes them.
+LAYOUT_PROGRAMS = ("dot", "neato", "fdp", "sfdp", "twopi", "circo")
