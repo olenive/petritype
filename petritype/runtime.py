@@ -43,8 +43,9 @@ Layers built so far:
   (inner-first places, then the ring after its cursor), else the sweep, else one behind it
   (the rest of the ring, then the outer-first places once nothing outer is in flight). An
   inner firing runs inline while outer bodies may be in flight, never in a token one of
-  them holds through a mutate edge. Inner firings count as firings of the outer net under
-  their ``InnerFiring``.
+  them holds through a mutate edge, and never in the subnet of a subnet place one of whose
+  ports an outer firing in flight has an edge on. Inner firings count as firings of the
+  outer net under their ``InnerFiring``.
 
 Design notes realised here:
 - **Functional, no `__init__`:** `Runner` is a namespace class of functions (matching
@@ -83,10 +84,11 @@ from petritype.core.executable_graph_components import (
     MapTransitionNames,
     NestedNets,
     NetParams,
+    SubnetPlaceNode,
     TokenIds,
     default_transition_selector,
 )
-from petritype.core.events import Added, InnerFiring, ParamChanged, Removed, Toggled
+from petritype.core.events import Added, InnerFiring, ParamChanged, PlaceKey, Removed, Toggled
 from petritype.core.type_comparisons import CompareTypes
 
 _log = logging.getLogger(__name__)
@@ -174,17 +176,20 @@ class ExecutionMode(Enum):
 @dataclass
 class Extend:
     """Append a list of tokens to a place. The argument is *always* a list of tokens; a
-    single token is a one-element list (`[token]`)."""
+    single token is a one-element list (`[token]`). ``place`` is a place's name, or a port
+    of a subnet place by its pair, ``Port("Level 3", "Lobby")``: the net driven tells the
+    change, naming the pair, and the port's subnet mints the new tokens' ids."""
 
-    place: str
+    place: PlaceKey
     tokens: list
 
 
 @dataclass
 class SetTokens:
-    """Replace a place's tokens with the provided list. `[]` clears the place."""
+    """Replace a place's tokens with the provided list. `[]` clears the place. ``place``
+    is a ``PlaceKey``, as for ``Extend``."""
 
-    place: str
+    place: PlaceKey
     tokens: list
 
 
@@ -484,6 +489,10 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
         place = graph.place_named(cmd.place)
         if place is None:
             return _reject(ctx, f"unknown place {cmd.place!r}")
+        if isinstance(place, SubnetPlaceNode):
+            return _reject(
+                ctx, f"{cmd.place!r} is a subnet place, which holds no tokens of its own; name one of its ports",
+            )
         if not isinstance(cmd.tokens, list):
             return _reject(
                 ctx, f"{type(cmd).__name__}.tokens must be a list, got {type(cmd.tokens).__name__}"
@@ -498,13 +507,15 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
                     NestedNets.ensure_nested_token(token, place)
                 except TypeError as error:
                     return _reject(ctx, str(error))
+        # Told by this net, under the place as it names it (a port by its pair);
+        # a port's new ids are its subnet's.
         if isinstance(cmd, SetTokens):
             for token_id in place.token_ids:
-                GraphEvents.record(graph, Removed(place.name, token_id))
+                GraphEvents.record(graph, Removed(cmd.place, token_id))
             place.tokens = []
             place._token_ids = []
-        for token_id in TokenIds.append(graph, place, list(cmd.tokens)):
-            GraphEvents.record(graph, Added(place.name, token_id))
+        for token_id in TokenIds.append(TokenIds.minter(graph, cmd.place), place, list(cmd.tokens)):
+            GraphEvents.record(graph, Added(cmd.place, token_id))
         return True
 
     if isinstance(cmd, SetParam):
@@ -727,9 +738,10 @@ async def _fire_inner(ctx: RunContext, part: str, held: frozenset = frozenset())
     inline, among the turns of one part of the outer net's round
     (``NestedNets.take_turn``): ``"ahead"`` of its launch sweep, or ``"behind"`` it,
     where the outer-first places wait until nothing outer is in flight. The tokens
-    in ``held`` are skipped. The fuse is checked first, against what that part could
-    fire. Counted on the graph as the sequential path counts an inner firing, and
-    tallied. Returns True iff something fired."""
+    in ``held`` are skipped, and so is the subnet of a subnet place while a body in
+    flight (``graph.in_flight``) has an edge on one of its ports. The fuse is checked
+    first, against what that part could fire. Counted on the graph as the sequential
+    path counts an inner firing, and tallied. Returns True iff something fired."""
     graph = ctx.graph
     if not NestedNets.any_nested(graph):
         return False

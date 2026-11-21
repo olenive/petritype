@@ -582,6 +582,55 @@ inner transition and by `Arrive`.
   PROTOCOL.md §11 fixes the redesigned net, and `tests/protocol/05_nested_nets.json` was
   re-recorded with `tests/record_transcript.py` (`DESIGN_RUNNER.md`).
 
+## As built, 2026-11-21: subnet places
+
+The library side of `petritype-rs/dev-docs/subnet-place-spec.md` (§1 and §5), the wire side
+being PROTOCOL.md §12.7. A place may hold a net of its own for the whole life of the net
+around it, beside the nets tokens carry.
+
+- **Declaring.** `SubnetPlaceNode(name, graph, stepping="inner_first")` stands among a net's
+  places and holds one built net, its subnet. The subnet's definition marks its ports,
+  `ListPlaceNode(..., port=True)`, each an ordinary place or a nested one; a subnet place
+  cannot be one. An edge of the outer net names a port by `Port(subnet place, port)` where
+  it would name a place (`PlaceKey`, a name or that pair), and nothing else of the subnet.
+  The build refuses a port the subnet does not have, an edge whose type does not fit the
+  port's, an edge on the subnet place itself, a `Port` beside a place that is not a subnet
+  place, a subnet place marked as a port, and one net given to two subnet places.
+- **One place, two views.** The outer net's maps (`MapPlaceNames.to_list_place_nodes`) key
+  a port by its pair and point at the subnet's own `ListPlaceNode`, so both nets use the
+  one list and the one id list, and nothing ever moves. The engine names places by the key
+  its edges give, in the firing's ids and in stage 2's routing, where two ports may share a
+  name; a deposit into a port takes its ids from the subnet's counter (`TokenIds.minter`),
+  whichever net makes it. `place_named` takes a pair too, and a name alone never finds a
+  port. The Rust core tried moving a port's queue into the outer net for the length of a
+  firing and gave it up; Python never moves it.
+- **Events.** A change is told once, by the net through which it was made: an outer firing,
+  `Extend`/`SetTokens` or `NestedNets.put`/`take` through the outer net, names the pair in
+  the outer log; a firing of the subnet names the place by its own name and is lifted as
+  `Nested`, its path step naming the subnet place with no token, `PathStep("Level 3")`. A
+  firing inside is an `InnerFiring` with that path, as for a token's net.
+- **Stepping.** `NestedNets.walk` yields a subnet as one net at its place's position, so
+  the three bands of the deep step, the fuse, quiescence and both runtimes take it in with
+  no logic of their own. While a transition with an edge on one of a subnet's ports is in
+  `in_flight`, the subnet is left out of the deep step (`NestedNets.held_subnets`), and the
+  program's `NestedNets.subnet_scope`, its way to step or change a subnet, raises
+  `SubnetHeldError`; `ExecutableGraph.subnet(name)` reads one at any time.
+- **Saving.** A subnet place's entry in a marking is a list of one, its subnet's saved form;
+  a port's tokens are written once, in the subnet's marking; a subnet built without a
+  template refuses to be saved, naming its place. Loading fills the subnet the outer net
+  already holds and is checked at every depth before anything changes; a subnet place left
+  out of a marking loads its subnet's marking empty. A deep copy copies every subnet as a
+  new net. Stepping rules are not saved.
+- **Drawing.** A subnet place is a `Mrecord` node, a box with rounded corners, its title
+  and a cell per port with the port's name and count; an edge on a port ends at its cell
+  (`headport` or `tailport`), and in the subnet's own drawing a port has `peripheries=2`.
+
+Example: `examples/subnet_places/levels.py`, a world of two levels built from one template
+`Level`, heroes entering through `Lobby` and leaving through `Exit Hall`, with its notebook
+`levels_journey.py` (21 firings, pinned by `tests/test_notebooks.py`). Tests:
+`tests/test_subnet_places.py`. The protocol runner refuses to load a net with a subnet place
+until it serves them (PROTOCOL.md §12.7).
+
 ---
 
 # Token keys, queries and filters

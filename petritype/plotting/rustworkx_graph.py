@@ -8,18 +8,19 @@ require("rustworkx", "viz")
 from rustworkx import PyDiGraph
 
 from petritype.core.data_structures import (
-    ArgumentName, FunctionFullName, NodeIndex, PlaceNodeName, ReturnIndex, TransitionNodeName, TypeName,
+    ArgumentName, FunctionFullName, NodeIndex, ReturnIndex, TransitionNodeName, TypeName,
     TypeRelationship
 )
+from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition, DrainEdge, ExecutableGraph, MutateEdge, ReturnedEdgeFromTransition, SnapshotEdge,
-    SurveyEdge,
+    SubnetPlaceNode, SurveyEdge,
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
 
 
 class RustworkxArgumentEdgeData(BaseModel):
-    source_place_node_name: PlaceNodeName
+    source_place_node_name: PlaceKey  # a place's name, or a port's Port pair
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
     drain: bool = False  # True for DrainEdge: takes every token, zero or more
@@ -40,7 +41,7 @@ class RustworkxArgumentEdgeData(BaseModel):
 
 class RustworkxReturnedEdgeData(BaseModel):
     source_transition_node_name: TransitionNodeName
-    target_place_node_name: PlaceNodeName
+    target_place_node_name: PlaceKey  # a place's name, or a port's Port pair
     return_index: Optional[ReturnIndex]
 
     def __hash__(self):
@@ -57,7 +58,7 @@ class RustworkxReturnedEdgeData(BaseModel):
 
 
 class RustworkxReadEdgeData(BaseModel):
-    source_place_node_name: PlaceNodeName
+    source_place_node_name: PlaceKey  # a place's name, or a port's Port pair
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
     mutate: bool  # True for MutateEdge (read/write), False for SnapshotEdge (read-only copy)
@@ -105,7 +106,7 @@ class RustworkxGraph:
 
     def argument_edges_to_transitions(
         edges_to_transitions: Iterable[ArgumentEdgeToTransition],
-        place_names_to_indices: dict[PlaceNodeName, NodeIndex],
+        place_names_to_indices: dict[PlaceKey, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
     ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxArgumentEdgeData]]:
         out = []
@@ -126,7 +127,7 @@ class RustworkxGraph:
 
     def returned_edges_from_transitions(
         edges_from_transitions: Iterable[ReturnedEdgeFromTransition],
-        place_names_to_indices: dict[PlaceNodeName, NodeIndex],
+        place_names_to_indices: dict[PlaceKey, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
     ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxReturnedEdgeData]]:
         out = []
@@ -147,7 +148,7 @@ class RustworkxGraph:
     def read_edges_to_transitions(
         snapshot_edges: Iterable[SnapshotEdge],
         mutate_edges: Iterable[MutateEdge],
-        place_names_to_indices: dict[PlaceNodeName, NodeIndex],
+        place_names_to_indices: dict[PlaceKey, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
     ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxReadEdgeData]]:
         out = []
@@ -167,13 +168,19 @@ class RustworkxGraph:
         return tuple(out)
 
     def from_executable_graph(executable_graph: ExecutableGraph) -> PyDiGraph:
+        """The net as a rustworkx graph: one node per place and per transition, one
+        edge per edge. A subnet place is one node, its ports are not nodes of their
+        own: an edge on a port joins the subnet place's node, and its data keeps the
+        port's ``Port`` pair, so a drawing can end it at the port's cell."""
         graph = PyDiGraph()
         place_node_indices = graph.add_nodes_from(executable_graph.places)
         transition_node_indices = graph.add_nodes_from(executable_graph.transitions)
-        place_names_to_indices = {
-            place.name: index
-            for index, place in zip(place_node_indices, executable_graph.places)
-        }
+        place_names_to_indices: dict[PlaceKey, NodeIndex] = {}
+        for index, place in zip(place_node_indices, executable_graph.places):
+            place_names_to_indices[place.name] = index
+            if isinstance(place, SubnetPlaceNode):
+                for port in place.ports:
+                    place_names_to_indices[Port(place.name, port.name)] = index
         transition_names_to_indices = {
             transition.name: index
             for index, transition in zip(transition_node_indices, executable_graph.transitions)

@@ -16,9 +16,9 @@ from rustworkx.visualization import graphviz_draw  # noqa: E402
 
 from petritype.core.executable_graph_components import (
     ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
-    ExecutableGraph, ExecutableGraphOperations
+    ExecutableGraph, ExecutableGraphOperations, SubnetPlaceNode,
 )
-from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
+from petritype.plotting.rustworkx_to_graphviz import NodeLabel, RustworkxToGraphviz
 
 
 class SimpleGraphvizVisualization:
@@ -36,11 +36,22 @@ class SimpleGraphvizVisualization:
 
     def flow_node_attr_fn(node):
         if isinstance(node, ListPlaceNode):
-            return {
+            attrs = {
                 "label": SimpleGraphvizVisualization.place_node_label(node),
                 'color': 'deepskyblue',
                 'style': 'filled',
                 'shape': 'oval'
+            }
+            if node.port:
+                attrs['peripheries'] = '2'  # a port of this net: the border, seen from inside
+            return attrs
+        elif isinstance(node, SubnetPlaceNode):
+            # Closed: a box with rounded corners, a cell per port (NodeLabel.subnet_place).
+            return {
+                "label": NodeLabel.subnet_place(node),
+                'color': 'lightskyblue',
+                'style': 'filled',
+                'shape': 'Mrecord'
             }
         elif isinstance(node, FunctionTransitionNode):
             return {
@@ -53,9 +64,13 @@ class SimpleGraphvizVisualization:
             raise ValueError("Invalid node data type.")
 
     def graph(executable_pydigraph, method: str = 'dot'):
+        """The drawing of a net's rustworkx graph; an edge on a port of a subnet
+        place ends at the port's cell."""
+        cells = NodeLabel.port_cells(executable_pydigraph.nodes())
         return graphviz_draw(
             executable_pydigraph,
             node_attr_fn=SimpleGraphvizVisualization.flow_node_attr_fn,
+            edge_attr_fn=lambda edge: NodeLabel.edge_port(edge, cells),
             method=method,
         )
 

@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TypeAliasType
@@ -13,8 +14,8 @@ import warnings
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
 from petritype.core.events import (
-    Added, Event, Failed, Fired, InnerFiring, Mutated, Nested, ParamChanged, PathStep, PlaceTokenId, Removed,
-    Resynced,
+    Added, Event, Failed, Fired, InnerFiring, Mutated, Nested, ParamChanged, PathStep, PlaceKey, PlaceTokenId, Port,
+    Removed, Resynced,
 )
 from petritype.core.type_comparisons import CompareTypes
 from petritype.helpers.structures import SafeMerge
@@ -104,6 +105,26 @@ class LaunchNotificationError(RuntimeError):
         )
 
 
+class SubnetHeldError(RuntimeError):
+    """The program asked to step or change a subnet (``NestedNets.subnet_scope``)
+    while a firing of the net around it on one of its ports is in flight: the
+    subnet is held still until that firing lands.
+
+    Attributes:
+        place: The subnet place.
+        transition_name: The first transition in flight, in declaration order,
+            with an edge on one of the subnet's ports.
+    """
+
+    def __init__(self, place: str, transition_name: str):
+        self.place = place
+        self.transition_name = transition_name
+        super().__init__(
+            f"the subnet of {place!r} is held still while {transition_name!r}, which has an edge on one of its "
+            f"ports, is in flight"
+        )
+
+
 class PositionalArgsBaseModel(BaseModel):
     """Base class that enables positional arguments for Pydantic models."""
     
@@ -143,6 +164,13 @@ class ListPlaceNode(PositionalArgsBaseModel):
     attribute names (each read with ``getattr``). Given as a sequence it is
     stored as the dict. Key values are strings, integers or booleans; what a
     query filters on and what the wire carries as a token's ``keys``.
+
+    ``port`` marks the place as a port of its net: when the net is the subnet of
+    a subnet place (``SubnetPlaceNode``), the net around it reaches this place,
+    and no other, by the pair ``Port(subnet place, name)``. The place stays the
+    net's own, with its one list of tokens and its ids, minted by this net,
+    whichever net looks at it. A port is an ordinary place or a nested one; its
+    keys and its stepping rule are this net's to declare.
     """
     name: PlaceNodeName
     type: Any  # Temporarily accept any value  
@@ -150,6 +178,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
     nested: bool = False
     stepping: Optional[Stepping] = None
     keys: Optional[dict[str, Callable[[Any], Any]]] = None
+    port: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -222,7 +251,9 @@ class ListPlaceNode(PositionalArgsBaseModel):
         return self
 
     def copy_sans_tokens(self) -> "ListPlaceNode":
-        return ListPlaceNode(self.name, self.type, nested=self.nested, stepping=self.stepping, keys=self.keys)
+        return ListPlaceNode(
+            self.name, self.type, nested=self.nested, stepping=self.stepping, keys=self.keys, port=self.port,
+        )
 
     @property
     def key_names(self) -> tuple[str, ...]:
@@ -290,14 +321,19 @@ class FunctionTransitionNode(PositionalArgsBaseModel):
 
 
 class ArgumentEdgeToTransition(PositionalArgsBaseModel):
-    place_node_name: PlaceNodeName
+    """A consuming edge (place -> transition). Every edge names its place by a
+    ``PlaceKey``: a place of the net by its name, or a port of one of the net's
+    subnet places by the pair, ``Port("Level 3", "Lobby")``, which every edge
+    kind accepts where it would take a name."""
+    place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
 
 
 class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
+    """A producing edge (transition -> place), its place a name or a ``Port``."""
     transition_node_name: FunctionName
-    place_node_name: PlaceNodeName
+    place_node_name: PlaceKey
     return_index: Optional[ReturnIndex] = None
 
 
@@ -334,7 +370,7 @@ class SnapshotEdge(PositionalArgsBaseModel):
     """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
     snapshot** of the place's tokens, so reading cannot disturb the place. Fireability requires
     the place to be non-empty (presence), but firing does not consume the tokens."""
-    place_node_name: PlaceNodeName
+    place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
 
@@ -352,7 +388,7 @@ class MutateEdge(PositionalArgsBaseModel):
     """A non-consuming read/write edge (place -> transition). The transition receives the
     **live** tokens and may modify them in place; they stay in the place (not consumed) but may
     be changed. Fireability requires the place to be non-empty (presence)."""
-    place_node_name: PlaceNodeName
+    place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
 
@@ -478,10 +514,16 @@ class ExecutableGraph(BaseModel):
     Deep stepping: ``fire_one_transition`` with ``descend`` (so ``execute_graph``,
     the sequential ``Runner`` and the protocol runner's ``step`` too) makes one deep
     step, which fires at most one transition in this net or in a net inside its
-    tokens, in the order each nested place's ``stepping`` rule gives
-    (``NestedNets``, PROTOCOL.md §12.3).
+    tokens or its subnet places, in the order each such place's ``stepping`` rule
+    gives (``NestedNets``, PROTOCOL.md §12.3).
+
+    Subnet places: ``places`` may hold ``SubnetPlaceNode`` entries beside the
+    ``ListPlaceNode`` ones, each holding a net of its own for this net's whole
+    life. This net's edges reach a subnet through its port places only, named by
+    ``Port(subnet place, port)``; ``place_named`` takes such a pair too, and
+    ``subnet`` gives the net a subnet place holds.
     """
-    places: Sequence[ListPlaceNode]
+    places: Sequence[Union[ListPlaceNode, "SubnetPlaceNode"]]
     transitions: Sequence[FunctionTransitionNode]
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
@@ -652,11 +694,26 @@ class ExecutableGraph(BaseModel):
         self._last_pick = None
         self._ring_cursor = None
 
-    def place_named(self, name: str) -> Optional[ListPlaceNode]:
+    def place_named(self, name: PlaceKey) -> Optional[Union[ListPlaceNode, "SubnetPlaceNode"]]:
+        """The place of this net with this name, a subnet place included, or, for
+        a ``Port`` pair, the port place of that subnet place, which is a place of
+        the subnet. ``None`` if there is none. A name alone never finds a port:
+        ``place_named("Lobby")`` is this net's own ``Lobby`` or nothing."""
+        if isinstance(name, Port):
+            holder = self.place_named(name.place)
+            return holder.port_named(name.port) if isinstance(holder, SubnetPlaceNode) else None
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
         if len(set(place_names_to_nodes.keys())) != len(place_names_to_nodes.keys()):
             raise ValueError("Duplicate place names found!")
         return place_names_to_nodes.get(name)
+
+    def subnet(self, name: str) -> Optional["ExecutableGraph"]:
+        """The net the subnet place ``name`` holds, or ``None`` if ``name`` is no
+        subnet place of this net. For reading: to step or change a subnet from the
+        program, use ``NestedNets.subnet_scope``, which holds it still while a
+        firing of this net on one of its ports is in flight."""
+        place = self.place_named(name) if isinstance(name, str) else None
+        return place.graph if isinstance(place, SubnetPlaceNode) else None
 
     def transition_named(self, name: str) -> Optional[FunctionTransitionNode]:
         for transition in self.transitions:
@@ -679,30 +736,41 @@ class ExecutableGraph(BaseModel):
         return values
     
     @model_validator(mode="before")
+    def check_subnet_places(cls, values):
+        """A subnet place holds a net of its own: the same net in two subnet
+        places of one net would be stepped and told twice."""
+        holders: dict[int, str] = {}
+        for place in values.get('places', []):
+            if isinstance(place, SubnetPlaceNode):
+                first = holders.setdefault(id(place.graph), place.name)
+                if first != place.name:
+                    raise ValueError(
+                        f"subnet places {first!r} and {place.name!r} are given the same net; each holds one of its own"
+                    )
+        return values
+
+    @model_validator(mode="before")
     def check_edge_names(cls, values):
         places = values.get('places', [])
         transitions = values.get('transitions', [])
         argument_edges = values.get('argument_edges', [])
         return_edges = values.get('return_edges', [])
         
-        place_names = {place.name for place in places}
+        places_by_name = {place.name: place for place in places}
         transition_names = {transition.name for transition in transitions}
-        
+
         for edge in argument_edges:
-            if edge.place_node_name not in place_names:
-                raise ValueError(f"Argument edge references unknown place: {edge.place_node_name}")
+            _edge_place(places_by_name, edge.place_node_name, "Argument", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Argument edge references unknown transition: {edge.transition_node_name}")
         
         for edge in return_edges:
-            if edge.place_node_name not in place_names:
-                raise ValueError(f"Return edge references unknown place: {edge.place_node_name}")
+            _edge_place(places_by_name, edge.place_node_name, "Return", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Return edge references unknown transition: {edge.transition_node_name}")
 
         for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
-            if edge.place_node_name not in place_names:
-                raise ValueError(f"Read edge references unknown place: {edge.place_node_name}")
+            _edge_place(places_by_name, edge.place_node_name, "Read", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Read edge references unknown transition: {edge.transition_node_name}")
 
@@ -714,13 +782,13 @@ class ExecutableGraph(BaseModel):
         transitions = values.get('transitions', [])
         argument_edges = values.get('argument_edges', [])
         return_edges = values.get('return_edges', [])
-        place_names_to_nodes = {place.name: place for place in places}
+        places_by_name = {place.name: place for place in places}
         transition_names_to_nodes = {transition.name: transition for transition in transitions}
 
         for edge in argument_edges:
             if not isinstance(edge, ArgumentEdgeToTransition):
                 raise TypeError(f"Expected ArgumentEdgeToTransition, got {type(edge)}")
-            place = place_names_to_nodes[edge.place_node_name]
+            place = _edge_place(places_by_name, edge.place_node_name, "Argument", edge.transition_node_name)
             if not isinstance(place, ListPlaceNode):
                 raise NotImplementedError("Currently only ListPlaceNode is supported.")
             transition = transition_names_to_nodes[edge.transition_node_name]
@@ -739,7 +807,7 @@ class ExecutableGraph(BaseModel):
                     # at once as a list.
                 ):
                     raise TypeError(
-                        f"Type mismatch for argument edge from place '{place.name}' to transition "
+                        f"Type mismatch for argument edge from {_place_words(edge.place_node_name)} to transition "
                         f"'{transition.name}': place type '{place_type}' does not match argument type "
                         f"'{argument_type}'."
                     )
@@ -747,7 +815,7 @@ class ExecutableGraph(BaseModel):
         for edge in return_edges:
             if not isinstance(edge, ReturnedEdgeFromTransition):
                 raise TypeError(f"Expected ReturnedEdgeFromTransition, got {type(edge)}")
-            place = place_names_to_nodes[edge.place_node_name]
+            place = _edge_place(places_by_name, edge.place_node_name, "Return", edge.transition_node_name)
             if not isinstance(place, ListPlaceNode):
                 raise NotImplementedError("Currently only ListPlaceNode is supported.")
             transition = transition_names_to_nodes[edge.transition_node_name]
@@ -765,7 +833,7 @@ class ExecutableGraph(BaseModel):
                 # element at return_index, not the whole return value.
                 if get_origin(return_type) is not tuple:
                     raise TypeError(
-                        f"Return edge from transition '{transition.name}' to place '{place.name}' has "
+                        f"Return edge from transition '{transition.name}' to {_place_words(edge.place_node_name)} has "
                         f"return_index={edge.return_index} but the return annotation '{return_type}' "
                         f"is not a tuple."
                     )
@@ -776,7 +844,7 @@ class ExecutableGraph(BaseModel):
                     return_type = tuple_args[edge.return_index]
                 else:
                     raise TypeError(
-                        f"Return edge from transition '{transition.name}' to place '{place.name}' has "
+                        f"Return edge from transition '{transition.name}' to {_place_words(edge.place_node_name)} has "
                         f"return_index={edge.return_index} but the return annotation '{return_type}' "
                         f"only has {len(tuple_args)} elements."
                     )
@@ -800,8 +868,8 @@ class ExecutableGraph(BaseModel):
                     for candidate in candidate_types
                 ):
                     raise TypeError(
-                        f"Type mismatch for return edge from transition '{transition.name}' to place "
-                        f"'{place.name}': place type '{place_type}' does not match return type "
+                        f"Type mismatch for return edge from transition '{transition.name}' to "
+                        f"{_place_words(edge.place_node_name)}: place type '{place_type}' does not match return type "
                         f"'{return_type}'."
                     )
 
@@ -818,7 +886,7 @@ class ExecutableGraph(BaseModel):
                 )
 
         for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
-            place = place_names_to_nodes[edge.place_node_name]
+            place = _edge_place(places_by_name, edge.place_node_name, "Read", edge.transition_node_name)
             transition = transition_names_to_nodes[edge.transition_node_name]
             place_type = place.type
             argument_type = get_type_hints(transition.function).get(edge.argument)
@@ -830,12 +898,117 @@ class ExecutableGraph(BaseModel):
                     annotation2=argument_type,
                 ):
                     raise TypeError(
-                        f"Type mismatch for read edge from place '{place.name}' to transition "
+                        f"Type mismatch for read edge from {_place_words(edge.place_node_name)} to transition "
                         f"'{transition.name}': place type '{place_type}' does not match argument type "
                         f"'{argument_type}'."
                     )
 
         return values
+
+
+class SubnetPlaceNode(PositionalArgsBaseModel):
+    """A subnet place: a place of the net that holds one net of its own, its
+    **subnet**, given when the net is built and kept for the net's whole life.
+
+    ``SubnetPlaceNode("Level 3", build_level(), stepping="inner_first")``. The
+    subnet is a separate net, with its own marking, token ids, parameters and
+    log, and the net around it reaches it only through its **port places**: the
+    places its own definition marks ``ListPlaceNode(..., port=True)``. An edge of
+    the outer net names one by the pair, ``Port("Level 3", "Lobby")``, where it
+    would name a place, and every edge kind, every way of choosing an output,
+    guards, keyed edges, queries and outside input then use it as a place of
+    the outer net. The port keeps its one list of tokens in the subnet, the same
+    list whichever net looks, and its ids are minted by the subnet. The subnet
+    place itself holds no tokens, and no edge may name it.
+
+    ``stepping`` is the place's stepping rule (``Stepping``), as for a place
+    whose tokens carry nets: a deep step of the outer net counts the subnet as
+    one net at this place's position. The rule is part of the definition, not
+    saved; it may be changed by assigning ``stepping``. A port's own stepping
+    rule, if it is a nested place, is the subnet's to give.
+
+    The subnet may be any built net. Built through a template (``Templates``)
+    it carries the template's name, and the outer net can then be saved,
+    restored and copied with it (``NetJson``); built without one it runs, and
+    the outer net cannot be saved.
+    """
+
+    name: PlaceNodeName
+    graph: ExecutableGraph
+    stepping: Stepping = "inner_first"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _not_a_port(cls, values):
+        """A port is an ordinary place or a nested one, so that no edge crosses two
+        borders: a net hands tokens to a subnet of its subnet by a transition of its
+        own, through a port of its own."""
+        if isinstance(values, dict) and "port" in values:
+            raise ValueError(
+                f"subnet place {values.get('name')!r} cannot be a port: a port is an ordinary place or a nested "
+                f"place, so that no edge crosses two borders"
+            )
+        return values
+
+    @property
+    def tokens(self) -> tuple:
+        """A subnet place holds no tokens of its own: always empty."""
+        return ()
+
+    @property
+    def ports(self) -> tuple[ListPlaceNode, ...]:
+        """The subnet's port places, in the subnet's declaration order."""
+        return tuple(place for place in self.graph.places if isinstance(place, ListPlaceNode) and place.port)
+
+    def port_named(self, name: str) -> Optional[ListPlaceNode]:
+        """The subnet's port place of that name, or ``None``: a place of the subnet
+        that is not marked as a port cannot be reached from outside."""
+        return next((place for place in self.ports if place.name == name), None)
+
+
+def _place_words(key: PlaceKey) -> str:
+    """A place an edge names, for a message: ``place 'Door'``, or ``port 'Lobby'
+    of subnet place 'Level 3'``."""
+    if isinstance(key, Port):
+        return f"port '{key.port}' of subnet place '{key.place}'"
+    return f"place '{key}'"
+
+
+def _edge_place(
+    places_by_name: dict[str, Union[ListPlaceNode, SubnetPlaceNode]], key: PlaceKey, edge_kind: str,
+    transition_name: str,
+) -> ListPlaceNode:
+    """The place an edge of ``transition_name`` reaches by ``key``: a place of the
+    net by its name, or a port place of one of its subnet places by the pair.
+    Raises ``ValueError`` for a name that is no place, an edge on a subnet place
+    itself, a ``Port`` beside a place that is not a subnet place, and a port the
+    subnet does not have (a place of the subnet that is not marked as a port
+    included)."""
+    if isinstance(key, Port):
+        holder = places_by_name.get(key.place)
+        if holder is None:
+            raise ValueError(f"{edge_kind} edge references unknown place: {key.place}")
+        if not isinstance(holder, SubnetPlaceNode):
+            raise ValueError(
+                f"{edge_kind} edge of transition {transition_name!r} names Port({key.place!r}, {key.port!r}), "
+                f"but {key.place!r} is not a subnet place"
+            )
+        port = holder.port_named(key.port)
+        if port is None:
+            raise ValueError(f"subnet place {key.place!r} has no port {key.port!r}")
+        return port
+    place = places_by_name.get(key)
+    if place is None:
+        raise ValueError(f"{edge_kind} edge references unknown place: {key}")
+    if isinstance(place, SubnetPlaceNode):
+        raise ValueError(
+            f"transition {transition_name!r} has an edge on subnet place {key!r}, which holds no tokens of its "
+            f"own; an edge reaches it through one of its ports, Port({key!r}, port)"
+        )
+    return place
+
+
+ExecutableGraph.model_rebuild()
 
 
 @dataclass
@@ -844,9 +1017,10 @@ class FiringTokenIds:
     goes: stage 1 records what it consumed (per argument, in the order taken) and
     what it handed over through mutate edges; stage 3 records what it deposited.
     ``restore_argument_tokens_to_places`` reads ``consumed`` to put the same ids back.
+    Places are named by their ``PlaceKey``, a port by its ``Port`` pair.
     """
 
-    consumed: dict[ArgumentName, tuple[PlaceNodeName, list[int]]] = field(default_factory=dict)
+    consumed: dict[ArgumentName, tuple[PlaceKey, list[int]]] = field(default_factory=dict)
     mutated: list[PlaceTokenId] = field(default_factory=list)
     produced: list[PlaceTokenId] = field(default_factory=list)
 
@@ -859,6 +1033,10 @@ class TokenIds:
     moves ids together with tokens; code that assigns or resizes ``place.tokens``
     directly bypasses them, which ``resync`` detects and repairs at each engine
     entry point.
+
+    A port place's ids are its subnet's: whichever net puts a token into a port,
+    the subnet's counter mints its id (``minter``), so a port has one set of ids,
+    in increasing order of arrival, whichever net looks.
     """
 
     def allocate(executable_graph: ExecutableGraph, count: int) -> list[int]:
@@ -867,15 +1045,30 @@ class TokenIds:
         executable_graph.next_token_id = start + count
         return list(range(start, start + count))
 
+    def minter(executable_graph: ExecutableGraph, place: PlaceKey) -> ExecutableGraph:
+        """The net whose counter mints the ids of tokens entering the place this
+        net names ``place``: the subnet, for a ``Port`` pair; this net, for a name."""
+        if isinstance(place, Port):
+            subnet = executable_graph.subnet(place.place)
+            if subnet is None:
+                raise KeyError(f"no subnet place {place.place!r}")
+            return subnet
+        return executable_graph
+
     def seed(executable_graph: ExecutableGraph) -> None:
         """Give every token already in a place a fresh id, place by place in
-        declaration order. Called once, when the graph is constructed."""
+        declaration order. Called once, when the graph is constructed; a subnet's
+        tokens were given theirs when the subnet was."""
         for place in executable_graph.places:
-            place._token_ids = TokenIds.allocate(executable_graph, len(place.tokens))
+            if isinstance(place, ListPlaceNode):
+                place._token_ids = TokenIds.allocate(executable_graph, len(place.tokens))
 
     def resync(executable_graph: ExecutableGraph) -> tuple[PlaceNodeName, ...]:
         """Re-id every place whose token list and id list differ in length, and
         record a ``Resynced`` event for each. Returns the names of the places re-ided.
+        The subnets of this net's subnet places are resynced too, each by its own
+        counter and in its own log, since their ports are places this net's
+        transitions reach; the names returned are this net's own places.
 
         A length check is all it can do: code that swaps a token for another in
         place, keeping the length, goes unseen and the old id names the new token.
@@ -884,6 +1077,9 @@ class TokenIds:
         """
         resynced = []
         for place in executable_graph.places:
+            if isinstance(place, SubnetPlaceNode):
+                TokenIds.resync(place.graph)
+                continue
             if len(place._token_ids) != len(place.tokens):
                 place._token_ids = TokenIds.allocate(executable_graph, len(place.tokens))
                 GraphEvents.record(executable_graph, Resynced(place.name))
@@ -900,9 +1096,14 @@ class TokenIds:
     def locate(executable_graph: ExecutableGraph, token_id: int) -> Optional[tuple[PlaceNodeName, Any]]:
         """``(place_name, token)`` for the live token with this id, or None if no
         place holds it (consumed, removed, or never issued). Resyncs first, so a
-        place whose tokens were assigned directly answers with its fresh ids."""
+        place whose tokens were assigned directly answers with its fresh ids.
+        Only this net's own places are searched: a port's tokens carry their
+        subnet's ids, which may equal ids of this net's own, so one is located
+        through its subnet."""
         TokenIds.resync(executable_graph)
         for place in executable_graph.places:
+            if not isinstance(place, ListPlaceNode):
+                continue
             for index, candidate in enumerate(place._token_ids):
                 if candidate == token_id:
                     return place.name, place.tokens[index]
@@ -1009,11 +1210,13 @@ class Member:
 
 
 class NestedNets:
-    """Functions over tokens that hold Petri nets of their own (nets as tokens).
+    """Functions over the nets a net holds in its places: the nets carried by
+    tokens (nets as tokens) and the subnets of subnet places.
 
     A token of a place declared ``nested=True`` must be an ``ExecutableGraph`` (its
     one inner net is unnamed, ``""``) or implement ``__petritype_nets__(self) ->
-    dict[str, ExecutableGraph]`` naming the nets it holds. The outer net then:
+    dict[str, ExecutableGraph]`` naming the nets it holds. A ``SubnetPlaceNode``
+    holds one net, its subnet, for the outer net's whole life. The outer net then:
 
     - runs the inner nets as part of running itself, by one **deep step** at a
       time (``fire_one_transition`` with ``descend``), in the order the places'
@@ -1021,8 +1224,15 @@ class NestedNets:
     - gathers their events into its own log as ``Nested`` records (``drain``), with
       the path to the net they happened in and the net's stable ``net_id``;
     - lets an outer body reach inside the tokens it holds (``put``, ``take``,
-      ``set_param``), which is the only coupling: no place is shared, no inner
-      transition sees the outer net.
+      ``set_param``), and its edges reach a subnet's port places, which is the
+      only coupling: the one place a net shares is a port, with its own subnet,
+      and no inner transition sees the outer net.
+
+    A subnet is one net at its place's position in walk order, under its place's
+    rule, and its path step names the place alone, ``PathStep("Level 3")``. While
+    a firing of the outer net that touches one of a subnet's ports is in flight
+    (launched and not yet landed), the subnet takes no turn (``members``), and
+    the program cannot step or change it (``subnet_scope``).
 
     One deep step of a net fires at most one transition, in that net or anywhere
     below it (PROTOCOL.md §12.3). It tries three bands in this order and stops at
@@ -1083,17 +1293,28 @@ class NestedNets:
             raise TypeError(f"Place {place.name!r} is nested but its token cannot hold nets: {error}") from error
 
     def any_nested(executable_graph: ExecutableGraph) -> bool:
-        return any(place.nested for place in executable_graph.places)
+        """Whether a place of this net holds nets: a nested place or a subnet place."""
+        return any(isinstance(place, SubnetPlaceNode) or place.nested for place in executable_graph.places)
+
+    def holds_nets_in(place: Union[ListPlaceNode, "SubnetPlaceNode"]) -> bool:
+        """Whether ``place`` holds nets, so has a stepping rule: a subnet place, or
+        a place whose tokens carry nets."""
+        return isinstance(place, SubnetPlaceNode) or place.nested
 
     def walk(executable_graph: ExecutableGraph) -> Iterator[tuple[PathStep, ExecutableGraph]]:
         """Yield ``(step, inner)`` for every inner net one level down, in walk order
         (places in declaration order, a place's tokens oldest first, a token's nets
-        in their declared order), passive places included. The step is as the
-        marking stands now. It only reads: a token that has no id yet, because code
-        appended to ``place.tokens`` directly, is left out until the next engine
-        entry point resyncs its place (``TokenIds.resync``), which every deep step
-        does first."""
+        in their declared order, a subnet place's subnet as one net at its place's
+        position), passive places included. The step is as the marking stands now.
+        It only reads: a token that has no id yet, because code appended to
+        ``place.tokens`` directly, is left out until the next engine entry point
+        resyncs its place (``TokenIds.resync``), which every deep step does first.
+        The nets of tokens in a subnet's ports are the subnet's, one level further
+        down."""
         for place in executable_graph.places:
+            if isinstance(place, SubnetPlaceNode):
+                yield PathStep(place.name), place.graph
+                continue
             if not place.nested:
                 continue
             for token_id, token in zip(list(place._token_ids), list(place.tokens)):
@@ -1131,7 +1352,14 @@ class NestedNets:
             if not isinstance(step, PathStep):
                 raise LookupError(f"a path is a sequence of PathStep values, not {step!r}")
             place = graph.place_named(step.place)
-            if place is None or not place.nested:
+            if step.is_subnet:
+                if step.net is not None:
+                    raise LookupError(f"a step that names a net names a token: {step!r}")
+                if not isinstance(place, SubnetPlaceNode):
+                    raise LookupError(f"no subnet place {step.place!r}")
+                graph = place.graph
+                continue
+            if not isinstance(place, ListPlaceNode) or not place.nested:
                 raise LookupError(f"no nested place {step.place!r}")
             TokenIds.resync(graph)
             try:
@@ -1162,13 +1390,40 @@ class NestedNets:
         order, each with its place's rule: a passive place's nets are left out,
         and so are the nets of a token in ``held``, ``(place, token id)`` pairs of
         tokens an outer body in flight has in hand through a mutate edge (the
-        concurrent runtime's), which no inner firing may touch meanwhile."""
-        rules = {place.name: place.stepping for place in executable_graph.places if place.nested}
+        concurrent runtime's), which no inner firing may touch meanwhile, and the
+        subnet of a subnet place one of whose ports a transition of this net in
+        flight has an edge on (``held_subnets``): until that firing lands, the
+        subnet takes no turn."""
+        rules = {
+            place.name: place.stepping for place in executable_graph.places if NestedNets.holds_nets_in(place)
+        }
+        still = NestedNets.held_subnets(executable_graph)
         return [
             Member(step, inner, rules[step.place])
             for step, inner in NestedNets.walk(executable_graph)
-            if rules[step.place] != "passive" and (step.place, step.token) not in held
+            if rules[step.place] != "passive" and (step.place, step.token) not in held and step.place not in still
         ]
+
+    def held_subnets(executable_graph: ExecutableGraph) -> dict[str, str]:
+        """The subnet places held still by a firing in flight: for each subnet place
+        one of whose ports a transition in ``in_flight`` has an edge on (input or
+        output, of any kind), the first such transition in declaration order."""
+        in_flight = executable_graph.in_flight
+        if not in_flight:
+            return {}
+        touching: dict[str, set[str]] = {}
+        for edge in (
+            *executable_graph.argument_edges, *executable_graph.return_edges,
+            *executable_graph.snapshot_edges, *executable_graph.mutate_edges,
+        ):
+            if isinstance(edge.place_node_name, Port) and edge.transition_node_name in in_flight:
+                touching.setdefault(edge.place_node_name.place, set()).add(edge.transition_node_name)
+        held = {}
+        for transition in executable_graph.transitions:
+            for place, names in touching.items():
+                if transition.name in names:
+                    held.setdefault(place, transition.name)
+        return held
 
     def turns(
         executable_graph: ExecutableGraph, part: Literal["ahead", "behind"], held: frozenset = frozenset(),
@@ -1300,27 +1555,40 @@ class NestedNets:
 
     # --- reaching inside, for outer bodies ---
 
-    def put(inner: ExecutableGraph, place_name: str, tokens: list) -> list[int]:
+    def token_place(executable_graph: ExecutableGraph, place: PlaceKey) -> ListPlaceNode:
+        """The place of ``executable_graph`` that holds tokens under ``place``: one
+        of its own by name, or a port of one of its subnet places by the pair.
+        ``KeyError`` naming it otherwise, a subnet place named alone included,
+        since it holds no tokens of its own."""
+        node = executable_graph.place_named(place)
+        if isinstance(node, SubnetPlaceNode):
+            raise KeyError(
+                f"{place!r} is a subnet place, which holds no tokens of its own; name one of its ports, "
+                f"Port({place!r}, port)"
+            )
+        if node is None:
+            raise KeyError(f"the net has no place {place!r}")
+        return node
+
+    def put(inner: ExecutableGraph, place_name: PlaceKey, tokens: list) -> list[int]:
         """Append ``tokens`` to a place of an inner net, type-checked, with fresh
-        ids, recording ``Added`` for each; returns the ids."""
-        place = inner.place_named(place_name)
-        if place is None:
-            raise KeyError(f"the inner net has no place {place_name!r}")
+        ids, recording ``Added`` for each; returns the ids. ``place_name`` may be a
+        port of one of the inner net's subnet places, ``Port(...)``: the inner net
+        tells the change, naming the pair, and the subnet mints the ids."""
+        place = NestedNets.token_place(inner, place_name)
         TokenIds.resync(inner)
         for token in tokens:
             ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
-        ids = TokenIds.append(inner, place, list(tokens))
+        ids = TokenIds.append(TokenIds.minter(inner, place_name), place, list(tokens))
         for token_id in ids:
-            GraphEvents.record(inner, Added(place.name, token_id))
+            GraphEvents.record(inner, Added(place_name, token_id))
         return ids
 
-    def take(inner: ExecutableGraph, place_name: str, count: int = 1) -> list:
+    def take(inner: ExecutableGraph, place_name: PlaceKey, count: int = 1) -> list:
         """Remove and return the ``count`` oldest tokens of a place of an inner net,
         recording ``Removed`` for each. Fewer than ``count`` present is an error
-        (nothing is taken)."""
-        place = inner.place_named(place_name)
-        if place is None:
-            raise KeyError(f"the inner net has no place {place_name!r}")
+        (nothing is taken). A port is named by its pair, as for ``put``."""
+        place = NestedNets.token_place(inner, place_name)
         TokenIds.resync(inner)
         if len(place.tokens) < count:
             raise ValueError(f"{place_name!r} holds {len(place.tokens)} tokens, not {count}")
@@ -1328,12 +1596,40 @@ class NestedNets:
         del place.tokens[:count]
         del place._token_ids[:count]
         for token_id in ids:
-            GraphEvents.record(inner, Removed(place.name, token_id))
+            GraphEvents.record(inner, Removed(place_name, token_id))
         return taken
 
     def set_param(inner: ExecutableGraph, name: str, value: Any) -> None:
         """``NetParams.set`` on an inner net."""
         NetParams.set(inner, name, value)
+
+    @contextmanager
+    def subnet_scope(executable_graph: ExecutableGraph, place: str) -> Iterator[ExecutableGraph]:
+        """``with NestedNets.subnet_scope(world, "Level 3") as level:`` the program's
+        way to step or change the subnet of a subnet place: the block gets the
+        subnet, and whatever it does there is told by the subnet, its events lifted
+        into ``executable_graph``'s log as the block ends. Refused with
+        ``SubnetHeldError`` while a firing of ``executable_graph`` on one of the
+        subnet's ports is in flight, since the subnet is held still until it lands;
+        ``LookupError`` if ``place`` is no subnet place. ``ExecutableGraph.subnet``
+        reads a subnet at any time."""
+        subnet = executable_graph.subnet(place)
+        if subnet is None:
+            raise LookupError(f"{place!r} is no subnet place of the net")
+        holder = NestedNets.held_subnets(executable_graph).get(place)
+        if holder is not None:
+            raise SubnetHeldError(place, holder)
+        subnet.record_events = executable_graph.record_events
+        try:
+            yield subnet
+        finally:
+            NestedNets.drain(executable_graph)
+
+    def token_count(executable_graph: ExecutableGraph) -> int:
+        """The number of tokens in a net's own places, its ports included; a subnet
+        place holds none of its own, and the tokens of its subnet are the subnet's
+        to count."""
+        return sum(len(place.tokens) for place in executable_graph.places if isinstance(place, ListPlaceNode))
 
     def holds_nets(token: Any) -> bool:
         """Whether ``token`` is a net or implements the nested-nets protocol."""
@@ -1346,9 +1642,7 @@ class NestedNets:
         a token that contains a net without printing the net. A token that is a
         net itself reads ``net: 3``. Cut at ``maximum_length`` with ``...``."""
         nets = NestedNets.of(token)
-        counts = ", ".join(
-            f"{name or 'net'}: {sum(len(place.tokens) for place in inner.places)}" for name, inner in nets.items()
-        )
+        counts = ", ".join(f"{name or 'net'}: {NestedNets.token_count(inner)}" for name, inner in nets.items())
         if isinstance(token, ExecutableGraph):
             text = counts
         else:
@@ -1428,11 +1722,21 @@ def function_transition_node_and_output_places(
 
 class MapPlaceNames:
 
-    def to_list_place_nodes(executable_graph: ExecutableGraph) -> dict[str, ListPlaceNode]:
-        list_place_nodes = {}
+    def to_list_place_nodes(executable_graph: ExecutableGraph) -> dict[PlaceKey, ListPlaceNode]:
+        """Every place this net's transitions can reach, by its ``PlaceKey``, in
+        declaration order: a place of its own under its name, and in a subnet
+        place's position each of its ports, in the subnet's order, under
+        ``Port(subnet place, port)``. A port's node is the subnet's own place, the
+        one list of tokens both nets use; it keeps its own name, so it never
+        collides with a place of this net that has the same one. A subnet place
+        itself is not listed: it holds no tokens."""
+        list_place_nodes: dict[PlaceKey, ListPlaceNode] = {}
         for node in executable_graph.places:
             if isinstance(node, ListPlaceNode):
                 list_place_nodes[node.name] = node
+            elif isinstance(node, SubnetPlaceNode):
+                for port in node.ports:
+                    list_place_nodes[Port(node.name, port.name)] = port
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
         return list_place_nodes
@@ -1717,9 +2021,12 @@ class ExecutableGraphCheck:
             NestedNets.ensure_nested_token(token, place)
 
     def ensure_all_token_types_match_place_types(executable_graph: ExecutableGraph):
-        for place in executable_graph.places:
-            for token in place.tokens:
-                ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
+        """Every token in a place this net's transitions reach, its subnets' ports
+        included, fits its place."""
+        for holder in executable_graph.places:
+            for place in holder.ports if isinstance(holder, SubnetPlaceNode) else (holder,):
+                for token in place.tokens:
+                    ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
 
     def return_indices_are_a_mix_of_none_and_non_none(outgoing_edges: tuple[ReturnedEdgeFromTransition, ...]) -> bool:
         return (
@@ -1808,7 +2115,7 @@ class ExecutableGraphCheck:
                     cycle = path[path.index(successor):] + [successor]
                     raise ValueError(
                         "Token flow contains a cycle: "
-                        + " → ".join(name for _, name in cycle)
+                        + " → ".join(name if isinstance(name, str) else repr(name) for _, name in cycle)
                     )
                 elif successor not in state:
                     state[successor] = "visiting"
@@ -1910,7 +2217,7 @@ class ExecutableGraphOperations:
     def construct_graph(
         mixed_nodes_and_edges: Iterable[
             Union[
-                ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition,
+                ListPlaceNode, SubnetPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition,
                 ReturnedEdgeFromTransition, SnapshotEdge, MutateEdge,
             ]
         ],
@@ -1922,10 +2229,12 @@ class ExecutableGraphOperations:
         params: Optional[dict[str, Any]] = None,
         template: Optional[str] = None,
     ) -> ExecutableGraph:
+        """The net of the given nodes and edges, places (subnet places among them)
+        in the order given, which is their declaration order."""
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
         for node in mixed_nodes_and_edges:
-            if isinstance(node, ListPlaceNode):
+            if isinstance(node, (ListPlaceNode, SubnetPlaceNode)):
                 places.append(node)
             elif isinstance(node, FunctionTransitionNode):
                 transitions.append(node)
@@ -2014,7 +2323,7 @@ class ExecutableGraphOperations:
                     place_copy.tokens.append(deepcopy(token))
                 input_edge_names_to_tokens[edge.argument] = token
                 if firing_ids is not None:
-                    firing_ids.consumed[edge.argument] = (place.name, taken_ids)
+                    firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
                 continue
             # Two cases - passing a single token or passing all tokens as a list.
             # A drain always passes the list, possibly empty.
@@ -2039,7 +2348,7 @@ class ExecutableGraphOperations:
                     place_copy.tokens.append(token_copy)
                 input_edge_names_to_tokens[edge.argument] = token
             if firing_ids is not None:
-                firing_ids.consumed[edge.argument] = (place.name, taken_ids)
+                firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
 
         # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
         # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
@@ -2054,7 +2363,7 @@ class ExecutableGraphOperations:
                 if index is None:
                     raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
                 if firing_ids is not None and index < len(place._token_ids):
-                    firing_ids.mutated.append((place.name, place._token_ids[index]))
+                    firing_ids.mutated.append((edge.place_node_name, place._token_ids[index]))
                 input_edge_names_to_tokens[edge.argument] = place.tokens[index]
                 continue
             if isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
@@ -2066,7 +2375,7 @@ class ExecutableGraphOperations:
                 value = place.tokens[0]  # the single token
                 read_ids = place._token_ids[:1]
             if firing_ids is not None and isinstance(edge, MutateEdge):
-                firing_ids.mutated.extend((place.name, token_id) for token_id in read_ids)
+                firing_ids.mutated.extend((edge.place_node_name, token_id) for token_id in read_ids)
             input_edge_names_to_tokens[edge.argument] = (
                 deepcopy(value) if isinstance(edge, SnapshotEdge) else value
             )
@@ -2231,22 +2540,26 @@ class ExecutableGraphOperations:
                     )
                 output_place_names_to_tokens[edge.place_node_name] = result[edge.return_index]
         elif transition.output_distribution_function is None:
-            # Use place types to determine where tokens should go.
-            potential_output_places: Iterable[ListPlaceNode] = tuple(
-                place_names_to_nodes[edge.place_node_name] for edge in outgoing_edges
-            )
-            matching_places: Iterable[ListPlaceNode] = ExecutableGraphCheck.value_and_places_types_match(
-                result, potential_output_places,
-            )
+            # Use place types to determine where tokens should go. Each candidate
+            # keeps the key its edge names it by, since two ports of different
+            # subnet places may share a name.
+            potential_output_places: list[tuple[PlaceKey, ListPlaceNode]] = [
+                (edge.place_node_name, place_names_to_nodes[edge.place_node_name]) for edge in outgoing_edges
+            ]
+            # What value_and_places_types_match decides, kept with the keys.
+            matching_places = [
+                (key, place) for key, place in potential_output_places
+                if ExecutableGraphCheck.value_can_be_deposited(result, place)
+            ]
             # An empty list type-matches every place but observably deposits
             # only at list-typed ones, so ambiguity is judged over the places
             # where depositing the value actually does something. For any
             # other value every match is observable and this filter is a
             # no-op.
-            observable_places = tuple(
-                place for place in matching_places
+            observable_places = [
+                (key, place) for key, place in matching_places
                 if ExecutableGraphCheck.value_disposition_for_place(result, place) != "nothing"
-            )
+            ]
             if len(observable_places) > 1 and not allow_token_copying:
                 # Multiple observable destinations but token copying is not allowed.
                 raise ValueError(
@@ -2257,11 +2570,11 @@ class ExecutableGraphOperations:
             elif len(observable_places) > 1:
                 # The token can be copied to each observable destination.
                 # Note: actual copying will be handled by add_tokens_to_places
-                for place in observable_places:
-                    output_place_names_to_tokens[place.name] = result
+                for key, _place in observable_places:
+                    output_place_names_to_tokens[key] = result
             elif len(observable_places) == 1:
                 # There is a single observable destination.
-                output_place_names_to_tokens[observable_places[0].name] = result
+                output_place_names_to_tokens[observable_places[0][0]] = result
             elif not matching_places:
                 # No matching places found.
                 raise ValueError(
@@ -2287,11 +2600,12 @@ class ExecutableGraphOperations:
             # off) is enforced later in add_tokens_to_places, so the number of
             # destinations and the allow_token_copying flag don't change what we
             # do here: place each (place_name -> token) the distributor produced.
+            # A distributor names a port by its pair, as an edge does.
             for place_name, token in destination_place_names_to_tokens.items():
                 destination_place = place_names_to_nodes[place_name]
                 ExecutableGraphCheck.ensure_token_type_matches_place_type(token, destination_place)
                 if token is not None:
-                    output_place_names_to_tokens[destination_place.name] = token
+                    output_place_names_to_tokens[place_name] = token
         return output_place_names_to_tokens
 
     def _net_params_wanted(function: Callable, net_params: dict[str, Any]) -> tuple[str, ...]:
@@ -2314,8 +2628,10 @@ class ExecutableGraphOperations:
 
         Every deposited token is a new token with a fresh id from
         ``executable_graph`` (a copy made under token copying included), recorded on
-        ``firing_ids.produced`` if given. Without a graph no ids are assigned and the
-        graph's next ``TokenIds.resync`` re-ids the places that changed.
+        ``firing_ids.produced`` if given; a token deposited into a port, a key that is
+        a ``Port`` pair, gets its id from the port's subnet (``TokenIds.minter``).
+        Without a graph no ids are assigned and the graph's next ``TokenIds.resync``
+        re-ids the places that changed.
         
         Handle token copying if required.
         Handle updating ListPlaceNode with either a single token or a list of tokens.
@@ -2373,9 +2689,10 @@ class ExecutableGraphOperations:
             if executable_graph is None:
                 place.tokens.extend(deposited)
             else:
-                ids = TokenIds.append(executable_graph, place, deposited)
+                # A port's ids are its subnet's, whichever net deposits.
+                ids = TokenIds.append(TokenIds.minter(executable_graph, place_name), place, deposited)
                 if firing_ids is not None:
-                    firing_ids.produced.extend((place.name, token_id) for token_id in ids)
+                    firing_ids.produced.extend((place_name, token_id) for token_id in ids)
             updated_places[place_name] = place
         return updated_places
 
@@ -2460,13 +2777,17 @@ class ExecutableGraphOperations:
         restored when ``restore_tokens_on_failure`` says so, ``Failed`` is recorded
         and ``TransitionFailedError`` is raised.
 
-        Nested tokens (``NestedNets``): the undrained events of every inner net are
-        gathered into this graph's log first, so a firing that consumes a token
-        loses none of them. With ``descend`` on, the call is one deep step, in the
-        order the stepping rules of this net's nested places give: the turns ahead
-        of this net's own (the inner-first places, then the ring's members after
-        its cursor), this net's own choice, then the turns behind it (the rest of
-        the ring, then the outer-first places); passive places are never entered.
+        Nested tokens and subnet places (``NestedNets``): the undrained events of
+        every inner net are gathered into this graph's log first, so a firing that
+        consumes a token loses none of them. With ``descend`` on, the call is one
+        deep step, in the order the stepping rules of this net's nested and subnet
+        places give: the turns ahead of this net's own (the inner-first places, then
+        the ring's members after its cursor), this net's own choice, then the turns
+        behind it (the rest of the ring, then the outer-first places); passive
+        places are never entered, and neither is a subnet while a transition of this
+        net with an edge on one of its ports is in flight. A firing of this net that
+        takes from a port or puts into one is told by this net, naming the port by
+        its ``Port`` pair, and the tokens it puts there get the subnet's ids.
         A firing inside an inner net is returned as an ``InnerFiring``, the path to
         the net it fired in and the transition's own name, and counted on this
         graph under it (``step_count``, ``last_fired``, ``fired_counts``); its

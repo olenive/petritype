@@ -256,6 +256,29 @@ A renderer marks a token that holds nets with its inner nets' names and token co
 
 Any net whose places all have a JSON form (pydantic models, scalars, nets) can be **saved and loaded**: `graph.export_marking()` / `graph.import_marking(...)` for the marking alone, `NetJson.save(graph)` / `NetJson.restore(saved)` for the whole net (`{template, marking, params, enabled}`), rebuilt through a template registered with `@Templates.template("Cabin")`. A nested token's JSON form carries its inner nets in that saved form, so a vehicle can be written to disk, injected over the protocol and restored, cabin and all.
 
+### Subnet places
+
+A place can hold a net of its own for the whole life of the net around it: a **subnet place** holds one **subnet**. The subnet is a separate net, with its own marking, ids, parameters and log, and the net around it reaches it only through its **port places**, the places the subnet's definition marks `port=True`. An edge names a port by the pair, `Port("Level 1", "Lobby")`, where it would name a place, and every edge kind, every way of choosing an output, guards, keyed edges, queries and outside input then treat it as a place of the outer net:
+
+```python
+from petritype.core.nested import Port, SubnetPlaceNode
+
+@Templates.template("Level")
+def build_level(reward: int = 1) -> ExecutableGraph:
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("Lobby", Hero, port=True),          # reached from outside
+        ListPlaceNode("Arena", Hero),                     # the level's own
+        ListPlaceNode("Exit Hall", Hero, port=True),
+        ...
+    ], params={"reward": reward}, template="Level")
+
+SubnetPlaceNode("Level 1", build_level(reward=1))         # stepping="inner_first" by default
+ReturnedEdgeFromTransition("Enter", Port("Level 1", "Lobby"))
+ArgumentEdgeToTransition(Port("Level 1", "Exit Hall"), "Climb", "hero")
+```
+
+A port keeps one list of tokens, in the subnet, which both nets use, and its ids are the subnet's whichever net puts a token there. A change is told once, by the net through which it was made: the outer net's firing names the port by its pair, the subnet's firing names the place by its own name and reaches the outer log as a `Nested` record whose path step names the subnet place alone, `PathStep("Level 1")`. The subnet is one net at its place's position in a deep step, under the place's stepping rule, and while a firing of the outer net with an edge on one of its ports is in flight it takes no turn. `graph.subnet("Level 1")` reads a subnet; `with NestedNets.subnet_scope(graph, "Level 1") as level:` steps or changes it from the program, refused with `SubnetHeldError` while such a firing is in flight. A subnet built through a template is saved, restored and copied with the net around it, its subnet place's entry in the marking being a list of one, the subnet in its saved form; built without one it runs, and the outer net cannot be saved. Subnets nest to any depth, and a port may hold tokens that carry nets. The Graphviz drawing shows a subnet place closed, as one rounded box with a cell per port giving the port's name and count, an edge ending at its port's cell; in the subnet's own drawing a port has a second ring. `examples/subnet_places/levels.py` is the worked example: heroes entering two levels built from one template through one port and leaving through another. The protocol runner does not load a net with subnet places yet.
+
 ### Token keys and queries
 
 A place can declare **keys**, named attributes derived from each token, and a net can then be asked for the tokens matching a filter, with their places, ids, keys and values:
@@ -379,7 +402,7 @@ What makes Petri nets powerful is that they can model concurrency, synchronisati
 
 Petritype builds on this foundation by making places typed (so tokens must match a declared Python type) and making transitions executable (so they call real functions). The result is a system where the Petri net is not just a model of your process — it *is* your process.
 
-In the literature's terms petritype builds *coloured Petri nets*: a token's value is its colour and the type a place holds is its colour set, with guards as guards and a transition's function in place of arc expressions. Two things differ from the textbook form: a place is a first-in, first-out list where the textbook has an unordered bag, and the net is run as the program itself, with no state-space analysis. A token that carries a net of its own ([Nets as tokens](#nets-as-tokens)) is what the literature calls *nets within nets*, or object nets. Modules with ports, the hierarchical coloured nets, are not here. Colour in that sense has nothing to do with the display colour a token may be given.
+In the literature's terms petritype builds *coloured Petri nets*: a token's value is its colour and the type a place holds is its colour set, with guards as guards and a transition's function in place of arc expressions. Two things differ from the textbook form: a place is a first-in, first-out list where the textbook has an unordered bag, and the net is run as the program itself, with no state-space analysis. A token that carries a net of its own ([Nets as tokens](#nets-as-tokens)) is what the literature calls *nets within nets*, or object nets. A place that holds a net reached through port places ([Subnet places](#subnet-places)) is nearest to the *substitution place* of the hierarchical coloured nets, with the difference that the inside is a net of its own, with its own stepping. Colour in that sense has nothing to do with the display colour a token may be given.
 
 ## Installation
 
@@ -414,6 +437,7 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Time Series** (`examples/time_series_stats/stats_executable_graph.py`) — statistical processing of time series data
 - **Rooms** (`examples/toy/state_machines/01_rooms.py`) — a state machine: a character moves between rooms, which are the places, and each room's way out is a transition whose distribution function sends the character to the room a **Go to** button names (a `SetNetParam` command)
 - **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, running its journey under plain stepping (each vehicle's state is where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read), with the followed bus's cabin drawn beside the city
+- **Levels** (`examples/subnet_places/levels_journey.py`): subnet places, a world with two levels built from one template, heroes entering each level through its `Lobby` port and leaving through its `Exit Hall` port, the world drawn with each level closed and, below it, each level's own net
 - **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 - **Shop** (`examples/edges_on_empty_places/shop_day.py`) — an edge that accepts an empty place: switch promotions on and off and place orders, and each order is priced with whatever promotions are running through a survey edge, its receipt showing what each one took off. The example day also plays by itself
 - **Traffic light** (`examples/edges_on_empty_places/traffic_light_junction.py`) — the edge that takes every token, zero or more: cars wait at a light that cycles red, green and amber (one place, whose token is its colour). Two transitions: `Change` cycles the light by itself, and `Go` drains every car waiting past the light while it is green, reading the light and guarded on green and someone waiting, so a car arriving at green goes straight through. Cars arrive on a schedule or by hand

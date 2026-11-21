@@ -71,6 +71,10 @@ _FIRING_NOTEBOOKS = [
     # Nets as tokens: the transit city stepped from its seed until all seven passengers have
     # arrived (the vehicles never stop, so the notebook's fire_one stops on the passengers).
     (EXAMPLES_DIR / "tokens_as_nets" / "transit_journey.py", 45),
+    # Subnet places: three heroes through two levels built from one template, seven firings
+    # each (Enter, Fight and Win in level 1, Climb, Fight and Win in level 2, Leave), until
+    # the world is at rest. Its ending is pinned in tests/test_subnet_places.py.
+    (EXAMPLES_DIR / "subnet_places" / "levels_journey.py", 21),
     # Edges on empty places: the priced shop's example day, each delivery coming in when
     # nothing is fireable (Price Order with no promotion running, then with two). Its
     # receipts are pinned in tests/test_priced_shop.py.

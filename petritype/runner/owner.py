@@ -117,6 +117,7 @@ from petritype.core.executable_graph_components import (
     MapTransitionNames,
     MutateWhereEdge,
     NestedNets,
+    SubnetPlaceNode,
     TakeWhereEdge,
     TokenIds,
     TransitionFailedError,
@@ -565,6 +566,13 @@ class Owner:
             raise ProtocolError(
                 ErrorCode.LOAD_FAILED,
                 f"factory {entry.name!r} returned {type(graph).__name__}, not an ExecutableGraph",
+            )
+        holder = _subnet_place_within(graph)
+        if holder is not None:
+            raise ProtocolError(
+                ErrorCode.LOAD_FAILED,
+                f"net {entry.name!r} holds the subnet place {holder!r}: the runner loads nets without subnet "
+                f"places only, until it serves PROTOCOL.md §12.7",
             )
         try:
             ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)
@@ -1912,6 +1920,19 @@ def _descend(graph: ExecutableGraph, step: wire.PathStep) -> ExecutableGraph:
     if step.net not in nets:
         raise LookupError(f"token {step.token!r} in {step.place!r} holds no net named {step.net!r}")
     return nets[step.net]
+
+
+def _subnet_place_within(graph: ExecutableGraph) -> Optional[str]:
+    """The name of the first subnet place in ``graph`` or in a net inside its
+    tokens, at any depth, or ``None``."""
+    for place in graph.places:
+        if isinstance(place, SubnetPlaceNode):
+            return place.name
+    for _step, inner in NestedNets.walk(graph):
+        found = _subnet_place_within(inner)
+        if found is not None:
+            return found
+    return None
 
 
 def _find(snapshot: _Snapshot, token_id: int) -> Optional[tuple[str, Any]]:

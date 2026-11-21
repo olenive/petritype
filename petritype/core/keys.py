@@ -21,6 +21,12 @@ within the clause) or the current value of a net parameter; and a restriction to
 some places, by name or by name prefix. ``Query.matches`` returns the matching
 tokens in place order then token order, each with its place, id, keys and value;
 ``Query.distinct`` the distinct values of a key in order of first appearance.
+
+A query on a net with subnet places covers their ports too, each at its subnet
+place's position, named by its ``Port`` pair; a filter's ``places`` names a port
+by that pair, and its ``prefix`` is tested against the port's own name. A port's
+keys are the ones its subnet's definition declares, and a port's token ids are
+its subnet's.
 """
 
 from __future__ import annotations
@@ -28,8 +34,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
+from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
-    ExecutableGraph, ListPlaceNode, MutateWhereEdge, TakeWhereEdge, TokenIds,
+    ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, TakeWhereEdge, TokenIds,
 )
 
 __all__ = [
@@ -107,10 +114,12 @@ class Clause:
 class Filter:
     """What tokens to keep: every clause must accept the token (AND), within the
     named ``places`` and the places whose name begins with ``prefix``, if given.
-    No clauses and no restriction keeps everything."""
+    No clauses and no restriction keeps everything. ``places`` names a port by
+    its ``Port`` pair; a subnet place named alone selects nothing, since it
+    holds no tokens."""
 
     clauses: tuple[Clause, ...] = ()
-    places: Optional[tuple[str, ...]] = None
+    places: Optional[tuple[PlaceKey, ...]] = None
     prefix: Optional[str] = None
 
     @staticmethod
@@ -126,17 +135,19 @@ class Filter:
             clauses.append(Clause(key, tuple(values)))
         return Filter(tuple(clauses))
 
-    def in_places(self, *places: str) -> "Filter":
+    def in_places(self, *places: PlaceKey) -> "Filter":
         return Filter(self.clauses, tuple(places), self.prefix)
 
     def with_prefix(self, prefix: str) -> "Filter":
         return Filter(self.clauses, self.places, prefix)
 
-    def covers(self, place_name: str) -> bool:
-        """Whether tokens of this place are considered at all."""
+    def covers(self, place_name: PlaceKey) -> bool:
+        """Whether tokens of this place are considered at all: a place by its
+        name, or a port by its pair, whose own name the prefix is tested against."""
         if self.places is not None and place_name not in self.places:
             return False
-        if self.prefix is not None and not place_name.startswith(self.prefix):
+        own_name = place_name.port if isinstance(place_name, Port) else place_name
+        if self.prefix is not None and not own_name.startswith(self.prefix):
             return False
         return True
 
@@ -167,9 +178,10 @@ EVERYTHING = Filter()
 
 @dataclass(frozen=True)
 class Match:
-    """One token a query found: where it rests, its id, its keys and the value."""
+    """One token a query found: where it rests (a place's name, or a port's
+    ``Port`` pair), its id, its keys and the value."""
 
-    place: str
+    place: PlaceKey
     token_id: int
     keys: dict[str, KeyValue] = field(compare=False)
     token: Any = field(compare=False)
@@ -179,11 +191,12 @@ class Query:
     """Functions that ask a net for tokens by their keys."""
 
     def matches(graph: ExecutableGraph, filter: Filter = EVERYTHING) -> list[Match]:
-        """Every token the filter keeps, in place order then token order."""
+        """Every token the filter keeps, in place order then token order, the
+        ports of a subnet place at its position (``MapPlaceNames``)."""
         TokenIds.resync(graph)
         found: list[Match] = []
-        for place in graph.places:
-            if not filter.covers(place.name):
+        for key, place in MapPlaceNames.to_list_place_nodes(graph).items():
+            if not filter.covers(key):
                 continue
             if filter.clauses and not place.keys:
                 continue
@@ -191,20 +204,20 @@ class Query:
             for index, token in enumerate(place.tokens):
                 keys = Keys.of(place, token)
                 if filter.accepts(keys, graph.params):
-                    found.append(Match(place.name, ids[index] if index < len(ids) else -1, keys, token))
+                    found.append(Match(key, ids[index] if index < len(ids) else -1, keys, token))
         return found
 
     def count(graph: ExecutableGraph, place: ListPlaceNode, filter: Filter) -> int:
         """How many tokens of ``place`` the filter keeps."""
         return sum(1 for token in place.tokens if filter.matches(graph, place, token))
 
-    def distinct(graph: ExecutableGraph, key: str, places: Optional[Sequence[str]] = None) -> list[KeyValue]:
-        """The distinct values of ``key`` over the net (or ``places``), in order of
-        first appearance in place order then token order; ``[]`` for a key no
-        place declares."""
+    def distinct(graph: ExecutableGraph, key: str, places: Optional[Sequence[PlaceKey]] = None) -> list[KeyValue]:
+        """The distinct values of ``key`` over the net (or ``places``, a port by
+        its pair), in order of first appearance in place order then token order,
+        ports included; ``[]`` for a key no place declares."""
         seen: list[KeyValue] = []
-        for place in graph.places:
-            if places is not None and place.name not in places:
+        for place_key, place in MapPlaceNames.to_list_place_nodes(graph).items():
+            if places is not None and place_key not in places:
                 continue
             if not place.keys or key not in place.keys:
                 continue

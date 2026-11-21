@@ -26,6 +26,16 @@ the saved form of a net that a nested token carries (nets as tokens, R5).
   form; ``ExecutableGraph`` dumps and validates as it (a ``Vehicle`` model with a
   ``cabin: ExecutableGraph`` field therefore has the JSON form of §12.5 without
   further work), and restoring needs the template registered.
+
+  A subnet place's entry in a marking is a list of one: its subnet in this same
+  saved form, ``"Level 1": [{"template": "Level", "marking": {...}, "params":
+  {...}, "enabled": {...}}]``, at any depth. A port's tokens are written once,
+  in its subnet's marking. A subnet built without a template has no saved form,
+  so a net that holds one cannot be saved, and the error names the subnet place.
+  Loading fills the subnet the outer net already holds, which its own template
+  built; a subnet place missing from a marking loads its subnet's marking empty
+  and leaves its parameters and switches as they are. Stepping rules are part
+  of the definition and are not saved.
 """
 
 from __future__ import annotations
@@ -40,6 +50,7 @@ from petritype.core.executable_graph_components import (
     ExecutableGraph,
     GraphEvents,
     ListPlaceNode,
+    SubnetPlaceNode,
     TokenIds,
 )
 
@@ -219,11 +230,16 @@ class NetJson:
     """Functions that save a net as JSON and load one back (the module docstring)."""
 
     def export_marking(graph: ExecutableGraph) -> dict[str, list]:
-        """``{place: [tokens as JSON]}`` for every place, oldest token first.
-        Raises ``TypeError`` naming the place if one has no JSON form, and
-        ``ValueError`` if a token will not encode."""
+        """``{place: [tokens as JSON]}`` for every place, oldest token first, and
+        for a subnet place ``[its subnet's saved form]``. Raises ``TypeError``
+        naming the place if one has no JSON form or a subnet place holds a net
+        built without a template, and ``ValueError`` if a token will not encode."""
         marking: dict[str, list] = {}
         for place in graph.places:
+            if isinstance(place, SubnetPlaceNode):
+                NetJson._ensure_stamped(place, "the net cannot be saved")
+                marking[place.name] = [NetJson.save(place.graph)]
+                continue
             if not JsonForm.place_type(place.type):
                 raise TypeError(f"place {place.name!r} ({place.type}) has no JSON form, so the marking cannot be saved")
             try:
@@ -238,33 +254,82 @@ class NetJson:
         emptied; a name that is no place of the net is a ``KeyError``, and a
         token that does not decode a ``ValueError``, both before anything is
         changed. Tokens get fresh ids; each place records ``Resynced``, since the
-        events cannot describe a marking replaced wholesale."""
+        events cannot describe a marking replaced wholesale. A subnet place's
+        entry, a list of one saved form, is loaded into the subnet the place
+        holds, by the subnet, and checked with the rest before anything changes;
+        a subnet place not listed has its subnet's marking emptied."""
+        NetJson._apply_marking(graph, NetJson._marking_plan(graph, marking))
+
+    def _ensure_stamped(place: SubnetPlaceNode, consequence: str) -> None:
+        """``TypeError`` naming ``place`` if its subnet was built without a template:
+        it then has no saved form."""
+        if place.graph.template is None:
+            raise TypeError(
+                f"subnet place {place.name!r} holds a net built without a template, so {consequence}"
+            )
+
+    def _marking_plan(graph: ExecutableGraph, marking: dict[str, list]) -> dict[str, Any]:
+        """``marking`` checked against ``graph`` and decoded, at every depth, with
+        nothing changed: for each place its decoded tokens, and for each subnet
+        place the plan of its subnet's load (``_load_plan``)."""
         if not isinstance(marking, dict):
             raise TypeError("a marking is an object of place name to list of tokens")
         places = {place.name: place for place in graph.places}
         unknown = sorted(set(marking) - set(places))
         if unknown:
             raise KeyError(f"the net has no place {', '.join(map(repr, unknown))}")
-        decoded: dict[str, list] = {}
+        plan: dict[str, Any] = {}
         for name, place in places.items():
+            if isinstance(place, SubnetPlaceNode):
+                NetJson._ensure_stamped(place, "it has no saved form to load")
+                plan[name] = NetJson._subnet_plan(place, marking)
+                continue
             tokens = marking.get(name, [])
             if not isinstance(tokens, list):
                 raise ValueError(f"the tokens of {name!r} must be a list")
             try:
-                decoded[name] = [JsonForm.decode(place.type, token) for token in tokens]
+                plan[name] = [JsonForm.decode(place.type, token) for token in tokens]
             except ValueError as error:
                 raise ValueError(f"a token of {name!r} does not decode as {place.type}: {JsonForm.message(error)}") from error
-        for name, place in places.items():
+        return plan
+
+    def _subnet_plan(place: SubnetPlaceNode, marking: dict[str, list]) -> tuple:
+        """The plan of a subnet place's entry: its one saved form loaded into the
+        subnet, or, when the marking leaves the place out, the subnet's marking
+        loaded empty with its parameters and switches left as they are. An error
+        inside the subnet keeps its type and says which subnet place it was in."""
+        try:
+            if place.name not in marking:
+                return NetJson._marking_plan(place.graph, {}), None, None
+            entry = marking[place.name]
+            if not isinstance(entry, list) or len(entry) != 1 or not isinstance(entry[0], dict):
+                raise ValueError("the entry of a subnet place is a list of one, its subnet in its saved form")
+            return NetJson._load_plan(place.graph, entry[0])
+        except (KeyError, TypeError, ValueError, LookupError) as error:
+            message = error.args[0] if error.args else str(error)
+            within = f"in subnet place {place.name!r}: {message}"
+            kind = type(error) if type(error) in (KeyError, TypeError, ValueError, LookupError) else ValueError
+            raise kind(within) from error
+
+    def _apply_marking(graph: ExecutableGraph, plan: dict[str, Any]) -> None:
+        """Carry out a checked marking: every place gets its tokens with fresh
+        ids and records ``Resynced``, every subnet loads its own, in place order."""
+        for place in graph.places:
+            if isinstance(place, SubnetPlaceNode):
+                NetJson._apply_load(place.graph, plan[place.name])
+                continue
             place.tokens = []
             place._token_ids = []
-            TokenIds.append(graph, place, decoded[name])
-            GraphEvents.record(graph, Resynced(name))
+            TokenIds.append(graph, place, plan[place.name])
+            GraphEvents.record(graph, Resynced(place.name))
 
     def save(graph: ExecutableGraph) -> dict:
         """The saved form: ``{template?, marking, params, enabled}``. ``template``
         is left out when the net records none (a top-level net built by a
         factory); ``restore`` then cannot rebuild it, but ``load_into`` can load
-        it into a net built the same way."""
+        it into a net built the same way. Each subnet is saved inside its subnet
+        place's entry of the marking, so it must have been built through a
+        template (``export_marking``)."""
         try:
             params = json.loads(json.dumps(graph.params, allow_nan=False))
         except (TypeError, ValueError) as error:
@@ -280,7 +345,14 @@ class NetJson:
     def load_into(graph: ExecutableGraph, saved: dict) -> ExecutableGraph:
         """Load a saved form into ``graph``: its marking (``import_marking``),
         parameters (each must be one the net declares) and switches (each must
-        name a transition). Checked before anything is changed. Returns the graph."""
+        name a transition), its subnets' saved forms included. Checked at every
+        depth before anything is changed. Returns the graph."""
+        NetJson._apply_load(graph, NetJson._load_plan(graph, saved))
+        return graph
+
+    def _load_plan(graph: ExecutableGraph, saved: dict) -> tuple:
+        """A saved form checked against ``graph`` and decoded, with nothing
+        changed: ``(marking plan, params, enabled)``."""
         if not isinstance(saved, dict):
             raise TypeError("a saved net is an object with marking, params and enabled")
         unknown = sorted(set(saved) - set(SAVED_KEYS))
@@ -302,13 +374,21 @@ class NetJson:
         unknown = sorted(set(enabled) - names)
         if unknown:
             raise KeyError(f"the net has no transition {', '.join(map(repr, unknown))}")
-        NetJson.import_marking(graph, saved.get("marking", {}))
+        return NetJson._marking_plan(graph, saved.get("marking", {})), params, enabled
+
+    def _apply_load(graph: ExecutableGraph, plan: tuple) -> None:
+        """Carry out a checked load. Parameters and switches given as ``None`` are
+        left as they are, and so are the cursors: that is a subnet place missing
+        from its outer net's marking."""
+        marking, params, enabled = plan
+        NetJson._apply_marking(graph, marking)
+        if params is None:
+            return
         graph.params.update(params)
         graph.disabled = {name for name, on in enabled.items() if not on}
         # The tie-break's and the ring's cursors are not saved: a loaded net
         # starts its rounds afresh.
         graph.forget_cursors()
-        return graph
 
     def restore(saved: dict) -> ExecutableGraph:
         """A net rebuilt from its saved form: ``Templates.build(saved["template"])``
