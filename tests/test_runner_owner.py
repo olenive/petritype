@@ -337,7 +337,7 @@ async def test_describe_lists_decorated_nets_with_their_params():
     h = Harness(chain, needs)
     [line] = await h.send("describe")
     result = line["result"]
-    assert result["protocol_version"] == 1 and result["runtime"] == "python"
+    assert result["protocol_version"] == 2 and result["runtime"] == "python"
     assert isinstance(result["runtime_version"], str)
     assert result["nets"] == [
         {"name": "chain", "description": "Doubles numbers", "mode": "manual", "params": [
@@ -439,7 +439,7 @@ async def test_get_state_shape():
     await h.loaded("chain")
     [line] = await h.send("get_state")
     assert line["result"] == {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "runtime": "python",
         "net": "chain",
         "generation": 1,

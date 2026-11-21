@@ -197,7 +197,7 @@ class TestOuterOnly:
         tally = await tally_of(harness, "Spare")
         assert error(await harness.send("step", {"nested_id": tally["nested_id"]})) == "invalid_params"
         assert error(await harness.send("step", {"path": tally["path"]})) == "invalid_params"
-        assert error(await harness.send("step", {"path": "crates"})) == "invalid_params", "even the outer net's own path"
+        assert error(await harness.send("step", {"path": []})) == "invalid_params", "even the outer net's own path"
         assert result(await harness.send("step", {"path": None}))["transition"] == "Fill", "a null path is no path (A5)"
 
 
@@ -368,11 +368,11 @@ def clockwork(deep_policy: str = "outer_first", clock: bool = True) -> Executabl
 
 
 async def stepped(harness, count):
-    """What ``count`` steps fired: the transition, under its crate's place and token for an inner one."""
+    """What ``count`` steps fired: the transition, after its crate's token id for an inner one."""
     fired = []
     for _ in range(count):
         answer = result(await harness.send("step"))
-        fired.append(answer["path"].split("/")[2] + " " + answer["transition"] if "path" in answer else answer["transition"])
+        fired.append(answer["path"][0]["token"] + " " + answer["transition"] if "path" in answer else answer["transition"])
     return fired
 
 
@@ -395,7 +395,7 @@ class TestPoliciesThroughTheRunner:
         harness = Harness(clockwork)
         await harness.send("load", {"net": "clockwork"})
         shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
-        a, b = (f"#{token['id']}" for token in shelf)
+        a, b = (token["id"] for token in shelf)
         assert await stepped(harness, 4) == ["Tick"] * 4
         await harness.send("load", {"net": "clockwork", "params": {"deep_policy": "interleaved"}})
         assert await stepped(harness, 6) == ["Tick", f"{a} Up", f"{b} Up", "Tick", f"{a} Up", f"{b} Up"]
@@ -405,7 +405,7 @@ class TestPoliciesThroughTheRunner:
         harness = Harness(clockwork)
         await harness.send("load", {"net": "clockwork", "params": {"clock": False}})
         shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
-        a, b = (f"#{token['id']}" for token in shelf)
+        a, b = (token["id"] for token in shelf)
         assert await stepped(harness, 1) == [f"{a} Up"]
         harness.owner._loaded.outer.graph.deep_policy = "interleaved"
         assert await stepped(harness, 2) == [f"{b} Up", f"{a} Up"]

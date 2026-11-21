@@ -345,9 +345,10 @@ petritype-server, the Bevy visualiser, a test harness — therefore drives
 either runtime the same way:
 `describe`, `load`, `get_state`, `get_place_tokens`, `get_token`, `step`, `start`, `stop`, `reset`, `inject`, `enable`, `disable`, `set_param`, `press`, `get_log`, `query`, `distinct`, `set_filter`, `shutdown`,
 with `fired`, `added`, `toggled` and the other notifications as the
-net changes. Inner nets of nested tokens are addressed by `path`
-(`transit/Depot/#17/cabin`) or by their stable `nested_id`, each with its own
-versions and log view, their events wrapped in `nested` notifications. A
+net changes. Inner nets of nested tokens are addressed by `path`, a list of
+steps from the loaded net down (`[{"place": "Depot", "token": "17", "net":
+"cabin"}]`), or by their stable `nested_id`, each with its own versions,
+progress and log view, their events wrapped in `nested` notifications. A
 `print` in a body goes to stderr; stdout belongs to the protocol. No extra is needed: the runner is the standard library plus
 `pydantic`. Conformance is checked by the recorded transcripts under
 `tests/protocol/`, which are written to run against both runtimes.

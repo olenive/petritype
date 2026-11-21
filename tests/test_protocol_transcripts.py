@@ -39,16 +39,19 @@ against both runtimes:
   promises an order for ``topology.edges`` and they list them differently.
 - ``"<id:NAME>"`` matches any string and binds it to ``NAME`` for the rest of the
   transcript; a later ``"<id:NAME>"`` in an ``expect`` must be the same string,
-  and one in a ``send`` is replaced by it, also inside a longer string
-  (``"transit/Depot/#<id:bus>/cabin"``), which is how a ``send`` spells a path
-  (§12.1). Token ids are the runtime's (§2), so a request about a token
-  (``get_token``) must name the id the runner handed out.
+  and one in a ``send`` is replaced by it, whole. Token ids are the runtime's
+  (§2), so a request about a token (``get_token``) must name the id the runner
+  handed out, and a path names the token in each of its steps by a capture
+  (``{"place": "Depot", "token": "<id:bus>", "net": "cabin"}``, §12.1).
 
-With nested nets (§12) two more: ``"<path>"`` matches any string, for a path
-that embeds a token id; and a ``nested`` wrapping a ``launched`` and the next
-``nested`` wrapping its ``distributed`` (same path and nested id) are folded
-into a ``nested`` wrapping a ``fired``, as the outer pair is, over the same
-kinds of line wrapped for that net or for the nets inside it.
+With nested nets (§12) a path is spelt out as the list of steps it is, with
+each step's token id masked or bound like any other (until 2026-11-21, protocol
+version 1, a path was text, masked whole as ``"<path>"``, and a ``send``
+substituted a capture inside a longer string to spell one); and a ``nested``
+wrapping a ``launched`` and the next ``nested`` wrapping its ``distributed``
+(same path and nested id) are folded into a ``nested`` wrapping a ``fired``, as
+the outer pair is, over the same kinds of line wrapped for that net or for the
+nets inside it.
 
 A transcript is replayed against a registry reduced to the net it names
 (§11), so each may pin ``describe`` in full.
@@ -94,7 +97,7 @@ START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
 STEP = timedelta(seconds=1)  # ``now`` moves on by this much per exchange
 PROCESS_TIMEOUT = 60.0
 
-STRING_MASKS = frozenset({"<label>", "<time>", "<id>", "<path>"})
+STRING_MASKS = frozenset({"<label>", "<time>", "<id>"})
 NUMBER_MASKS = frozenset({"<ms>", "<version>"})
 ANY = "<any>"
 UNORDERED = "<unordered>"
@@ -189,17 +192,12 @@ def _match_unordered(expected: list, actual, bindings: dict) -> bool:
 
 
 def substitute(value, bindings: dict, where: str):
-    """``value`` with every ``"<id:NAME>"`` replaced by its binding, whole or
-    inside a longer string."""
+    """``value`` with every ``"<id:NAME>"`` replaced by its binding. A capture
+    stands for a whole value, so one inside a longer string is sent as written."""
     name = _capture_name(value)
     if name is not None:
         assert name in bindings, f"{where}: {value} is sent before any line bound it"
         return bindings[name]
-    if isinstance(value, str) and CAPTURE_PREFIX in value:
-        def bound(match):
-            assert match.group(1) in bindings, f"{where}: {match.group(0)} is sent before any line bound it"
-            return bindings[match.group(1)]
-        return re.sub(r"<id:([^>]+)>", bound, value)
     if isinstance(value, list):
         return [substitute(item, bindings, where) for item in value]
     if isinstance(value, dict):
@@ -384,7 +382,6 @@ async def test_transcript_holds(path: Path):
 
 # Keys whose value is the runtime's own and so must be masked in a shared transcript.
 MASKED_KEYS = {
-    "path": {"<path>"},
     "marking_version": NUMBER_MASKS,
     "duration_ms": NUMBER_MASKS,
     "type_name": STRING_MASKS,
@@ -406,6 +403,24 @@ def _hex(colour) -> bool:
     return isinstance(colour, str) and HEX_COLOUR.fullmatch(colour) is not None
 
 
+def _masked(value) -> bool:
+    return value == "<id>" or _capture_name(value) is not None
+
+
+def _unsafe_path(steps, where: str) -> list[str]:
+    """A path is a list of steps (§12.1) whose token ids are masked or bound; the
+    place and net names in it are the net's own, the same in both runtimes."""
+    if not isinstance(steps, list):
+        return [f"{where}: a path is a list of steps, not {steps!r}"]
+    problems = []
+    for n, step in enumerate(steps):
+        if not isinstance(step, dict) or "place" not in step:
+            problems.append(f"{where}[{n}]: a step is an object with a place")
+        elif "token" in step and not _masked(step["token"]):
+            problems.append(f"{where}[{n}].token: {step['token']!r} must be masked")
+    return problems
+
+
 def _unsafe(value, path: str, top: bool = False) -> list[str]:
     problems = []
     if isinstance(value, dict):
@@ -415,7 +430,9 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
                 continue  # a token's own JSON (get_token): the net's data, the same in both
             if key == "controls":
                 continue  # what the net declares (§5.1), labels included: the same in both
-            if key == "color":
+            if key == "path":
+                problems.extend(_unsafe_path(item, here))
+            elif key == "color":
                 if not _hex(item):
                     problems.append(f"{here}: a shared transcript carries a colour only as #rrggbb")
             elif key in MASKED_KEYS and item not in MASKED_KEYS[key]:
@@ -479,8 +496,11 @@ def test_captures():
     assert substitute({"id": "<id:x>", "n": ["<id:x>"]}, b, "here") == {"id": "7", "n": ["7"]}
 
 
+CABIN = [{"place": "P", "token": "1", "net": "c"}]
+
+
 def test_the_nested_fold():
-    wrap = lambda event, path="n/P/#1/c", nid="3": {"method": "nested", "params": {
+    wrap = lambda event, path=CABIN, nid="3": {"method": "nested", "params": {
         "path": path, "nested_id": nid, "event": event, "marking_version": 9, "running": False}}
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
     distributed = {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 2.0, "marking_version": 2, "running": False}}
@@ -497,7 +517,7 @@ def test_the_fold_keeps_the_firings_own_lines_in_their_places():
     places; the ``fired`` stands where the ``distributed`` stood."""
     stamp = lambda version: {"marking_version": version, "running": False}
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], **stamp(1)}}
-    inner = {"method": "nested", "params": {"path": "n/P/#1/c", "nested_id": "3", "event": {
+    inner = {"method": "nested", "params": {"path": CABIN, "nested_id": "3", "event": {
         "method": "added", "params": {"place": "Door", "id": "1", "label": "x", **stamp(1)}}, **stamp(1)}}
     mutated = {"method": "mutated", "params": {"place": "P", "id": "1", **stamp(2)}}
     hidden = {"method": "hidden", "params": {"kind": "mutated", "place": "P", **stamp(3)}}
@@ -517,7 +537,8 @@ def test_the_fold_keeps_the_firings_own_lines_in_their_places():
 
 def test_the_nested_fold_keeps_the_firings_own_lines_in_their_places():
     wrap = lambda event, nid="3": {"method": "nested", "params": {
-        "path": f"n/P/#1/c{nid}", "nested_id": nid, "event": event, "marking_version": 9, "running": False}}
+        "path": [{"place": "P", "token": "1", "net": f"c{nid}"}], "nested_id": nid, "event": event,
+        "marking_version": 9, "running": False}}
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
     mutated = {"method": "mutated", "params": {"place": "B", "id": "4", "marking_version": 2, "running": False}}
     deeper = {"method": "added", "params": {"place": "C", "id": "1", "label": "z", "marking_version": 1, "running": False}}
@@ -530,9 +551,28 @@ def test_the_nested_fold_keeps_the_firings_own_lines_in_their_places():
     assert len(fold([wrap(launched), wrap(fireable), wrap(distributed)])) == 3, "the net's own fireable is no line of the firing's"
 
 
-def test_embedded_captures():
+def test_a_path_names_its_tokens_by_captures():
+    """§11, version 2: a path is a list of steps, and a step's token id is a
+    capture like any other, substituted whole in a ``send``; a capture inside a
+    longer string is no capture, and is sent as written."""
     b = {"bus": "7"}
-    assert substitute({"path": "transit/Depot/#<id:bus>/cabin"}, b, "here") == {"path": "transit/Depot/#7/cabin"}
+    sent = substitute({"path": [{"place": "Depot", "token": "<id:bus>", "net": "cabin"}]}, b, "here")
+    assert sent == {"path": [{"place": "Depot", "token": "7", "net": "cabin"}]}
+    assert substitute({"path": "transit/Depot/#<id:bus>/cabin"}, b, "here") == {"path": "transit/Depot/#<id:bus>/cabin"}
+    assert matches({"path": [{"place": "Depot", "token": "<id:bus>", "net": "cabin"}]},
+                   {"path": [{"place": "Depot", "token": "7", "net": "cabin"}]}, b)
+    assert not matches({"path": [{"place": "Depot", "token": "<id:bus>", "net": "cabin"}]},
+                       {"path": [{"place": "Depot", "token": "8", "net": "cabin"}]}, b), "bound already"
+    assert not matches("<path>", "transit/Depot/#7/cabin", b), '"<path>" is no mask: a literal string'
+    assert not matches("<path>", [{"place": "Depot", "token": "7", "net": "cabin"}], b)
+
+
+def test_a_shared_path_masks_its_token_ids():
+    masked = {"path": [{"place": "Depot", "token": "<id:bus>", "net": "cabin"}, {"place": "Level 3"}]}
+    assert not _unsafe(masked, "x")
+    assert _unsafe({"path": [{"place": "Depot", "token": "17", "net": "cabin"}]}, "x")
+    assert _unsafe({"path": "<path>"}, "x"), "a path is no longer text"
+    assert not _unsafe({"path": []}, "x")
 
 
 def test_a_shared_colour_is_hex_and_controls_are_pinned():
@@ -565,6 +605,38 @@ def test_the_recorder_keeps_a_hex_colour_and_the_controls():
     assert state["result"]["topology"]["controls"] == controls
     with pytest.raises(ValueError, match="#rrggbb"):
         masker.line({"method": "added", "params": {"place": "P", "id": "9", "label": "x", "color": "red"}})
+
+
+def test_the_recorder_masks_a_path_step_by_step_and_keeps_the_names_it_re_records():
+    from tests.record_transcript import Masker
+
+    masker = Masker()
+    cabin = [{"place": "Depot", "token": "17", "net": "cabin"}]
+    state = masker.line({"id": "2", "result": {"marking": {"places": {"Depot": {"count": 1, "tokens": [
+        {"id": "17", "label": '{"name": "Bus 1"}', "nets": [{"name": "cabin", "nested_id": "3", "path": cabin, "count": 0}]},
+    ]}}}}})
+    bus = state["result"]["marking"]["places"]["Depot"]["tokens"][0]
+    assert bus["id"] == "<id:bus>"
+    assert bus["nets"] == [{"name": "cabin", "nested_id": "<id:bus_cabin>",
+                            "path": [{"place": "Depot", "token": "<id:bus>", "net": "cabin"}], "count": 0}]
+    moved = masker.line({"method": "nested", "params": {
+        "path": [{"place": "In Transit", "token": "21", "net": "cabin"}], "nested_id": "3",
+        "event": {"method": "param_changed", "params": {"param": "stopped", "marking_version": 1, "running": False}},
+        "marking_version": 4, "running": False}})
+    assert moved["params"]["path"] == [{"place": "In Transit", "token": "<id>", "net": "cabin"}], \
+        "a token first seen in a path is masked, and named where its label is seen"
+    assert moved["params"]["nested_id"] == "<id:bus_cabin>"
+
+    keeper = Masker()
+    old = {"method": "added", "params": {"place": "Receiving", "id": "<id:new>", "label": "<label>",
+                                         "marking_version": "<version>", "running": False}}
+    line = keeper.line({"method": "added", "params": {"place": "Receiving", "id": "9", "label": "{}",
+                                                      "marking_version": 3, "running": False}}, old=old)
+    assert line["params"]["id"] == "<id:new>" and keeper.bindings["new"] == "9", "the re-recorded name is kept"
+    plain = keeper.line({"method": "removed", "params": {"place": "Receiving", "id": "9", "marking_version": 4,
+                                                         "running": False}},
+                        old={"method": "removed", "params": {"place": "Receiving", "id": "<id>"}})
+    assert plain["params"]["id"] == "<id>", "and so is a plain mask"
 
 
 def test_the_fold():

@@ -313,7 +313,7 @@ def test_describe_flag_prints_one_line_and_exits(spawn):
     lines = done.stdout.splitlines()
     assert len(lines) == 1
     describe = json.loads(lines[0])
-    assert describe["protocol_version"] == 1
+    assert describe["protocol_version"] == 2
     assert describe["runtime"] == "python"
     assert [net["name"] for net in describe["nets"]] == ["greeter", "noisy"]
     assert b"print at import" in done.stderr

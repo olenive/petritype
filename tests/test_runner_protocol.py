@@ -96,7 +96,7 @@ def test_from_modules_collects_decorated_factories_once():
     registry = Registry.from_modules([first, second])
     assert list(registry.entries) == ["alpha", "beta"]
     described = registry.describe().wire()
-    assert described["protocol_version"] == 1 and described["runtime"] == "python"
+    assert described["protocol_version"] == 2 and described["runtime"] == "python"
     assert described["nets"] == [
         {"name": "alpha", "description": "First line.", "mode": "cron", "schedule": "0 9 * * *",
          # A default with no JSON form is not sent.

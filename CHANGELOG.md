@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The protocol runner speaks version 2 of the net protocol (PROTOCOL.md §10). An inner net's `path` is a list of steps from the loaded net down, `{"place", "token", "net"}` for a net carried by a token, in requests, results, a token's `nets`, the `nested` notification, the `step` result and the log, so a place or a net may be named with any character and still be addressed. A path of any other shape is `invalid_params`, and one that names no live net is `unknown_net`, naming the step that failed by its index from 0. A net's progress counts only the firings of its own transitions: the loaded net's `fired_counts` no longer holds a joined name for each firing inside its tokens. The shared transcripts are re-recorded for version 2, and the transcript recorder keeps the names and masks of a transcript it re-records.
+
 ## 0.3.1, 2026-10-17
 
 The [`v0.3.1` tag](https://github.com/olenive/petritype/tree/v0.3.1).

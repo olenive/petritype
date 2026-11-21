@@ -3,7 +3,8 @@
 Status: **design of 2026-10-03; token ids, events, the runner's state
 machine and its process layer built the same day** ("As built" sections
 below). `python -m petritype.runner` works and the eight shared transcripts
-replay against it. Version bumped to 0.2.0 on 2026-10-03, and 0.2.0 shipped
+replay against it. It speaks protocol version 2 since 2026-11-21 (the last
+section). Version bumped to 0.2.0 on 2026-10-03, and 0.2.0 shipped
 on 2026-10-04 (the `v0.2.0` tag). The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
@@ -156,9 +157,10 @@ Token ids and events landed as designed, with these settlements:
   that keeps `get_state` and `get_place_tokens` from ever waiting on a
   running body. What does not: layout, the `id(token)` diff, the
   `"Type@timestamp_hash"` log ids, argument-name log keys.
-- The runner speaks version 1 only. Translation for version 0 clients lives
-  in petritype-server's worker for one release (see its design doc), so the
-  library never carries the old shapes.
+- The runner speaks one version of the protocol, the current one: version 1
+  until 2026-11-21 and version 2 since (the last section). Translation for
+  version 0 clients lives in petritype-server's worker for one release (see
+  its design doc), so the library never carries the old shapes.
 
 ### As built, 2026-10-03: the state machine
 
@@ -315,6 +317,8 @@ Settlements:
   finds nets by id (`NestedNets.find`); the owner only adds the net name in
   front. `enable`, `disable`, `set_param`, `start`, `stop`, `reset` and
   `step` refuse a path with `invalid_params`: they act on the outer net.
+  *2026-11-21:* a path is a list of steps now, resolved by the owner one step
+  at a time (the last section).
 - **Versions are per net.** Each `_Net` carries its own `marking_version`,
   raised by its own state notifications, stamped on its reads. An inner
   notification is the line the inner net would write, wrapped in `nested
@@ -332,7 +336,8 @@ Settlements:
   it under its path (`step_count`, `fired_counts["Depot/#17/cabin/Sit"]`,
   `last_fired`), as the library driver does, so `progress` means the same
   whichever drove the net. `execution_stopped {no_fireable_transitions}` now
-  means nothing fireable anywhere.
+  means nothing fireable anywhere. *2026-11-21:* the outer net counts an inner
+  firing no more; progress is per net (the last section).
 - **Reads during a body** keep the snapshot rule and add two cases. An outer
   body may reach into the inner nets of the tokens it took or holds through a
   mutate edge, so a read addressed to one of those waits for the landing
@@ -360,7 +365,8 @@ journey over the wire on the `transit` conformance net
 owner and over pipes; `tests/test_runner_nested.py` covers what a transcript
 cannot show (the waits and the snapshots). The harness gained the `<path>`
 mask, captures inside longer strings and the nested fold, and replays each
-transcript against a registry reduced to its own net (PROTOCOL.md §11).
+transcript against a registry reduced to its own net (PROTOCOL.md §11). The
+first two went on 2026-11-21, with paths as text (the last section).
 
 **Revised 2026-10-10.** The transcript first ran the design's acceptance script,
 holding `Alight`, `Depart` and `Arrive` back with `disable` and enabling each
@@ -597,3 +603,71 @@ carries a colour given as lowercase `#rrggbb`, which `tests/record_transcript.py
 keeps and the shared-safe check allows, and pins `topology.controls` as
 declared, labels included. `tests/test_net_controls.py` covers the rest, and
 `tests/test_empty_place_edges.py` the traffic light's two controls.
+
+## As built, 2026-11-21: protocol version 2, paths as lists of steps (PROTOCOL.md §10, §12.1)
+
+The protocol became version 2 on 2026-11-21, for subnet places, a stepping
+rule per place and structured addresses
+(`../petritype-rs/dev-docs/subnet-place-spec.md`). The runner took the first
+part on its own: the version number, paths as lists of steps and progress per
+net. The stepping rule and subnet places follow in later steps of the same
+change; until then the topology still carries `passive`, and the driver still
+follows the loaded net's `deep_policy`.
+
+Settlements:
+
+- **The version.** `wire.PROTOCOL_VERSION` is 2, on `describe` and on every
+  `get_state`.
+- **Paths.** A path is a list of `wire.PathStep`s, one per level from the
+  loaded net down, each `{place, token, net}` for a net carried by a token,
+  wherever a path appears: the addressed requests and their results, a
+  token's `nets[]`, the `nested` notification, the `step` result and the log.
+  `Paths.parse` (`translate.py`) checks a request's path and answers
+  `invalid_params` for a value that is not a list, a step that is not an
+  object or has no `place`, a step with one of `token` and `net` without the
+  other, and a step value that is not a string; the old text form is refused
+  with a message that says a path is a list of steps. The owner then resolves
+  the steps one at a time (`_descend`), and a step that names no live net is
+  `unknown_net`, its message starting `step N of the path:` with N counted
+  from 0. The empty path names the loaded net, and a result about the loaded
+  net carries no path. A step of the subnet form, `{place}` alone, is read and
+  answered `unknown_net`, since no net has subnet places yet; `_descend` is
+  where they join.
+- **Names.** Nothing in the runner builds or parses an address as text, so a
+  place or a net may be named with a `/` or a leading `#` and still be reached
+  by path. Inside the owner a path is a tuple of `PathStep`s. The library
+  keeps its own form of a path, three segments per level with the token's id
+  spelt `#<id>` (`NestedNets.walk`, `find` and `resolve`, and the `Nested`
+  records), in which each name is a whole segment; `Paths.of_segments` is the
+  one place the runner reads it. The library's own descent still counts an
+  inner firing on the net around it under a name joined with `/`
+  (`"Shelf/#1/counter/Up"`: `NestedNets.count`, the return value of
+  `fire_one_transition` with `descend`, `RunSummary.fired`). The runner never
+  drives a net that way, so the protocol does not see it, unless a body
+  steps an inner net through that descent itself; it goes with the descent,
+  when the stepping rule replaces it.
+- **Progress is per net** (§5.4). The owner no longer counts an inner firing
+  in the outer net's progress under a joined key. Each net's progress is its
+  own graph's `step_count`, `fired_counts` and `last_fired`, which the engine
+  keeps for the firings of that net's own transitions, with the
+  `last_progress_at` the owner keeps per net.
+- **The transcripts.** The harness lost the `<path>` mask and the
+  substitution of a capture inside a longer string. A path in a transcript is
+  the list of steps it is, each step's token id a capture or `<id>`, and the
+  shared-safe check asks that of every `path`. The recorder masks a path step
+  by step: a step's token is its capture when the token has been named, and
+  `<id>` otherwise, so that a token is still named where its label is seen.
+  On re-recording a transcript it keeps what that transcript chose: its
+  capture names, its plain `<id>` masks, its `<any>`, and the order of its
+  unordered edges. All eight shared transcripts were re-recorded. 01 to 04,
+  written by hand on 2026-10-03, are now in the recorder's layout; compared
+  as JSON, each differs from what it replaced in `protocol_version` alone
+  (02, which pins no version, not at all), as do 06 to 08. 05 differs in its
+  version, its paths and one answer: the request that named a level without
+  its net is `invalid_params` in version 2, where the text form's missing
+  segment was `unknown_net`. Its sends spell their paths as lists. Every
+  transcript re-records to the same bytes.
+
+`tests/test_runner_nested.py` covers each wrong shape of a path, the index of
+the failing step, the empty path, names with a slash or a leading hash, and
+progress per net at two depths.

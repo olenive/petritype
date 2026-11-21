@@ -161,16 +161,17 @@ class Tokens:
         except Exception:
             return {}
 
-    def nets(token: Any, prefix: str, place: str, token_id: int) -> list[wire.NestedNet]:
-        """The ``nets`` of a nested token: one entry per inner net, with its path
-        under ``prefix`` (the wire path of the net the token is in)."""
+    def nets(token: Any, prefix: tuple[wire.PathStep, ...], place: str, token_id: int) -> list[wire.NestedNet]:
+        """The ``nets`` of a nested token: one entry per inner net, its path the
+        path of the net the token is in (``prefix``, empty for the loaded net)
+        and one step more."""
         from petritype.core.executable_graph_components import NestedNets
         entries = []
         for name, inner in NestedNets.of(token).items():
             entries.append(wire.NestedNet(
                 name=name,
                 nested_id=str(inner.net_id),
-                path=f"{prefix}/{place}/#{token_id}/{name}",
+                path=[*prefix, Paths.step(place, token_id, name)],
                 template=inner.template,
                 count=sum(len(node.tokens) for node in inner.places),
             ))
@@ -190,6 +191,63 @@ class Tokens:
     def json_value(token: Any) -> Any:
         """The token as plain JSON (for a serializable place). Raises if it has none."""
         return JsonForm.encode(token)
+
+
+class Paths:
+    """Functions over the address of an inner net, a ``path`` (PROTOCOL.md
+    §12.1): a tuple of ``wire.PathStep``s, one per level from the loaded net
+    down, the empty tuple being the loaded net itself. A step names a net carried
+    by a token, ``{place, token, net}``, or a subnet, ``{place}``. No character
+    in a name means anything, so a path is never spelt as text."""
+
+    def step(place: str, token_id: int, net: str) -> wire.PathStep:
+        """The step to the net named ``net`` in the token ``token_id`` of ``place``."""
+        return wire.PathStep(place=place, token=str(token_id), net=net)
+
+    def parse(raw: Any) -> tuple[wire.PathStep, ...]:
+        """A request's ``path`` as steps, or ``invalid_params`` for a shape that is
+        not one: a value that is not a list, a step that is not an object or has
+        no ``place``, a step with one of ``token`` and ``net`` without the other,
+        and a step value that is not a string. Other keys of a step are ignored
+        (§2). Whether the steps name a live net is the resolver's question."""
+        if not isinstance(raw, list):
+            raise ProtocolError(
+                ErrorCode.INVALID_PARAMS,
+                f'"path" is a list of steps, one per level from the loaded net down, not {type(raw).__name__}',
+            )
+        steps = []
+        for index, step in enumerate(raw):
+            where = f"step {index} of the path"
+            if not isinstance(step, dict):
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f"{where} is an object, not {type(step).__name__}")
+            if "place" not in step:
+                raise ProtocolError(ErrorCode.INVALID_PARAMS, f'{where} has no "place"')
+            for key in ("place", "token", "net"):
+                if key in step and not isinstance(step[key], str):
+                    raise ProtocolError(ErrorCode.INVALID_PARAMS, f'{where}: "{key}" is a string')
+            if ("token" in step) != ("net" in step):
+                given, missing = ("token", "net") if "token" in step else ("net", "token")
+                raise ProtocolError(
+                    ErrorCode.INVALID_PARAMS,
+                    f'{where} has "{given}" without "{missing}": a token\'s net is named by both',
+                )
+            steps.append(wire.PathStep(place=step["place"], token=step.get("token"), net=step.get("net")))
+        return tuple(steps)
+
+    def of_segments(segments: tuple[str, ...]) -> tuple[wire.PathStep, ...]:
+        """The steps of a path in the library's own form (``NestedNets.walk``,
+        ``find`` and the ``Nested`` records): three segments per level, the
+        place, the holding token's id spelt ``#<id>`` and the net's name. The one
+        place the runner reads that form; its place and net segments are names
+        taken whole, so every name survives the translation."""
+        return tuple(
+            wire.PathStep(place=segments[level], token=segments[level + 1].removeprefix("#"), net=segments[level + 2])
+            for level in range(0, len(segments) - 2, 3)
+        )
+
+    def to_wire(steps: tuple[wire.PathStep, ...]) -> list[dict]:
+        """The steps as JSON, for a result built as a plain dict."""
+        return [step.wire() for step in steps]
 
 
 class StrictJson:

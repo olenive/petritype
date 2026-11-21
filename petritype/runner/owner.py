@@ -42,6 +42,15 @@ fired last, by the library's cycle and cursor. An inner net's notifications go o
 wrapper; the engine delivers inner events to the outer log already wrapped as
 ``Nested`` records with the path as it stood.
 
+A path is a list of steps on the wire (§12.1, since 2026-11-21, when the
+protocol became version 2), one per level from the loaded net down, and inside
+the owner a tuple of ``wire.PathStep``s: a request's path is checked by
+``Paths.parse`` and resolved one step at a time (``_descend``), and the
+library's own spelling of a level, three segments with the token as ``#<id>``,
+is read only through ``Paths.of_segments``. Progress is per net (§5.4): each
+net counts the firings of its own transitions under their own names, and the
+outer net's progress says nothing of the firings inside it.
+
 Reads while a body runs
 -----------------------
 The live graph is **not** safe to read while a body runs, for the reason the
@@ -118,7 +127,7 @@ from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
 from petritype.runner.translate import (
-    JSON_SCALARS, Controls, Filters, Serializable, StrictJson, Tokens, Topologies, TypeNames,
+    JSON_SCALARS, Controls, Filters, Paths, Serializable, StrictJson, Tokens, Topologies, TypeNames,
 )
 from petritype.runtime import (
     ControlSpec, Disable, Enable, Extend, Fire, RunContext, Runner, SetNetParam, SetParam,
@@ -192,8 +201,8 @@ class Outgoing:
 class _PlaceView:
     """One place as of a snapshot. ``eager`` holds the entries rendered at capture
     (the tokens handed to an airborne body), ``at_risk`` their indices. ``nested``
-    places render each token's ``nets`` under ``prefix``, the wire path of the net
-    the place belongs to; ``place`` is the node itself, for the keys it derives;
+    places render each token's ``nets`` under ``prefix``, the path of the net the
+    place belongs to (empty for the loaded net); ``place`` is the node itself, for the keys it derives;
     ``filter`` and ``params`` the connection's projection (§13.4), under which
     only the kept tokens are listed and ``matching`` counts them."""
 
@@ -203,7 +212,7 @@ class _PlaceView:
     tokens: list[Any]
     eager: dict[int, wire.Token] = field(default_factory=dict)
     nested: bool = False
-    prefix: str = ""
+    prefix: tuple[wire.PathStep, ...] = ()
     place: Optional[ListPlaceNode] = None
     filter: Optional[Filter] = None
     params: dict = field(default_factory=dict)
@@ -277,7 +286,7 @@ class _Net:
     last_fireable: list[str]
     nested_id: Optional[int] = None
     # The last path this inner net was found at, for a line written while its token is airborne.
-    last_path: tuple[str, ...] = ()
+    last_path: tuple[wire.PathStep, ...] = ()
     last_fired: Optional[str] = None
     last_progress_at: Optional[datetime] = None
     # The connection's projection of this net (§13.4), and the ids it has been shown.
@@ -608,8 +617,9 @@ class Owner:
 
     # --- addressing nets (§12.1) ---
 
-    def _net_for(self, graph: ExecutableGraph, path: tuple[str, ...] = ()) -> _Net:
-        """The ``_Net`` of a graph found inside the outer net, built on first sight."""
+    def _net_for(self, graph: ExecutableGraph, path: tuple[wire.PathStep, ...] = ()) -> _Net:
+        """The ``_Net`` of a graph found inside the outer net, built on first sight;
+        ``path`` is where it was found, kept as its last known path."""
         loaded = self._loaded
         if graph is loaded.outer.graph:
             return loaded.outer
@@ -634,9 +644,9 @@ class Owner:
         if not NestedNets.any_nested(loaded.outer.graph):
             return
 
-        def visit(graph: ExecutableGraph, prefix: tuple[str, ...]) -> None:
+        def visit(graph: ExecutableGraph, prefix: tuple[wire.PathStep, ...]) -> None:
             for segments, _token, _name, inner in NestedNets.walk(graph):
-                path = (*prefix, *segments)
+                path = (*prefix, *Paths.of_segments(segments))
                 if inner.net_id not in loaded.inner:
                     self._net_for(inner, path)
                 visit(inner, path)
@@ -655,24 +665,14 @@ class Owner:
         found = NestedNets.find(loaded.outer.graph, net_id)
         if found is None:
             return None
-        return self._net_for(found[1], found[0])
-
-    def _segments(self, path: str) -> tuple[str, ...]:
-        """A wire path as the library's segments (without the net's name)."""
-        parts = path.split("/")
-        name = self._loaded.entry.name
-        if parts[0] != name:
-            raise ProtocolError(ErrorCode.UNKNOWN_NET, f"path {path!r} does not start with the loaded net {name!r}")
-        rest = tuple(parts[1:])
-        if len(rest) % 3 != 0:
-            raise ProtocolError(
-                ErrorCode.UNKNOWN_NET, f"path {path!r}: a path has three segments per level (place, #id, net)",
-            )
-        return rest
+        return self._net_for(found[1], Paths.of_segments(found[0]))
 
     def _target(self, params: dict) -> _Net:
         """The net a request addresses: the outer net, or the inner net its
-        ``path`` or ``nested_id`` names (``unknown_net`` when none is live)."""
+        ``path`` or ``nested_id`` names. A path of the wrong shape is
+        ``invalid_params`` (``Paths.parse``), the empty path the loaded net, and a
+        path or id that names no live net ``unknown_net``, a path's error naming
+        the step that failed by its index from 0."""
         loaded = self._loaded
         has_path, has_id = "path" in params, "nested_id" in params
         if has_path and has_id:
@@ -683,17 +683,16 @@ class Owner:
             found = NestedNets.find(loaded.outer.graph, net_id) if net_id is not None else None
             if found is None:
                 raise ProtocolError(ErrorCode.UNKNOWN_NET, f"no live inner net {spelt!r}")
-            return self._net_for(found[1], found[0])
+            return self._net_for(found[1], Paths.of_segments(found[0]))
         if has_path:
-            path = _string(params, "path")
-            segments = self._segments(path)
-            if not segments:
-                return loaded.outer
-            try:
-                graph = NestedNets.resolve(loaded.outer.graph, segments)
-            except LookupError as error:
-                raise ProtocolError(ErrorCode.UNKNOWN_NET, f"path {path!r}: {error}") from error
-            return self._net_for(graph, segments)
+            steps = Paths.parse(params["path"])
+            graph = loaded.outer.graph
+            for index, step in enumerate(steps):
+                try:
+                    graph = _descend(graph, step)
+                except LookupError as error:
+                    raise ProtocolError(ErrorCode.UNKNOWN_NET, f"step {index} of the path: {error}") from error
+            return self._net_for(graph, steps)
         return loaded.outer
 
     def _target_quietly(self, params: dict):
@@ -711,39 +710,36 @@ class Owner:
         spelt = params.get("nested_id")
         if isinstance(spelt, str) and (net_id := _token_id(spelt)) in flight.held_nets:
             return _HELD
-        path = params.get("path")
-        if isinstance(path, str):
-            parts = path.split("/")
-            if len(parts) >= 3 and parts[2].startswith("#") and (token_id := _token_id(parts[2][1:])) is not None:
-                if (parts[1], token_id) in flight.held_tokens:
-                    return _HELD
+        try:
+            steps = Paths.parse(params["path"]) if "path" in params else ()
+        except ProtocolError:
+            steps = ()
+        if steps and steps[0].token is not None and (token_id := _token_id(steps[0].token)) is not None:
+            if (steps[0].place, token_id) in flight.held_tokens:
+                return _HELD
         return None
 
-    def _path_of(self, net: _Net) -> str:
-        """The wire path of a net as the marking stands (its last known path while
-        the token holding it is airborne)."""
-        name = self._loaded.entry.name
+    def _path_of(self, net: _Net) -> tuple[wire.PathStep, ...]:
+        """The path of a net as the marking stands (its last known path while the
+        token holding it is airborne); the empty path for the loaded net."""
         if net.is_outer:
-            return name
+            return ()
         found = NestedNets.find(self._loaded.outer.graph, net.nested_id)
         if found is not None:
-            net.last_path = found[0]
-        return "/".join((name, *net.last_path))
-
-    def _wire_path(self, segments: tuple[str, ...]) -> str:
-        return "/".join((self._loaded.entry.name, *segments))
+            net.last_path = Paths.of_segments(found[0])
+        return net.last_path
 
     def _net_name(self, net: _Net) -> str:
         """The name a state names: the loaded net's for the outer net, the net's
         name within its token for an inner one."""
         if net.is_outer:
             return self._loaded.entry.name
-        return net.last_path[-1] if net.last_path else ""
+        return (net.last_path[-1].net or "") if net.last_path else ""
 
     def _stamp(self, net: _Net, model: wire.Wire) -> wire.Wire:
         """``path`` and ``nested_id`` on a result about an inner net."""
         if not net.is_outer:
-            model.path = self._path_of(net)
+            model.path = list(self._path_of(net))
             model.nested_id = str(net.nested_id)
         return model
 
@@ -959,7 +955,7 @@ class Owner:
             ids=list(place.token_ids),
             tokens=list(place.tokens),
             nested=place.name in net.nested_places,
-            prefix=self._path_of(net) if place.name in net.nested_places else "",
+            prefix=self._path_of(net) if place.name in net.nested_places else (),
             place=place,
             filter=net.filter,
             params=dict(net.graph.params),
@@ -1150,7 +1146,7 @@ class Owner:
         """The first inner firing below ``net`` in the library driver's order:
         place, token, net order, a net's own inner nets before the next token."""
         for segments, _token, _name, graph in NestedNets.walk(net.graph, passive=False):
-            inner = self._net_for(graph, (*net.last_path, *segments))
+            inner = self._net_for(graph, (*net.last_path, *Paths.of_segments(segments)))
             chosen = self._select_in(inner)
             if chosen is not None:
                 return inner, chosen
@@ -1173,7 +1169,7 @@ class Owner:
         outer = self._loaded.outer
         if outer.graph.deep_policy == "interleaved" and NestedNets.any_nested(outer.graph):
             for segments, graph in NestedNets.deep_turns(outer.graph):
-                net = self._net_for(graph, segments)
+                net = self._net_for(graph, Paths.of_segments(segments))
                 chosen = self._select_in(net)
                 if chosen is not None:
                     # Chosen here, launched at once: this net took the turn.
@@ -1276,22 +1272,21 @@ class Owner:
         the place and index of the token that holds the next level."""
         loaded = self._loaded
         found = NestedNets.find(loaded.outer.graph, net.nested_id)
-        segments = found[0] if found is not None else net.last_path
+        steps = Paths.of_segments(found[0]) if found is not None else net.last_path
         chain = []
         graph = loaded.outer.graph
-        for level in range(0, len(segments), 3):
-            place_name, token_segment, name = segments[level:level + 3]
-            ancestor = self._net_for(graph, segments[:level])
-            place = ancestor.place_nodes.get(place_name)
-            if place is None or not token_segment.startswith("#"):
+        for level, step in enumerate(steps):
+            ancestor = self._net_for(graph, steps[:level])
+            place = ancestor.place_nodes.get(step.place)
+            token_id = _token_id(step.token) if step.token is not None else None
+            if place is None or token_id is None:
                 break
-            token_id = _token_id(token_segment[1:])
             ids = place.token_ids
             if token_id not in ids:
                 break
             index = ids.index(token_id)
-            chain.append((ancestor, place_name, index))
-            graph = NestedNets.of(place.tokens[index]).get(name)
+            chain.append((ancestor, step.place, index))
+            graph = NestedNets.of(place.tokens[index]).get(step.net)
             if graph is None:
                 break
         return chain
@@ -1335,20 +1330,15 @@ class Owner:
                 produced=_pairs(fired.produced) if fired is not None else [],
                 error=failed.error if failed is not None else None,
                 restored=failed.restored if failed is not None else None,
-                path=self._wire_path(path) if not net.is_outer else None,
+                path=list(path) if not net.is_outer else None,
                 nested_id=str(net.nested_id) if not net.is_outer else None,
             ), chain))
         if fired is not None:
+            # Progress is per net (§5.4): the net that fired counts it, under the
+            # transition's own name (the engine's ``step_count`` and
+            # ``fired_counts`` of that graph), and no net around it does.
             net.last_fired = flight.name
             net.last_progress_at = now
-            if not net.is_outer:
-                # The outer net counts an inner firing under its path, as the library's driver does.
-                outer = loaded.outer
-                key = "/".join((*path, flight.name))
-                outer.graph.step_count += 1
-                outer.graph.fired_counts[key] = outer.graph.fired_counts.get(key, 0) + 1
-                outer.last_fired = key
-                outer.last_progress_at = now
 
         if failed is not None or (fired is None and landing.error is not None):
             if loaded.running:
@@ -1379,7 +1369,7 @@ class Owner:
             fired=landed,
             transition=flight.name if landed else None,
             failed=True if failed is not None else None,
-            path=self._wire_path(path) if landed and not net.is_outer else None,
+            path=list(path) if landed and not net.is_outer else None,
             nested_id=str(net.nested_id) if landed and not net.is_outer else None,
             marking_version=self.marking_version,
             running=loaded.running,
@@ -1389,7 +1379,7 @@ class Owner:
         """The ``Fired`` or ``Failed`` of this flight among the events just
         drained, and, for an inner firing, the path it was recorded under."""
         fired = failed = None
-        path: tuple[str, ...] = ()
+        path: tuple[wire.PathStep, ...] = ()
         for event in events:
             inner = None
             if flight.net_id is None:
@@ -1405,19 +1395,19 @@ class Owner:
             else:
                 continue
             if isinstance(event, core_events.Nested):
-                path = event.path
+                path = Paths.of_segments(event.path)
         if flight.net_id is not None and not path:
             net = self._loaded.inner.get(flight.net_id)
             path = net.last_path if net is not None else ()
         return fired, failed, path
 
-    def _id_chain(self, segments: tuple[str, ...]) -> tuple[int, ...]:
+    def _id_chain(self, steps: tuple[wire.PathStep, ...]) -> tuple[int, ...]:
         """The nested ids down a path, outermost first, for the log's filter."""
         chain = []
         graph = self._loaded.outer.graph
-        for level in range(0, len(segments), 3):
+        for step in steps:
             try:
-                graph = NestedNets.resolve(graph, segments[level:level + 3])
+                graph = _descend(graph, step)
             except LookupError:
                 break
             chain.append(graph.net_id)
@@ -1510,7 +1500,7 @@ class Owner:
         injected = {"status": "injected", "id": str(added.token_id), "marking_version": net.marking_version}
         if not net.is_outer:
             # A result about an inner net names it (§12.3), the version its own.
-            injected["path"] = self._path_of(net)
+            injected["path"] = Paths.to_wire(self._path_of(net))
             injected["nested_id"] = str(net.nested_id)
         out.lines.append(Lines.result(request_id, injected))
 
@@ -1703,16 +1693,16 @@ class Owner:
             if isinstance(event, core_events.Nested):
                 inner = self._net_by_id(event.nested_id)
                 notification = self._notification(inner, event.event)
+                path = Paths.of_segments(event.path)
                 if inner is not None:
-                    if inner.last_path != event.path:
-                        inner.last_path = event.path
+                    inner.last_path = path
                     if notification.moves_version:
                         inner.marking_version += 1
                     notification.marking_version = inner.marking_version
                     if inner not in touched:
                         touched.append(inner)
                 out.lines.append(wire.NestedEvent(
-                    path=self._wire_path(event.path), nested_id=str(event.nested_id), event=notification.line(),
+                    path=list(path), nested_id=str(event.nested_id), event=notification.line(),
                     marking_version=outer.marking_version, running=loaded.running,
                 ).line())
             else:
@@ -1752,7 +1742,7 @@ class Owner:
             return line
         loaded = self._loaded
         return wire.NestedEvent(
-            path=self._path_of(net), nested_id=str(net.nested_id), event=line,
+            path=list(self._path_of(net)), nested_id=str(net.nested_id), event=line,
             marking_version=loaded.outer.marking_version, running=loaded.running,
         ).line()
 
@@ -1897,6 +1887,31 @@ def _cause(error: BaseException) -> BaseException:
     if isinstance(error, TransitionFailedError) and error.__cause__ is not None:
         return error.__cause__
     return error
+
+
+def _descend(graph: ExecutableGraph, step: wire.PathStep) -> ExecutableGraph:
+    """The net one step of a path below ``graph`` (§12.1), or ``LookupError``
+    saying why the step names none. A step of the form ``{place, token, net}``
+    names the net ``net`` in the token ``token`` of the nested place ``place``; a
+    step of the form ``{place}`` names the subnet of a subnet place, which this
+    runner does not have yet, so such a step names no net. Names are compared
+    exactly as given."""
+    if step.token is None:
+        raise LookupError(f"no subnet place named {step.place!r}")
+    place = graph.place_named(step.place)
+    if place is None:
+        raise LookupError(f"no place named {step.place!r}")
+    if not place.nested:
+        raise LookupError(f"place {step.place!r} holds no nets")
+    TokenIds.resync(graph)
+    ids = place.token_ids
+    token_id = _token_id(step.token)
+    if token_id is None or token_id not in ids:
+        raise LookupError(f"no token {step.token!r} in {step.place!r}")
+    nets = NestedNets.of(place.tokens[ids.index(token_id)])
+    if step.net not in nets:
+        raise LookupError(f"token {step.token!r} in {step.place!r} holds no net named {step.net!r}")
+    return nets[step.net]
 
 
 def _find(snapshot: _Snapshot, token_id: int) -> Optional[tuple[str, Any]]:

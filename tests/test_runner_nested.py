@@ -72,6 +72,16 @@ def methods(lines):
     return [line.get("method") or ("result" if "result" in line else "error") for line in lines]
 
 
+def step(place, token, net):
+    """One step of a path (PROTOCOL.md §12.1): the net ``net`` in token ``token`` of ``place``."""
+    return {"place": place, "token": token, "net": net}
+
+
+def message(lines):
+    assert "error" in lines[-1], lines
+    return lines[-1]["error"]["message"]
+
+
 def result(lines):
     assert "result" in lines[-1], lines
     return lines[-1]["result"]
@@ -157,7 +167,7 @@ class TestReadsWhileHeld:
         assert methods(lines) == ["launched"]
         # The box the body holds through its mutate edge: its counter waits.
         assert await harness.send("get_state", {"nested_id": held}) == []
-        assert await harness.send("get_state", {"path": f"boxes/Shelf/#{shelf[0]['id']}/counter"}) == []
+        assert await harness.send("get_state", {"path": [step("Shelf", shelf[0]["id"], "counter")]}) == []
         # A box the body does not hold: read at once, live.
         free_state = result(await harness.send("get_state", {"nested_id": free}))
         assert free_state["net"] == "counter" and free_state["nested_id"] == free
@@ -201,7 +211,8 @@ class TestAddressing:
     async def test_inner_state_names_and_versions(self):
         harness, shelf, spare = await loaded_boxes()
         nested_id = shelf[1]["nets"][0]["nested_id"]
-        path = f"boxes/Shelf/#{shelf[1]['id']}/counter"
+        path = [step("Shelf", shelf[1]["id"], "counter")]
+        assert shelf[1]["nets"][0]["path"] == path, "a token's nets name their path from the loaded net"
         by_id = result(await harness.send("get_state", {"nested_id": nested_id}))
         by_path = result(await harness.send("get_state", {"path": path}))
         assert by_id == by_path
@@ -219,19 +230,20 @@ class TestAddressing:
         first, second = (token["nets"][0]["nested_id"] for token in shelf)
         lines = await harness.send("step")
         assert lines[0]["params"]["nested_id"] == first
-        assert result(lines) == {"fired": True, "transition": "Up", "path": f"boxes/Shelf/#{shelf[0]['id']}/counter",
+        assert lines[0]["params"]["path"] == [step("Shelf", shelf[0]["id"], "counter")]
+        assert result(lines) == {"fired": True, "transition": "Up", "path": [step("Shelf", shelf[0]["id"], "counter")],
                                  "nested_id": first, "marking_version": 0, "running": False}
         assert lines[0]["params"]["event"]["params"]["marking_version"] == 1, "the inner net's own version"
         assert lines[0]["params"]["marking_version"] == 0, "the outer net's, unmoved"
         lines = await harness.send("step")
         assert lines[0]["params"]["nested_id"] == second
         assert result(await harness.send("step"))["fired"] is False
+        # Progress is per net (§5.4): the outer net fired nothing of its own.
         outer = result(await harness.send("get_state"))
-        assert outer["progress"]["step_count"] == 2
-        assert outer["progress"]["fired_counts"] == {
-            f"Shelf/#{shelf[0]['id']}/counter/Up": 1, f"Shelf/#{shelf[1]['id']}/counter/Up": 1,
-        }
-        assert result(await harness.send("get_state", {"nested_id": first}))["progress"]["step_count"] == 1
+        assert outer["progress"] == {"step_count": 0, "last_fired": None, "fired_counts": {}, "last_progress_at": None}
+        for nested_id in (first, second):
+            progress = result(await harness.send("get_state", {"nested_id": nested_id}))["progress"]
+            assert (progress["step_count"], progress["last_fired"], progress["fired_counts"]) == (1, "Up", {"Up": 1})
 
     async def test_a_running_net_stops_when_nothing_fires_anywhere(self):
         harness, shelf, spare = await loaded_boxes()
@@ -274,21 +286,76 @@ class TestAddressing:
         await harness.send("step")
         entries = result(await harness.send("get_log", {"nested_id": first}))["entries"]
         assert [(e["seq"], e["transition"], e["nested_id"]) for e in entries] == [(1, "Up", first)]
-        assert entries[0]["path"] == f"boxes/Shelf/#{shelf[0]['id']}/counter"
+        assert entries[0]["path"] == [step("Shelf", shelf[0]["id"], "counter")]
         assert [e["seq"] for e in result(await harness.send("get_log"))["entries"]] == [1, 2]
+        by_path = await harness.send("get_log", {"path": [step("Shelf", shelf[0]["id"], "counter")]})
+        assert result(by_path)["entries"] == entries
 
     async def test_errors(self):
         harness, shelf, spare = await loaded_boxes()
         nested_id = shelf[0]["nets"][0]["nested_id"]
         assert error(await harness.send("get_state", {"nested_id": "999"})) == "unknown_net"
-        assert error(await harness.send("get_state", {"path": "boxes/Attic/#1/counter"})) == "unknown_net"
-        assert error(await harness.send("get_state", {"path": "elsewhere/Shelf/#1/counter"})) == "unknown_net"
-        assert error(await harness.send("get_state", {"path": "boxes/Shelf/#1"})) == "unknown_net"
-        assert error(await harness.send("get_state", {"path": "boxes", "nested_id": nested_id})) == "invalid_params"
+        assert error(await harness.send("get_state", {"path": [step("Attic", "1", "counter")]})) == "unknown_net"
+        assert error(await harness.send("get_state", {"path": [], "nested_id": nested_id})) == "invalid_params"
         assert error(await harness.send("enable", {"transition": "Fill", "nested_id": nested_id})) == "invalid_params"
+        assert error(await harness.send("enable", {"transition": "Fill", "path": []})) == "invalid_params"
         assert error(await harness.send("set_param", {"param": "fill", "value": 1})) == "invalid_params"
         assert error(await harness.send("set_param", {"param": "speed", "value": 1})) == "invalid_params"
-        assert result(await harness.send("get_state", {"path": "boxes"}))["net"] == "boxes", "the outer net by path"
+
+    async def test_the_empty_path_names_the_loaded_net(self):
+        harness, shelf, spare = await loaded_boxes()
+        by_path = result(await harness.send("get_state", {"path": []}))
+        assert by_path == result(await harness.send("get_state")), "the same read, with no path or nested_id in it"
+        assert by_path["net"] == "boxes" and "path" not in by_path and "nested_id" not in by_path
+        page = result(await harness.send("get_place_tokens", {"place": "Shelf", "path": []}))
+        assert page["count"] == 2 and "path" not in page
+        injected = result(await harness.send("inject", {"place": "Spare", "path": [], "token": {
+            "label": "d", "counter": {"template": "Counter", "marking": {}}}}))
+        assert set(injected) == {"status", "id", "marking_version"}
+
+    async def test_a_path_of_the_wrong_shape_is_invalid_params(self):
+        """§12.1: a path that is not a list, a step without ``place``, a step with
+        one of ``token`` and ``net`` without the other, and a step value that is
+        not a string. The old text form is refused, with a message that says what
+        a path is."""
+        harness, shelf, spare = await loaded_boxes()
+        token = shelf[0]["id"]
+        text = await harness.send("get_state", {"path": f"boxes/Shelf/#{token}/counter"})
+        assert error(text) == "invalid_params" and "a list of steps" in message(text)
+        for path in (
+            {"place": "Shelf", "token": token, "net": "counter"},   # one step, not a list of them
+            ["Shelf", token, "counter"],                            # steps that are not objects
+            [{"token": token, "net": "counter"}],                   # no place
+            [{"place": "Shelf", "token": token}],                   # a token without its net
+            [{"place": "Shelf", "net": "counter"}],                 # a net without its token
+            [{"place": "Shelf", "token": int(token), "net": "counter"}],  # a token id is a string
+            [{"place": 3, "token": token, "net": "counter"}],
+            [{"place": "Shelf", "token": token, "net": None}],
+            [step("Shelf", token, "counter"), "Low"],
+        ):
+            lines = await harness.send("get_state", {"path": path})
+            assert error(lines) == "invalid_params", path
+        lines = await harness.send("get_place_tokens", {"place": "Low", "path": [{"place": "Shelf", "token": token}]})
+        assert error(lines) == "invalid_params" and "step 0" in message(lines)
+        assert error(await harness.send("inject", {"place": "Low", "token": 1, "path": "boxes"})) == "invalid_params"
+        assert error(await harness.send("query", {"path": 7})) == "invalid_params"
+
+    async def test_unknown_net_names_the_step_that_failed(self):
+        harness, shelf, spare = await loaded_boxes()
+        token = shelf[0]["id"]
+        for path, failing in (
+            ([step("Attic", token, "counter")], 0),                        # no such place
+            ([step("Shelf", "999", "counter")], 0),                        # no such token there
+            ([step("Shelf", "01", "counter")], 0),                         # only the canonical spelling names a token
+            ([step("Shelf", token, "boot")], 0),                           # the token holds no net of that name
+            ([{"place": "Shelf"}], 0),                                     # a subnet step: the net has no subnet places
+            ([step("Shelf", token, "counter"), step("Low", "1", "x")], 1),  # Low holds no nets
+            ([step("Shelf", token, "counter"), {"place": "High"}], 1),
+        ):
+            lines = await harness.send("get_state", {"path": path})
+            assert error(lines) == "unknown_net", path
+            assert message(lines).startswith(f"step {failing} of the path:"), message(lines)
+        assert result(await harness.send("get_state", {"path": [step("Shelf", token, "counter")]}))["net"] == "counter"
 
     async def test_reset_drops_every_inner_net(self):
         harness, shelf, spare = await loaded_boxes()
@@ -297,6 +364,134 @@ class TestAddressing:
         assert error(await harness.send("get_state", {"nested_id": nested_id})) == "unknown_net"
         fresh = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
         assert fresh[0]["nets"][0]["nested_id"] != nested_id
+
+
+# --- names that the text form of version 1 could not spell, and two depths ------------------------
+
+
+class Odd(BaseModel):
+    """A token whose one net has a name with a slash in it."""
+
+    label: str
+    inside: ExecutableGraph
+
+    def __petritype_nets__(self):
+        return {"in/side": self.inside}
+
+
+def odd_inside() -> ExecutableGraph:
+    graph = ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("#Low", int),
+        ArgumentEdgeToTransition("#Low", "Up/1", "x"),
+        FunctionTransitionNode("Up/1", tick),
+        ReturnedEdgeFromTransition("Up/1", "#High/"),
+        ListPlaceNode("#High/", int),
+    ])
+    NestedNets.put(graph, "#Low", [1])
+    graph.drain_events()
+    return graph
+
+
+@petri_net(name="odd/names", description="Names with a slash or a leading hash")
+def odd_names() -> ExecutableGraph:
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("#Shelf/A", Odd, [Odd(label="o", inside=odd_inside())], nested=True),
+    ])
+
+
+class Nest(BaseModel):
+    label: str
+    inner: ExecutableGraph
+
+    def __petritype_nets__(self):
+        return {"inner": self.inner}
+
+
+def nest_level(child: Nest | None = None) -> ExecutableGraph:
+    """A counter with one token to count, holding ``child`` in its place ``Inside``."""
+    nodes = [
+        ListPlaceNode("Low", int),
+        ArgumentEdgeToTransition("Low", "Up", "x"),
+        FunctionTransitionNode("Up", tick),
+        ReturnedEdgeFromTransition("Up", "High"),
+        ListPlaceNode("High", int),
+    ]
+    if child is not None:
+        nodes.append(ListPlaceNode("Inside", Nest, [child], nested=True))
+    graph = ExecutableGraphOperations.construct_graph(nodes)
+    NestedNets.put(graph, "Low", [1])
+    graph.drain_events()
+    return graph
+
+
+def ring(bell: int) -> int:
+    return bell
+
+
+@petri_net(name="nests", description="A bell, and a counter in a counter")
+def nests() -> ExecutableGraph:
+    middle = Nest(label="middle", inner=nest_level(Nest(label="deep", inner=nest_level())))
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("Bell", int, [1]),
+        ArgumentEdgeToTransition("Bell", "Ring", "bell"),
+        FunctionTransitionNode("Ring", ring),
+        ReturnedEdgeFromTransition("Ring", "Rung"),
+        ListPlaceNode("Rung", int),
+        ListPlaceNode("Top", Nest, [middle], nested=True),
+    ])
+
+
+class TestNamesAndDepth:
+
+    async def test_names_with_a_slash_or_a_leading_hash_are_addresses_like_any_other(self):
+        harness = Harness(odd_names)
+        await harness.send("load", {"net": "odd/names"})
+        state = result(await harness.send("get_state"))
+        token = state["marking"]["places"]["#Shelf/A"]["tokens"][0]
+        path = [step("#Shelf/A", token["id"], "in/side")]
+        assert token["nets"][0]["path"] == path and token["nets"][0]["name"] == "in/side"
+        nested_id = token["nets"][0]["nested_id"]
+        inner = result(await harness.send("get_state", {"path": path}))
+        assert (inner["net"], inner["path"], inner["nested_id"]) == ("in/side", path, nested_id)
+        assert list(inner["marking"]["places"]) == ["#Low", "#High/"]
+        page = result(await harness.send("get_place_tokens", {"place": "#Low", "path": path}))
+        assert page["count"] == 1 and page["path"] == path
+        lines = await harness.send("step")
+        wrapped = [line["params"]["path"] for line in lines if line.get("method") == "nested"]
+        assert wrapped and all(each == path for each in wrapped), "the nested lines carry the path as given"
+        assert result(lines)["path"] == path and result(lines)["transition"] == "Up/1"
+        entries = result(await harness.send("get_log", {"path": path}))["entries"]
+        assert [(entry["transition"], entry["path"]) for entry in entries] == [("Up/1", path)]
+        progress = result(await harness.send("get_state", {"path": path}))["progress"]
+        assert (progress["fired_counts"], progress["last_fired"]) == ({"Up/1": 1}, "Up/1")
+        assert result(await harness.send("get_state"))["progress"]["fired_counts"] == {}
+
+    async def test_progress_is_per_net_at_two_depths(self):
+        harness = Harness(nests)
+        await harness.send("load", {"net": "nests"})
+        top = result(await harness.send("get_state"))["marking"]["places"]["Top"]["tokens"][0]
+        middle_path = top["nets"][0]["path"]
+        middle = result(await harness.send("get_state", {"path": middle_path}))
+        deep_token = middle["marking"]["places"]["Inside"]["tokens"][0]
+        deep_path = deep_token["nets"][0]["path"]
+        assert deep_path == [step("Top", top["id"], "inner"), step("Inside", deep_token["id"], "inner")]
+        fired = []
+        while (answer := result(await harness.send("step")))["fired"]:
+            fired.append((answer["transition"], answer.get("path")))
+        assert fired == [("Ring", None), ("Up", middle_path), ("Up", deep_path)], "outer first, then down"
+        counts = {}
+        for name, params in (("outer", {}), ("middle", {"path": middle_path}), ("deep", {"path": deep_path})):
+            progress = result(await harness.send("get_state", params))["progress"]
+            counts[name] = (progress["step_count"], progress["last_fired"], progress["fired_counts"])
+        assert counts == {
+            "outer": (1, "Ring", {"Ring": 1}),
+            "middle": (1, "Up", {"Up": 1}),
+            "deep": (1, "Up", {"Up": 1}),
+        }, "each net counts its own firings under their own names, and none of the nets inside it"
+        log = result(await harness.send("get_log", {"path": middle_path}))["entries"]
+        assert [entry.get("path") for entry in log] == [middle_path, deep_path], "a net's log holds the nets inside it"
+        wrong = await harness.send("get_state", {"path": [*middle_path, step("Inside", "999", "inner")]})
+        assert error(wrong) == "unknown_net" and message(wrong).startswith("step 1 of the path:")
 
 
 class TestTransitOverTheProtocol:
@@ -314,7 +509,8 @@ class TestTransitOverTheProtocol:
         assert len(fired) == 10
         assert [line["params"]["event"]["method"] for line in lines if line.get("method") == "nested"] == ["param_changed"]
         moved = result(await harness.send("get_state", {"nested_id": cabin}))
-        assert moved["path"].startswith("transit/In Transit/#") and moved["nested_id"] == cabin
+        in_transit = result(await harness.send("get_place_tokens", {"place": "In Transit"}))["tokens"][0]["id"]
+        assert moved["path"] == [step("In Transit", in_transit, "cabin")] and moved["nested_id"] == cabin
         lines = await harness.send("step")
         assert result(lines)["transition"] == "Arrive"
         assert [(line["params"]["event"]["method"], line["params"]["event"]["params"].get("place"))
@@ -322,7 +518,9 @@ class TestTransitOverTheProtocol:
             ("param_changed", None), ("removed", "Doors Closed"), ("added", "Doors Open"), ("added", "Announcements"),
         ], "stopped, the doors opened, and the announcement, all by the outer body"
         arrived = result(await harness.send("get_state", {"nested_id": cabin}))
-        assert arrived["path"].startswith("transit/Central/#")
+        at_central = result(await harness.send("get_place_tokens", {"place": "Central"}))["tokens"][0]["id"]
+        assert arrived["path"] == [step("Central", at_central, "cabin")]
+        assert result(await harness.send("get_state", {"path": arrived["path"]}))["nested_id"] == cabin
         assert arrived["marking"]["places"]["Announcements"]["count"] == 1
         assert arrived["marking"]["places"]["Doors Closed"]["count"] == 0
         assert result(await harness.send("get_token", {"id": arrived["marking"]["places"]["Doors Open"]["tokens"][0]["id"],

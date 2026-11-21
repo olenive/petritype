@@ -1,4 +1,4 @@
-"""The wire shapes of the petritype net protocol, version 1 (PROTOCOL.md).
+"""The wire shapes of the petritype net protocol, version 2 (PROTOCOL.md).
 
 Pydantic models for every object the protocol defines, serialised to plain
 dicts ready for ``json.dumps``. Nothing here knows about ``ExecutableGraph``:
@@ -12,7 +12,9 @@ The second condition is what lets ``ParamDescription.default`` be the JSON
 value ``null`` when a factory's default is ``None``, and be absent when it has
 no default at all.
 
-Token ids are strings on the wire; the runner converts at the boundary.
+Token ids are strings on the wire; the runner converts at the boundary. The
+address of an inner net, its ``path``, is a list of ``PathStep``s, one per
+level from the loaded net down (§12.1), never text.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from typing import Any, ClassVar, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, model_serializer
 
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 RUNTIME = "python"
 
 
@@ -251,6 +253,21 @@ class TransitionState(Wire):
     priority: Optional[float] = None
 
 
+class PathStep(Wire):
+    """One step of a ``path`` (§12.1), one level of nesting. A net carried by a
+    token is ``{place, token, net}``: the place that holds the token, the token's
+    id and the net's name within the token (``""`` for a token that is itself a
+    net). A subnet is ``{place}`` alone, the subnet place. Names are compared
+    exactly as given, whatever characters they hold. Frozen, so a path is a
+    value that can be kept and compared."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    place: str
+    token: Optional[str] = None
+    net: Optional[str] = None
+
+
 class NestedNet(Wire):
     """One inner net a token holds (§12.2): its name within the token, its stable
     id, its path as of now, the template that built it, and how many tokens it
@@ -258,7 +275,7 @@ class NestedNet(Wire):
 
     name: str
     nested_id: str
-    path: str
+    path: list[PathStep]
     template: Optional[str] = None
     count: int
 
@@ -307,7 +324,7 @@ class State(Wire):
     transitions: dict[str, TransitionState]
     marking: Marking
     progress: Progress
-    path: Optional[str] = None
+    path: Optional[list[PathStep]] = None
     nested_id: Optional[str] = None
     template: Optional[str] = None
 
@@ -324,7 +341,7 @@ class PlaceTokens(Wire):
     limit: int
     tokens: list[Token]
     has_more: bool
-    path: Optional[str] = None
+    path: Optional[list[PathStep]] = None
     nested_id: Optional[str] = None
 
 
@@ -340,7 +357,7 @@ class TokenValue(Wire):
     kind: Literal["json", "text"]
     value: Any = None
     text: Optional[str] = None
-    path: Optional[str] = None
+    path: Optional[list[PathStep]] = None
     nested_id: Optional[str] = None
     nets: Optional[list[NestedNet]] = None
 
@@ -376,7 +393,7 @@ class StepResult(Wire):
     fired: bool
     transition: Optional[str] = None
     failed: Optional[bool] = None
-    path: Optional[str] = None
+    path: Optional[list[PathStep]] = None
     nested_id: Optional[str] = None
     marking_version: int
     running: bool
@@ -394,7 +411,7 @@ class LogEntry(Wire):
     produced: list[list[str]]
     error: Optional[str] = None
     restored: Optional[bool] = None
-    path: Optional[str] = None
+    path: Optional[list[PathStep]] = None
     nested_id: Optional[str] = None
 
 
@@ -417,9 +434,9 @@ class Notification(Wire):
 
 
 class Fired(Notification):
-    """A firing in one piece: legal in version 1 for a runtime that cannot
-    observe a body part-way. Neither runner sends it; the Python runner sent it
-    until 2026-10-04 and now sends ``Launched`` then ``Distributed``."""
+    """A firing in one piece: legal for a runtime that cannot observe a body
+    part-way. Neither runner sends it; the Python runner sent it until
+    2026-10-04 and now sends ``Launched`` then ``Distributed``."""
 
     method: ClassVar[str] = "fired"
     moves_version: ClassVar[bool] = True
@@ -567,10 +584,11 @@ class LoadProgress(Notification):
 class NestedEvent(Notification):
     """An event in an inner net (§12.4): ``event`` is the line that net would
     have written on its own, ``{method, params}``, with the inner net's own
-    ``marking_version`` inside; the wrapper carries the outer net's, unmoved."""
+    ``marking_version`` inside; the wrapper carries the outer net's, unmoved,
+    and the inner net's full ``path`` from the loaded net."""
 
     method: ClassVar[str] = "nested"
 
-    path: str
+    path: list[PathStep]
     nested_id: str
     event: dict[str, Any]

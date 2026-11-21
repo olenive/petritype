@@ -439,8 +439,8 @@ class TestPress:
     @pytest.mark.asyncio
     async def test_press_acts_on_the_outer_net_only(self):
         owner = await loaded()
-        lines = await press(owner, control="move", path="numbers")
-        assert lines[0]["error"]["code"] == "invalid_params"
+        lines = await press(owner, control="move", path=[])
+        assert lines[0]["error"]["code"] == "invalid_params", "even the loaded net's own path"
 
     @pytest.mark.asyncio
     async def test_a_control_that_raises_is_internal(self):
