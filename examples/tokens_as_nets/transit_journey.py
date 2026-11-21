@@ -23,7 +23,8 @@ def _(mo):
 
         **Nothing drives this net but its own rules.** Each **Step** is one firing of the
         engine's choosing: the city's first fireable transition, else the first cabin with
-        anything to fire. The journey works because the vehicle's state is where its doors are.
+        anything to fire, since every place of vehicles has the stepping rule `outer_first`.
+        The journey works because the vehicle's state is where its doors are.
         Each door is a token, the door's name, in one of two places of the cabin, `Doors Open`
         or `Doors Closed` (the bus has one door, the ferry two), so the cabin shows its phase:
         a door open and no announcement is boarding, a door open with an announcement is
@@ -60,7 +61,7 @@ def _():
     from petritype.core.executable_graph_components import NestedNets
     from petritype.plotting.rustworkx_graph import RustworkxGraph
     from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
-    from transit import PASSENGERS, build_city, everyone_arrived, step
+    from transit import PASSENGERS, build_city, everyone_arrived, label, step
 
     return (
         Image,
@@ -72,6 +73,7 @@ def _():
         everyone_arrived,
         graphviz_draw,
         io,
+        label,
         step,
     )
 
@@ -105,7 +107,7 @@ def _(Image, NestedNets, RustworkxGraph, RustworkxToGraphviz, graphviz_draw, io)
 
 
 @app.cell
-def _(PASSENGERS, everyone_arrived, snapshot, step):
+def _(PASSENGERS, everyone_arrived, label, snapshot, step):
     async def fire_one(session, keep_going=False):
         """One firing, the engine's own choice. Returns 1, or 0 once everyone has arrived
         (the vehicles never stop, so the passengers say when the journey is over) unless
@@ -116,9 +118,9 @@ def _(PASSENGERS, everyone_arrived, snapshot, step):
         fired = await step(graph)
         if fired is None:
             return 0
-        session["log"].append(fired)
+        session["log"].append(label(fired))
         arrived = len(graph.place_named("Arrived").tokens)
-        snapshot(session, f"Firing {len(session['log'])} — {fired}  ·  arrived {arrived} of {len(PASSENGERS)}")
+        snapshot(session, f"Firing {len(session['log'])} — {label(fired)}  ·  arrived {arrived} of {len(PASSENGERS)}")
         return 1
 
     return (fire_one,)

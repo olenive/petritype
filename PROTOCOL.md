@@ -1022,6 +1022,45 @@ dated where the net is described.
   template, heroes entering a level through one port place and leaving
   through another (§12.7); and `10_stepping_rules.json`, over a net whose
   places hold nets under the stepping rules of §12.3.
+- The stepping rules got their conformance net and transcript on 2026-11-21,
+  `10_stepping_rules.json` over `tests/protocol_nets/stepping_rules.py`. Its
+  names, places, transitions, templates and seed are fixed here, since the
+  transcript depends on them:
+
+  **`stepping-rules`** ("Nets under each stepping rule take their turns"),
+  hosted `manual`, with no load parameters and no net parameters. Two
+  templates build its inner nets, each registered under its name, so that
+  every place is serializable and a token's `nets[]` names its `template`.
+  `Worker`: places `Todo` and `Done`, in this order, both of integers; one
+  transition, `Work`, which takes the front of `Todo` (a `take` edge) and
+  produces it unchanged into `Done`; a worker built with *n* jobs holds the
+  integers `0` up to *n* less one in `Todo`, in that order, and nothing in
+  `Done`. `Team`: places `Todo` and `Done` (integers) and `Helpers` (nets,
+  stepping `take_turns`), in this order; one transition, `Plan`, from `Todo`
+  to `Done` in the same way; built holding `0` in `Todo` and, in `Helpers`,
+  one worker with two jobs. The outer net's places, in this order: `Late`
+  (nets, stepping `outer_first`), `Ring` (nets, `take_turns`), `Early`
+  (nets, `inner_first`), `Shelf` (nets, `passive`), then `Inbox` and
+  `Outbox` (integers). A place of nets holds tokens that are each a net, so
+  each token holds one inner net, named with the empty string (§12.1). Seed:
+  `Late` one worker with one job, `Ring` one worker with two, `Early` one
+  team, `Shelf` one worker with five, `Inbox` `0`, `1` and `2`, `Outbox`
+  nothing. One outer transition, `Forward`, from `Inbox` to `Outbox` in the
+  same way. No transition has a guard or a priority, and every net chooses
+  by the default selector, so a net's own turn fires its first fireable
+  transition. From the seed, a deep step a `step` (§12.3) fires, in this
+  order: the team's `Plan` (path `[Early]`), since the inner-first team goes
+  first and its own ring starts at the team; its helper's `Work` twice (path
+  `[Early, Helpers]`), the ring going on after the team and then the helper
+  alone having work; then the outer net's ring, starting at the outer net:
+  `Forward`, the ring worker's `Work`, `Forward`, `Work`, `Forward`; then the
+  late worker's `Work`, outer first, once nothing else has a firing; and
+  then nothing, so the tenth `step` answers `fired: false`, the shelf's
+  worker keeping its five jobs. The transcript reads the outer state, whose
+  topology shows each place's `stepping`, and the team's, addressed by path,
+  whose `Helpers` shows `take_turns`; steps ten times; reads the outer state
+  again; then resets and starts the net, which fires the same nine and stops
+  with `execution_stopped {reason: "no_fireable_transitions"}`.
 
 ## 12. Nested nets
 
@@ -1147,18 +1186,22 @@ the list counted from 0.
   3. every net in a place of `N` whose rule is `outer_first`, in walk
      order: a deep step of that net.
 
-  Nets in a `passive` place are never tried. **Walk order** is places in
+  Nets in a `passive` place are never tried. While a body of `N`'s own is
+  in flight, the nets of its `outer_first` places wait: until that body
+  lands, `N` may still have something to fire. **Walk order** is places in
   declaration order, a place's tokens oldest first, and a token's nets in
   their declared order; a subnet place counts as one net, its subnet, at its
   place's position. A port place is a place of its subnet, so the nets of
   its tokens are reached by the subnet's deep step, under the rule the
   subnet gives that place. **The ring's cursor** is kept by each net, in
   memory only: the member that fired last is the member whose turn last
-  fired something. When no member has fired yet, or that member is no longer
-  in the ring (its token was taken), the ring starts at `N`. `load` and
-  `reset` start every ring afresh. Since the rule belongs to a place, it
-  applies at every level: when a net's deep step comes, it follows the rules
-  of that net's own places.
+  fired something. Only a turn in the ring moves the cursor, a turn whose
+  firing failed as well as one whose firing landed; a firing of a net in an
+  `inner_first` or `outer_first` place leaves it where it is. When no member
+  has fired yet, or that member is no longer in the ring (its token was
+  taken), the ring starts at `N`. `load` and `reset` start every ring
+  afresh. Since the rule belongs to a place, it applies at every level: when
+  a net's deep step comes, it follows the rules of that net's own places.
 - **Driving.** Inner nets are live. Both runners' drivers make one deep step
   of the outer net at each `step` and at each firing of a running net. The
   stepping rule decides only which net fires next; within a net the

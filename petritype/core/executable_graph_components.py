@@ -2,7 +2,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
-from typing import Awaitable, Callable, Iterable, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
+from typing import Awaitable, Callable, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, PrivateAttr, model_serializer, model_validator
 import asyncio
 import functools
@@ -13,7 +13,8 @@ import warnings
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
 from petritype.core.events import (
-    Added, Event, Failed, Fired, Mutated, Nested, ParamChanged, PlaceTokenId, Removed, Resynced,
+    Added, Event, Failed, Fired, InnerFiring, Mutated, Nested, ParamChanged, PathStep, PlaceTokenId, Removed,
+    Resynced,
 )
 from petritype.core.type_comparisons import CompareTypes
 from petritype.helpers.structures import SafeMerge
@@ -31,6 +32,14 @@ NESTED_NETS_METHOD = "__petritype_nets__"
 # Every graph built in this process gets the next id: the stable identity of an
 # inner net across the moves of the token that holds it (``ExecutableGraph.net_id``).
 _net_ids = itertools.count(1)
+
+# How the nets in a place take their turns beside the net around them, one rule per
+# place that holds nets (``ListPlaceNode.stepping``, ``NestedNets``): the nets fire
+# until they are at rest before the net around them (``"inner_first"``, the default),
+# in turn with it (``"take_turns"``), only once it and its turn-takers have nothing to
+# fire (``"outer_first"``), or only when a body or the program steps them (``"passive"``).
+# The names are the protocol's (PROTOCOL.md §12.3).
+Stepping = Literal["inner_first", "take_turns", "outer_first", "passive"]
 
 
 class TransitionFailedError(RuntimeError):
@@ -120,8 +129,14 @@ class ListPlaceNode(PositionalArgsBaseModel):
     ``nested`` declares that its tokens hold inner nets (``NestedNets``): every
     token must be an ``ExecutableGraph`` or implement ``__petritype_nets__``, which
     is checked when tokens are seeded, deposited or injected. The engine then runs
-    the inner nets as part of running the outer one, unless the place is also
-    ``passive``, in which case they fire only when an outer body steps them.
+    the inner nets as part of running the outer one, in the order the place's
+    ``stepping`` rule gives (``Stepping``): ``"inner_first"`` (the default)
+    before the outer net's own transitions, ``"take_turns"`` in turn with them,
+    ``"outer_first"`` once the outer net has nothing to fire, and ``"passive"``
+    never, so that only an outer body or the program steps them. A place that
+    holds no nets has no rule: its ``stepping`` is ``None``, and giving it one is
+    an error. The rule is part of the net's definition, not saved with it; it
+    may be changed by assigning ``stepping``, from the next deep step on.
 
     ``keys`` declares the keys the place derives from each token
     (``petritype.core.keys``): a dict of key name to extractor, or a sequence of
@@ -133,7 +148,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
     type: Any  # Temporarily accept any value  
     tokens: list[Any] = []
     nested: bool = False
-    passive: bool = False
+    stepping: Optional[Stepping] = None
     keys: Optional[dict[str, Callable[[Any], Any]]] = None
 
     @model_validator(mode="before")
@@ -190,8 +205,12 @@ class ListPlaceNode(PositionalArgsBaseModel):
 
     @model_validator(mode="after")
     def check_type_matches_tokens(self):
-        if self.passive and not self.nested:
-            raise ValueError(f"Place {self.name!r} is passive but not nested; passive applies to nested places.")
+        if self.stepping is not None and not self.nested:
+            raise ValueError(
+                f"Place {self.name!r} holds no nets, so it has no stepping rule; stepping applies to a nested place."
+            )
+        if self.nested and self.stepping is None:
+            self.stepping = "inner_first"
         for token in self.tokens:
             if not CompareTypes.between_value_and_type(token, self.type):
                 raise TypeError(
@@ -203,7 +222,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
         return self
 
     def copy_sans_tokens(self) -> "ListPlaceNode":
-        return ListPlaceNode(self.name, self.type, nested=self.nested, passive=self.passive, keys=self.keys)
+        return ListPlaceNode(self.name, self.type, nested=self.nested, stepping=self.stepping, keys=self.keys)
 
     @property
     def key_names(self) -> tuple[str, ...]:
@@ -368,7 +387,8 @@ class ExecutableGraph(BaseModel):
             of ``transition_history``, which is capped for memory and is
             therefore unsuitable as an authoritative counter.
         last_fired: Name of the most recently fired transition, or None if the
-            last firing attempt fired nothing. ``execute_graph`` resets it per
+            last firing attempt fired nothing; an ``InnerFiring`` when a deep step
+            fired inside an inner net. ``execute_graph`` resets it per
             call; the sequential Runner resets it per attempt (same contract).
             The concurrent Runner loops also set it as they deposit results,
             where it names only *one* completion of each batch — observers
@@ -377,7 +397,9 @@ class ExecutableGraph(BaseModel):
         fired_counts: Cumulative {transition_name: times_fired} since the graph
             was created. Monotonic and never trimmed (like ``step_count``), so
             it is the reliable way to ask "has transition X ever fired" — the
-            capped ``transition_history`` cannot answer that.
+            capped ``transition_history`` cannot answer that. A firing inside an
+            inner net, made by a deep step of this graph, is counted under its
+            ``InnerFiring``, and in ``step_count`` too.
         transition_history: History of fired transitions
         input_place_history: History of input place states
         output_place_history: History of output place states
@@ -411,30 +433,6 @@ class ExecutableGraph(BaseModel):
             a tie-break switched to round robin mid-run resumes after the last pick;
             a custom ``transition_selector`` neither reads nor moves it. Each net,
             inner nets included, has its own setting and its own cursor.
-        deep_policy: How a deep step (``fire_one_transition`` with ``descend``, so
-            ``execute_graph`` and the sequential ``Runner`` too, and the protocol
-            runner's ``step``) shares its one firing between this net and the inner
-            nets of its nested tokens. ``"outer_first"`` (default): this net's own
-            selector first, then the inner nets in walk order (place order, token
-            order, net order, a net's own inner nets before the next token, passive
-            places skipped), so an inner net fires only when this net has nothing
-            to fire. ``"interleaved"`` (since 2026-10-12): the nets form a cycle,
-            this net then the inner nets in that same walk order, and a deep step
-            starts at the net after the one the previous deep step fired in (this
-            net when nothing has fired yet, after a load, or when that net is
-            gone), goes round once and fires in the first net that has a firing,
-            chosen by that net's own selector. So no live net waits longer than one
-            round while an always-live outer net or a sibling fires: the policy for
-            a net that cannot give its outer transitions guards. The cursor is the
-            ``net_id`` of the net that fired last, kept in memory only and recorded
-            under both policies whenever a deep step fires anywhere, outer or inner,
-            in success or failure, so a policy switched to interleaved mid-run
-            resumes after the net that fired last. The policy
-            of the net a deep step is taken on governs the whole step; an inner
-            net's own setting matters only when it is stepped itself. Quiescence is
-            the same under both. The concurrent ``Runner`` loops launch every
-            fireable outer transition and give an inner net its turn only when
-            nothing is in flight, under either setting.
         next_token_id: The id the next token to enter a place will get. Every token
             gets a stable integer id when it enters a place (seed tokens at
             construction, in place order, from 1; then deposits, ``Extend`` and
@@ -476,6 +474,12 @@ class ExecutableGraph(BaseModel):
     of a nested token (PROTOCOL.md §12.5) with no further work; validating one
     needs the template registered. A deep copy of a graph is a new net with its
     own ``net_id``.
+
+    Deep stepping: ``fire_one_transition`` with ``descend`` (so ``execute_graph``,
+    the sequential ``Runner`` and the protocol runner's ``step`` too) makes one deep
+    step, which fires at most one transition in this net or in a net inside its
+    tokens, in the order each nested place's ``stepping`` rule gives
+    (``NestedNets``, PROTOCOL.md §12.3).
     """
     places: Sequence[ListPlaceNode]
     transitions: Sequence[FunctionTransitionNode]
@@ -500,16 +504,18 @@ class ExecutableGraph(BaseModel):
     # ``execute_graph``); a batch of completions leaves only one name here, so
     # it is a convenience signal — diffing ``fired_counts`` via
     # ``petritype.runtime.fired_since`` is the lossless "what fired since I
-    # last looked" API.
-    last_fired: Optional[str] = None
+    # last looked" API. A deep step that fired inside an inner net leaves its
+    # ``InnerFiring`` here.
+    last_fired: Optional[Union[str, InnerFiring]] = None
     # Cumulative count of how many times each transition has fired since this
     # graph was created (keyed by transition name). Like ``step_count`` it is
     # monotonic and never trimmed — independent of ``transition_history``'s
     # retention cap — so it is the authoritative answer to "has transition X
     # fired, and how often". Use it (instead of inspecting the capped history)
     # to drive stage/progress UI that must stay correct after the marking has
-    # moved past a stage.
-    fired_counts: dict[str, int] = {}
+    # moved past a stage. A deep step's firing inside an inner net is counted
+    # under its ``InnerFiring``.
+    fired_counts: dict[Union[str, InnerFiring], int] = {}
     # Names of transitions whose bodies are currently executing: they consumed their inputs but
     # have not yet deposited their outputs. Both modes maintain it. Concurrent mode holds every
     # airborne transition; sequential firing (``fire_one_transition``) holds the one running
@@ -528,8 +534,6 @@ class ExecutableGraph(BaseModel):
     # FIFO pipelines run in batches under the first, token by token under the
     # second, stage by stage in turn under the third. Custom selectors ignore it.
     tie_break: Literal["first_declared", "last_declared", "round_robin"] = "first_declared"
-    # How a deep step shares its firing with the inner nets: see the class docstring.
-    deep_policy: Literal["outer_first", "interleaved"] = "outer_first"
     allow_token_copying: bool = False
     # When a firing fails after its input tokens were consumed, put them back
     # (best effort) before raising. Off by default: the body may have mutated
@@ -555,10 +559,11 @@ class ExecutableGraph(BaseModel):
     # None before its first. Kept in memory only; a net loaded from its saved form
     # starts without one.
     _last_pick: Optional[int] = PrivateAttr(default=None)
-    # The deep-step cursor (read by ``deep_policy="interleaved"``): the ``net_id`` of
-    # the net (this one or an inner one) the last deep step fired in, recorded under
-    # either policy, in success or failure.
-    _last_turn: Optional[int] = PrivateAttr(default=None)
+    # The ring's cursor (``NestedNets``): the member of this net's ring whose turn
+    # last fired something, a failure included, as its ``net_id`` (this net's own
+    # for its own turn), or None before the first. Moved by ring turns only, kept in
+    # memory only: neither saved nor copied.
+    _ring_cursor: Optional[int] = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -604,9 +609,11 @@ class ExecutableGraph(BaseModel):
 
     def __deepcopy__(self, memo=None):
         """A deep copy is a new net: it gets its own ``net_id``, so a forked nested
-        token is told apart from the original."""
+        token is told apart from the original, and its ring starts afresh, the
+        ring's cursor being the original's alone."""
         copy = super().__deepcopy__(memo)
         copy.net_id = next(_net_ids)
+        copy._ring_cursor = None
         return copy
 
     def export_marking(self) -> dict[str, list]:
@@ -639,11 +646,11 @@ class ExecutableGraph(BaseModel):
         return events
 
     def forget_cursors(self) -> None:
-        """Start the round-robin tie-break and the interleaved deep step afresh, as
+        """Start the round-robin tie-break and the ring of the deep step afresh, as
         a freshly built net does. Loading a saved form does this: the cursors are
         kept in memory only."""
         self._last_pick = None
-        self._last_turn = None
+        self._ring_cursor = None
 
     def place_named(self, name: str) -> Optional[ListPlaceNode]:
         place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
@@ -988,6 +995,19 @@ class NetParams:
         GraphEvents.record(executable_graph, ParamChanged(None, name))
 
 
+@dataclass(frozen=True, eq=False)
+class Member:
+    """One net in a place of a net, as a deep step of that net comes to it: where
+    it is (``step``, one level down from that net), the net, and the stepping rule
+    of its place. Passive state, listed by ``NestedNets.members``; where it stands
+    holds for the deep step it was listed in, since nothing around it moves until
+    something fires and the step ends there."""
+
+    step: PathStep
+    net: "ExecutableGraph"
+    stepping: Stepping
+
+
 class NestedNets:
     """Functions over tokens that hold Petri nets of their own (nets as tokens).
 
@@ -995,18 +1015,47 @@ class NestedNets:
     one inner net is unnamed, ``""``) or implement ``__petritype_nets__(self) ->
     dict[str, ExecutableGraph]`` naming the nets it holds. The outer net then:
 
-    - runs the inner nets as part of running itself (``fire_one_inner``, which
-      ``fire_one_transition`` falls back to when the outer net has nothing to fire:
-      place order, then token order, then net order, descending before moving on),
-      unless the place is ``passive``;
+    - runs the inner nets as part of running itself, by one **deep step** at a
+      time (``fire_one_transition`` with ``descend``), in the order the places'
+      stepping rules give (below);
     - gathers their events into its own log as ``Nested`` records (``drain``), with
       the path to the net they happened in and the net's stable ``net_id``;
     - lets an outer body reach inside the tokens it holds (``put``, ``take``,
       ``set_param``), which is the only coupling: no place is shared, no inner
       transition sees the outer net.
 
-    Paths are tuples of segments, three per level: the place, the holding token's
-    id as ``#<id>``, the net's name within the token.
+    One deep step of a net fires at most one transition, in that net or anywhere
+    below it (PROTOCOL.md §12.3). It tries three bands in this order and stops at
+    the first firing, or failure, it comes to:
+
+    1. every net in a place whose rule is ``"inner_first"`` (the default), in walk
+       order: a deep step of that net;
+    2. the **ring**: the net itself and every net in a place whose rule is
+       ``"take_turns"``, in walk order, starting after the member that fired last
+       and going round once. The net's own turn is one firing chosen by its own
+       selector; any other member's turn is a deep step of that net;
+    3. every net in a place whose rule is ``"outer_first"``, in walk order, while
+       nothing of the net itself is in flight: a deep step of that net.
+
+    A ``"passive"`` place is in no band: only an outer body or the program steps
+    its nets. **Walk order** is places in declaration order, a place's tokens
+    oldest first, a token's nets in their declared order. A member's turn is a
+    deep step of its own, so every level follows the rules of its own places, and
+    one deep step still fires at most one transition in the whole tree.
+
+    The ring's **cursor** is the member whose turn last fired something, the net's
+    own ``net_id`` for its own turn: a ring turn moves it, a failed firing as well
+    as one that landed, and a firing in the other two bands leaves it where it
+    is. With no cursor (a fresh net, a loaded one, a copy) or one naming a net no
+    longer in the ring (its token taken, or moved to a place with another rule),
+    the ring starts at the net itself. Each net keeps its own, in memory only.
+
+    A net is quiescent deep when it and every net in its places whose rule is not
+    passive are at rest, at every depth: a deep step finds nothing to fire.
+
+    A path is a tuple of ``PathStep`` values, one per level, outermost first, and
+    a firing inside an inner net is told as an ``InnerFiring``: the path to the
+    net it fired in and the transition's own name.
     """
 
     def of(token: Any) -> dict[str, ExecutableGraph]:
@@ -1036,24 +1085,24 @@ class NestedNets:
     def any_nested(executable_graph: ExecutableGraph) -> bool:
         return any(place.nested for place in executable_graph.places)
 
-    def walk(executable_graph: ExecutableGraph, passive: bool = True):
-        """Yield ``(path, token, name, inner)`` for every inner net one level down,
-        in place order, token order, net order; ``passive=False`` skips passive
-        places. The path is as the marking stands now."""
+    def walk(executable_graph: ExecutableGraph) -> Iterator[tuple[PathStep, ExecutableGraph]]:
+        """Yield ``(step, inner)`` for every inner net one level down, in walk order
+        (places in declaration order, a place's tokens oldest first, a token's nets
+        in their declared order), passive places included. The step is as the
+        marking stands now. It only reads: a token that has no id yet, because code
+        appended to ``place.tokens`` directly, is left out until the next engine
+        entry point resyncs its place (``TokenIds.resync``), which every deep step
+        does first."""
         for place in executable_graph.places:
-            if not place.nested or (place.passive and not passive):
+            if not place.nested:
                 continue
-            ids = place._token_ids
-            for index, token in enumerate(list(place.tokens)):
-                token_id = f"#{ids[index]}" if index < len(ids) else "#?"
+            for token_id, token in zip(list(place._token_ids), list(place.tokens)):
                 for name, inner in NestedNets.of(token).items():
-                    yield (place.name, token_id, name), token, name, inner
+                    yield PathStep(place.name, token_id, name), inner
 
     def sync_recording(executable_graph: ExecutableGraph) -> None:
         """Make every inner net record events exactly when the outer one does."""
-        if not NestedNets.any_nested(executable_graph):
-            return
-        for _path, _token, _name, inner in NestedNets.walk(executable_graph):
+        for _step, inner in NestedNets.walk(executable_graph):
             if inner.record_events != executable_graph.record_events:
                 inner.record_events = executable_graph.record_events
                 NestedNets.sync_recording(inner)
@@ -1063,206 +1112,191 @@ class NestedNets:
         each wrapped as ``Nested`` with the path to the net it happened in. An
         inner net's own ``Nested`` records (from nets inside it) are re-based onto
         the longer path, so there is one wrapper whatever the depth. Called by
-        ``drain_events`` and before a firing is recorded, so inner events land in
-        the outer log in the order they happened."""
-        if not NestedNets.any_nested(executable_graph):
-            return
-        for path, _token, _name, inner in NestedNets.walk(executable_graph):
+        ``drain_events``, before a firing is recorded and after each inner
+        firing, so inner events land in the outer log in the order they happened."""
+        for step, inner in NestedNets.walk(executable_graph):
             inner.record_events = executable_graph.record_events
             for event in inner.drain_events():
                 if isinstance(event, Nested):
-                    event = Nested(path + event.path, event.nested_id, event.event)
+                    event = Nested((step, *event.path), event.nested_id, event.event)
                 else:
-                    event = Nested(path, inner.net_id, event)
+                    event = Nested((step,), inner.net_id, event)
                 GraphEvents.record(executable_graph, event)
 
-    def resolve(executable_graph: ExecutableGraph, path: Sequence[str]) -> ExecutableGraph:
-        """The inner net at ``path`` (segments as ``walk`` yields them), or
-        ``LookupError`` naming the segment that failed."""
+    def resolve(executable_graph: ExecutableGraph, path: Sequence[PathStep]) -> ExecutableGraph:
+        """The inner net at ``path`` (steps as ``walk`` yields them), or
+        ``LookupError`` naming the step that failed."""
         graph = executable_graph
-        segments = list(path)
-        if len(segments) % 3 != 0:
-            raise LookupError(f"a nested path has three segments per level, not {len(segments)}")
-        for level in range(0, len(segments), 3):
-            place_name, token_segment, name = segments[level:level + 3]
-            place = graph.place_named(place_name)
+        for step in path:
+            if not isinstance(step, PathStep):
+                raise LookupError(f"a path is a sequence of PathStep values, not {step!r}")
+            place = graph.place_named(step.place)
             if place is None or not place.nested:
-                raise LookupError(f"no nested place {place_name!r}")
-            if not token_segment.startswith("#"):
-                raise LookupError(f"a token segment is spelt #<id>, not {token_segment!r}")
+                raise LookupError(f"no nested place {step.place!r}")
             TokenIds.resync(graph)
             try:
-                index = list(place._token_ids).index(int(token_segment[1:]))
+                index = list(place._token_ids).index(step.token)
             except ValueError:
-                raise LookupError(f"no token {token_segment} in {place_name!r}") from None
+                raise LookupError(f"no token {step.token} in {step.place!r}") from None
             nets = NestedNets.of(place.tokens[index])
-            if name not in nets:
-                raise LookupError(f"token {token_segment} in {place_name!r} holds no net named {name!r}")
-            graph = nets[name]
+            if step.net not in nets:
+                raise LookupError(f"token {step.token} in {step.place!r} holds no net named {step.net!r}")
+            graph = nets[step.net]
         return graph
 
-    def find(executable_graph: ExecutableGraph, net_id: int) -> Optional[tuple[tuple[str, ...], ExecutableGraph]]:
+    def find(executable_graph: ExecutableGraph, net_id: int) -> Optional[tuple[tuple[PathStep, ...], ExecutableGraph]]:
         """``(path, inner)`` for the inner net with this ``net_id``, at any depth, or
         ``None``; the path is as the marking stands now."""
-        for path, _token, _name, inner in NestedNets.walk(executable_graph):
+        for step, inner in NestedNets.walk(executable_graph):
             if inner.net_id == net_id:
-                return path, inner
+                return (step,), inner
             found = NestedNets.find(inner, net_id)
             if found is not None:
-                return path + found[0], found[1]
+                return (step, *found[0]), found[1]
         return None
 
-    def any_fireable(executable_graph: ExecutableGraph) -> bool:
-        """Whether any transition of any non-passive inner net, at any depth, can fire now."""
-        for _path, _token, _name, inner in NestedNets.walk(executable_graph, passive=False):
-            place_nodes, incoming, _outgoing, read = ExecutableGraphOperations.maps(inner)
-            if any(
-                ExecutableGraphCheck.transition_is_fireable(t, inner, incoming, place_nodes, read)
-                for t in inner.transitions
-            ) or NestedNets.any_fireable(inner):
-                return True
-        return False
+    # --- deep stepping (the stepping rule of each place) ---
 
-    async def fire_one_inner(
+    def members(executable_graph: ExecutableGraph, held: frozenset = frozenset()) -> list[Member]:
+        """Every net in a place of this net that deep stepping enters, in walk
+        order, each with its place's rule: a passive place's nets are left out,
+        and so are the nets of a token in ``held``, ``(place, token id)`` pairs of
+        tokens an outer body in flight has in hand through a mutate edge (the
+        concurrent runtime's), which no inner firing may touch meanwhile."""
+        rules = {place.name: place.stepping for place in executable_graph.places if place.nested}
+        return [
+            Member(step, inner, rules[step.place])
+            for step, inner in NestedNets.walk(executable_graph)
+            if rules[step.place] != "passive" and (step.place, step.token) not in held
+        ]
+
+    def turns(
+        executable_graph: ExecutableGraph, part: Literal["ahead", "behind"], held: frozenset = frozenset(),
+    ) -> list[Member]:
+        """The members whose turn falls in one part of this net's round, in the
+        order they are tried. ``"ahead"`` are the turns before the net's own: the
+        inner-first members, then the ring's members after the cursor.
+        ``"behind"`` are the turns after it: the rest of the ring, then the
+        outer-first members, offered only while nothing of this net is in flight
+        (until a body out here lands, this net may still have something to fire).
+
+        The ring is this net and its take-turns members in walk order, entered
+        after the cursor: after this net, every take-turns member comes before its
+        own turn; after the member at ``k``, those after ``k`` come before it and
+        those up to ``k`` after it; with no cursor, or one that names no member,
+        all of them come after it."""
+        members = NestedNets.members(executable_graph, held)
+        ring = [member for member in members if member.stepping == "take_turns"]
+        cursor = executable_graph._ring_cursor
+        if cursor == executable_graph.net_id:
+            start = 0
+        else:
+            start = next((at + 1 for at, member in enumerate(ring) if member.net.net_id == cursor), len(ring))
+        if part == "ahead":
+            return [member for member in members if member.stepping == "inner_first"] + ring[start:]
+        later = [member for member in members if member.stepping == "outer_first"] if not executable_graph.in_flight else []
+        return ring[:start] + later
+
+    def took_own_turn(executable_graph: ExecutableGraph) -> None:
+        """This net took its own turn in its ring: the next round starts after it.
+        Its own choice counts as the turn, whatever comes of the firing."""
+        executable_graph._ring_cursor = executable_graph.net_id
+
+    def took_turn(executable_graph: ExecutableGraph, member: Member) -> None:
+        """``member`` of this net took its turn and fired, or failed: the ring's
+        cursor moves to it if it is in the ring, and stays where it is for a
+        member of the other two bands."""
+        if member.stepping == "take_turns":
+            executable_graph._ring_cursor = member.net.net_id
+
+    async def take_turn(
         executable_graph: ExecutableGraph,
+        part: Literal["ahead", "behind"],
         executor=None,
         allow_token_copying: Optional[bool] = None,
         restore_tokens_on_failure: Optional[bool] = None,
-    ) -> Optional[str]:
-        """Fire at most one transition of one inner net: the first that fires, in
-        place order, token order, net order, each net by its own selector and
-        descending into its own inner nets before the next token is tried (the
-        ``"outer_first"`` deep step below the outer net, whatever the inner nets'
-        own ``deep_policy``). Passive places are skipped. Returns the firing's path
-        and transition joined by ``/`` (``"Depot/#17/cabin/Sit"``), which the outer
-        graph counts as a firing of its own under that name, or ``None``; a net
-        between counts it likewise, under the path from it. The inner net's events
-        are drained into the outer log at once. The net that fired, or failed, is
-        recorded as this graph's deep-step cursor (``_last_turn``), and likewise on
-        every net between, so a ``deep_policy`` switched to ``"interleaved"``
-        resumes after it."""
-        for path, _token, _name, inner in NestedNets.walk(executable_graph, passive=False):
+        held: frozenset = frozenset(),
+    ) -> Optional[InnerFiring]:
+        """One firing among the turns of one part of this net's round (``turns``),
+        never one of this net's own transitions: the first member whose deep step
+        fires, or fails, is the step. Its events are drained into this net's log
+        at once, the ring's cursor moves as ``took_turn`` says, and the firing is
+        counted on this net (``count``) and returned as an ``InnerFiring``; a
+        failure's ``TransitionFailedError`` propagates. ``None`` when no member of
+        that part has anything to fire."""
+        for member in NestedNets.turns(executable_graph, part, held):
             try:
-                fired = await NestedNets.fire_alone(
-                    inner, executable_graph.record_events, executor=executor,
+                fired = await NestedNets.deep_step(
+                    member.net, executable_graph.record_events, executor=executor,
                     allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
                 )
-                if fired is None and NestedNets.any_nested(inner):
-                    fired = await NestedNets.fire_one_inner(
-                        inner, executor=executor,
-                        allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
-                    )
-                    if fired is not None:
-                        NestedNets.count(inner, fired)
             except TransitionFailedError:
-                # ``inner`` recorded which net took the turn: itself, or one inside it.
-                executable_graph._last_turn = inner._last_turn
-                raise
-            if fired is not None:
-                executable_graph._last_turn = inner._last_turn
+                NestedNets.took_turn(executable_graph, member)
                 NestedNets.drain(executable_graph)
-                return "/".join((*path, fired))
+                raise
+            if fired is None:
+                continue
+            NestedNets.took_turn(executable_graph, member)
+            NestedNets.drain(executable_graph)
+            firing = NestedNets.below(member.step, fired)
+            NestedNets.count(executable_graph, firing)
+            return firing
         return None
 
-    async def fire_alone(
+    async def deep_step(
         inner: ExecutableGraph,
         record_events: bool,
         executor=None,
         allow_token_copying: Optional[bool] = None,
         restore_tokens_on_failure: Optional[bool] = None,
-    ) -> Optional[str]:
-        """One firing of ``inner`` by its own selector, without descending into its
-        own inner nets, recording events when the outer net does. Returns the
-        transition's name or ``None``."""
+    ) -> Optional[Union[TransitionName, InnerFiring]]:
+        """A member's turn: one deep step of ``inner``, by its own selector and the
+        rules of its own places, recording events when the net around it does.
+        What ``fire_one_transition`` with ``descend`` returns for it."""
         inner.record_events = record_events
-        place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(inner)
         return await ExecutableGraphOperations.fire_one_transition(
-            executable_graph=inner,
-            place_names_to_nodes=place_nodes,
-            transition_names_to_incoming_edges=incoming,
-            transition_names_to_outgoing_edges=outgoing,
-            transition_names_to_read_edges=read,
+            inner, *ExecutableGraphOperations.maps(inner),
             allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure,
             executor=executor,
-            descend=False,
         )
 
-    def count(executable_graph: ExecutableGraph, name: str) -> None:
-        """Count an inner firing as a firing of ``executable_graph`` under ``name``,
-        its path from this graph and the transition (``"Depot/#17/cabin/Sit"``):
-        what ``step_count``, ``last_fired`` and ``fired_counts`` then say."""
+    def below(step: PathStep, fired: Union[TransitionName, InnerFiring]) -> InnerFiring:
+        """What a deep step of the net at ``step`` fired, as the net above it tells
+        it: one step longer."""
+        if isinstance(fired, InnerFiring):
+            return InnerFiring((step, *fired.path), fired.transition)
+        return InnerFiring((step,), fired)
+
+    def count(executable_graph: ExecutableGraph, firing: InnerFiring) -> None:
+        """Count an inner firing as a firing of ``executable_graph`` under its
+        ``InnerFiring``: what ``step_count``, ``last_fired`` and ``fired_counts``
+        then say. Each net between counts it likewise, under the path from it."""
         executable_graph.step_count += 1
-        executable_graph.last_fired = name
-        executable_graph.fired_counts[name] = executable_graph.fired_counts.get(name, 0) + 1
+        executable_graph.last_fired = firing
+        executable_graph.fired_counts[firing] = executable_graph.fired_counts.get(firing, 0) + 1
 
-    # --- the interleaved deep step (``deep_policy="interleaved"``) ---
+    def can_fire(executable_graph: ExecutableGraph) -> bool:
+        """Whether one of this net's own transitions can fire now."""
+        place_nodes, incoming, _outgoing, read = ExecutableGraphOperations.maps(executable_graph)
+        return any(
+            ExecutableGraphCheck.transition_is_fireable(t, executable_graph, incoming, place_nodes, read)
+            for t in executable_graph.transitions
+        )
 
-    def deep_cycle(executable_graph: ExecutableGraph) -> list[tuple[tuple[str, ...], ExecutableGraph]]:
-        """The nets an interleaved deep step goes round, as ``(path, net)``: the net
-        itself (path ``()``), then its inner nets at any depth in walk order (place
-        order, token order, net order, a net's own inner nets before the next
-        token), passive places skipped. Paths are as the marking stands now."""
-        cycle: list[tuple[tuple[str, ...], ExecutableGraph]] = [((), executable_graph)]
-
-        def visit(graph: ExecutableGraph, prefix: tuple[str, ...]) -> None:
-            for path, _token, _name, inner in NestedNets.walk(graph, passive=False):
-                cycle.append(((*prefix, *path), inner))
-                visit(inner, (*prefix, *path))
-
-        visit(executable_graph, ())
-        return cycle
-
-    def deep_turns(executable_graph: ExecutableGraph) -> list[tuple[tuple[str, ...], ExecutableGraph]]:
-        """``deep_cycle`` in the order the next interleaved deep step tries it: from
-        the net after the one the previous deep step fired in (the cursor), round
-        to that net itself; from the net itself when there is no cursor or the net
-        it names is gone."""
-        cycle = NestedNets.deep_cycle(executable_graph)
-        last = executable_graph._last_turn
-        if last is not None:
-            for position, (_path, net) in enumerate(cycle):
-                if net.net_id == last:
-                    return cycle[position + 1:] + cycle[:position + 1]
-        return cycle
-
-    def took_turn(executable_graph: ExecutableGraph, net: ExecutableGraph) -> None:
-        """Move the interleaved deep step's cursor: ``net`` (``executable_graph``
-        itself or one of its inner nets) is the net the last deep step fired in."""
-        executable_graph._last_turn = net.net_id
-
-    async def fire_turn(
+    def any_fireable(
         executable_graph: ExecutableGraph,
-        path: tuple[str, ...],
-        inner: ExecutableGraph,
-        executor=None,
-        allow_token_copying: Optional[bool] = None,
-        restore_tokens_on_failure: Optional[bool] = None,
-    ) -> Optional[str]:
-        """An interleaved deep step's turn in ``inner``, the inner net at ``path``
-        (any depth): one firing by its own selector, without descent. Every net
-        between ``executable_graph`` and ``inner`` counts it under the path from
-        it, as the outer-first descent does, and records ``inner`` as its
-        deep-step cursor; the inner events are drained into the outer log at
-        once. Returns the firing's name under ``executable_graph`` (which the
-        caller counts and whose cursor the caller moves), or ``None``."""
-        between = [NestedNets.resolve(executable_graph, path[:level]) for level in range(3, len(path), 3)]
-        try:
-            fired = await NestedNets.fire_alone(
-                inner, executable_graph.record_events, executor=executor,
-                allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
-            )
-        except TransitionFailedError:
-            for net in between:
-                NestedNets.took_turn(net, inner)
-            raise
-        if fired is None:
-            return None
-        for level, net in zip(range(3, len(path), 3), between):
-            NestedNets.count(net, "/".join((*path[level:], fired)))
-            NestedNets.took_turn(net, inner)
-        NestedNets.drain(executable_graph)
-        return "/".join((*path, fired))
+        part: Optional[Literal["ahead", "behind"]] = None,
+        held: frozenset = frozenset(),
+    ) -> bool:
+        """Whether a net that deep stepping enters below this one, at any depth, has
+        a transition that can fire now (passive places left out); with ``part``,
+        only the members of that part of this net's round (``turns``) and the
+        nets below them."""
+        members = NestedNets.members(executable_graph, held) if part is None else NestedNets.turns(
+            executable_graph, part, held,
+        )
+        return any(NestedNets.can_fire(member.net) or NestedNets.any_fireable(member.net) for member in members)
 
     # --- reaching inside, for outer bodies ---
 
@@ -1887,7 +1921,6 @@ class ExecutableGraphOperations:
         record_events: bool = False,
         params: Optional[dict[str, Any]] = None,
         template: Optional[str] = None,
-        deep_policy: Literal["outer_first", "interleaved"] = "outer_first",
     ) -> ExecutableGraph:
         places, transitions, edges_to, edges_from = [], [], [], []
         snapshot_edges, mutate_edges = [], []
@@ -1910,8 +1943,7 @@ class ExecutableGraphOperations:
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
             snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
-            deep_policy=deep_policy, record_events=record_events, params=dict(params or {}),
-            template=template,
+            record_events=record_events, params=dict(params or {}), template=template,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
@@ -2396,7 +2428,7 @@ class ExecutableGraphOperations:
         token_history_length=0,
         descend: bool = True,
         on_launch: Optional[Callable[[], Awaitable[None]]] = None,
-    ) -> Optional[TransitionName]:
+    ) -> Optional[Union[TransitionName, InnerFiring]]:
         """Fire at most one fireable transition, using prebuilt adjacency maps.
 
         The single-firing primitive that ``execute_graph`` and the Runner's
@@ -2430,17 +2462,19 @@ class ExecutableGraphOperations:
 
         Nested tokens (``NestedNets``): the undrained events of every inner net are
         gathered into this graph's log first, so a firing that consumes a token
-        loses none of them. When no outer transition fires and ``descend`` is on,
-        one inner net is given the turn (``NestedNets.fire_one_inner``, place
-        order then token order then net order, passive places skipped); an inner
-        firing counts as a firing of this graph under its path,
-        ``"Depot/#17/cabin/Sit"``, which is what ``last_fired``, ``fired_counts``
-        and the return value then say. That is the graph's default
-        ``deep_policy="outer_first"``; under ``"interleaved"`` the one firing goes
-        round the cycle of nets instead (this net, then the inner nets in the same
-        order), starting after the net the previous deep step fired in
-        (``NestedNets.deep_turns``), and ``transition_selector`` chooses for this
-        net's own turn only.
+        loses none of them. With ``descend`` on, the call is one deep step, in the
+        order the stepping rules of this net's nested places give: the turns ahead
+        of this net's own (the inner-first places, then the ring's members after
+        its cursor), this net's own choice, then the turns behind it (the rest of
+        the ring, then the outer-first places); passive places are never entered.
+        A firing inside an inner net is returned as an ``InnerFiring``, the path to
+        the net it fired in and the transition's own name, and counted on this
+        graph under it (``step_count``, ``last_fired``, ``fired_counts``); its
+        events are in this graph's log by the time this returns.
+        ``transition_selector`` and ``on_launch`` are for this net's own turn only,
+        and that turn moves the ring's cursor to this net when the selector
+        chooses, whatever comes of the firing. With ``descend`` off the call is a
+        plain step: this net's own transitions only, the cursor untouched.
         """
         TokenIds.resync(executable_graph)
         NestedNets.drain(executable_graph)
@@ -2453,46 +2487,16 @@ class ExecutableGraphOperations:
             or executable_graph.transition_selector
             or default_transition_selector
         )
+        deep = descend and NestedNets.any_nested(executable_graph)
 
-        if descend and executable_graph.deep_policy == "interleaved" and NestedNets.any_nested(executable_graph):
-            # One deep step round the cycle of nets (``deep_policy``): this net's turn
-            # is a firing of its own without descent, an inner net's a firing of that
-            # net alone; the first net with a firing fires, and is the cursor. A
-            # firing that fails took its turn too.
-            for path, net in NestedNets.deep_turns(executable_graph):
-                try:
-                    if net is executable_graph:
-                        fired = await ExecutableGraphOperations.fire_one_transition(
-                            executable_graph=executable_graph,
-                            place_names_to_nodes=place_names_to_nodes,
-                            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
-                            transition_names_to_outgoing_edges=transition_names_to_outgoing_edges,
-                            transition_names_to_read_edges=transition_names_to_read_edges,
-                            transition_selector=transition_selector,
-                            allow_token_copying=allow_token_copying,
-                            restore_tokens_on_failure=restore_tokens_on_failure,
-                            executor=executor,
-                            transition_history_length=transition_history_length,
-                            place_history_length=place_history_length,
-                            token_history_length=token_history_length,
-                            descend=False,
-                            on_launch=on_launch,
-                        )
-                    else:
-                        fired = await NestedNets.fire_turn(
-                            executable_graph, path, net, executor=executor,
-                            allow_token_copying=allow_token_copying,
-                            restore_tokens_on_failure=restore_tokens_on_failure,
-                        )
-                        if fired is not None:
-                            NestedNets.count(executable_graph, fired)
-                except TransitionFailedError:
-                    NestedNets.took_turn(executable_graph, net)
-                    raise
-                if fired is not None:
-                    NestedNets.took_turn(executable_graph, net)
-                    return fired
-            return None
+        if deep:
+            # The turns ahead of this net's own: inner first, then the ring after its cursor.
+            fired_inside = await NestedNets.take_turn(
+                executable_graph, "ahead", executor=executor,
+                allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
+            )
+            if fired_inside is not None:
+                return fired_inside
 
         # Get all fireable transitions (sufficient tokens and a passing guard), in
         # definition order.
@@ -2509,21 +2513,17 @@ class ExecutableGraphOperations:
 
         # Let selector choose which transition to fire
         transition = selector(executable_graph, fireable_transitions)
-        if transition is not None:
-            # This net takes the turn, whatever comes of the firing: the deep-step
-            # cursor, recorded under either ``deep_policy`` (``NestedNets.deep_turns``).
-            executable_graph._last_turn = executable_graph.net_id
         if transition is None:
-            if not descend or not NestedNets.any_nested(executable_graph):
+            if not deep:
                 return None
-            fired_inside = await NestedNets.fire_one_inner(
-                executable_graph, executor=executor,
+            # The turns behind it: the rest of the ring, then outer first.
+            return await NestedNets.take_turn(
+                executable_graph, "behind", executor=executor,
                 allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
             )
-            if fired_inside is None:
-                return None
-            NestedNets.count(executable_graph, fired_inside)
-            return fired_inside
+        if descend:
+            # This net took its turn in its ring, whatever comes of the firing.
+            NestedNets.took_own_turn(executable_graph)
 
         firing_ids = FiringTokenIds()
         input_args_to_tokens, input_places = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(

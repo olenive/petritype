@@ -232,7 +232,7 @@ Read arcs render dashed, distinct from the solid consuming / producing arrows.
 
 ### Nets as tokens
 
-A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself (outer transitions first, then inner nets in place, token and net order; `deep_policy="interleaved"` on `construct_graph` or the graph takes the nets in turn instead, so an outer net that can always fire starves none of them), gathers their events into its own log as `Nested` records carrying the path to the net they happened in, and lets its bodies reach inside the tokens they hold:
+A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself, one firing at a time anywhere in the tree, in the order the place's **stepping rule** gives: `stepping="inner_first"` (the default) lets the place's nets come to rest before the outer net fires, `"take_turns"` has them and the outer net fire in turn, so an outer net that can always fire starves none of them, `"outer_first"` lets them fire only when the outer net has nothing to fire, and `"passive"` leaves them to the bodies that step them. Each level follows the rules of its own places. The outer net gathers the inner nets' events into its own log as `Nested` records carrying the path to the net they happened in, a tuple of `PathStep(place, token, net)`, tells a firing inside as an `InnerFiring(path, transition)`, and lets its bodies reach inside the tokens they hold:
 
 ```python
 from petritype.core.nested import NestedNets
@@ -246,11 +246,11 @@ class Vehicle(BaseModel):
 def board(passenger: str, vehicle: Vehicle) -> None:
     NestedNets.put(vehicle.cabin, "Door", [passenger])   # the only way in: through the token
 
-ListPlaceNode("Depot", Vehicle, [bus], nested=True)
+ListPlaceNode("Depot", Vehicle, [bus], nested=True, stepping="outer_first")
 MutateEdge("Depot", "Board Depot", "vehicle")
 ```
 
-Inner nets never touch the outer net; `passive=True` keeps the engine off them until a body steps them. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
+Inner nets never touch the outer net. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
 
 A renderer marks a token that holds nets with its inner nets' names and token counts (`Vehicle(name='Bus 1', ...) ⊂ cabin: 3`) rather than printing the net; to draw the net inside, render `vehicle.cabin` like any other graph.
 

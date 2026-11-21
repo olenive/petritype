@@ -1,8 +1,10 @@
 """The protocol wording gaps settled on 2026-10-12 (PROTOCOL.md; the decisions
-A2 to A8) and the engine's two scheduling policies as the runner honours them
-(the round-robin tie-break and the interleaved deep step), driven through
-``Owner`` directly. The fold of A1 is pinned in ``tests/test_protocol_transcripts.py``
-and the policies themselves in ``tests/test_engine_policies.py``."""
+A2 to A8) and the engine's scheduling settings as the runner honours them (the
+round-robin tie-break, and since 2026-11-21 the stepping rule of each place that
+holds nets, which replaced the interleaved deep step), driven through ``Owner``
+directly. The fold of A1 is pinned in ``tests/test_protocol_transcripts.py``, the
+tie-break in ``tests/test_engine_policies.py`` and the stepping rules in
+``tests/test_stepping_rules.py``."""
 
 import sys
 from datetime import datetime, timezone
@@ -109,8 +111,8 @@ def crates(seeded: bool = False, labels: Optional[list[str]] = None) -> Executab
     change one, which is what a ``fireable`` baseline is about."""
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Labels", str, list(labels or [])),
-        ListPlaceNode("Spare", Crate, [make("seed")] if seeded else [], nested=True, passive=True),
-        ListPlaceNode("Shelf", Crate, nested=True, passive=True),
+        ListPlaceNode("Spare", Crate, [make("seed")] if seeded else [], nested=True, stepping="passive"),
+        ListPlaceNode("Shelf", Crate, nested=True, stepping="passive"),
         FunctionTransitionNode("Make", make),
         ArgumentEdgeToTransition("Labels", "Make", "label"),
         ReturnedEdgeFromTransition("Make", "Spare"),
@@ -354,9 +356,10 @@ def seeded_tally(low) -> ExecutableGraph:
 
 
 @petri_net(name="clockwork", description="A clock that always ticks, and crates of tallies")
-def clockwork(deep_policy: str = "outer_first", clock: bool = True) -> ExecutableGraph:
+def clockwork(stepping: str = "inner_first", clock: bool = True) -> ExecutableGraph:
     nodes = [ListPlaceNode("Shelf", Crate, [Crate(label="a", tally=seeded_tally([1, 2])),
-                                            Crate(label="b", tally=seeded_tally([3, 4]))], nested=True)]
+                                            Crate(label="b", tally=seeded_tally([3, 4]))],
+                           nested=True, stepping=stepping)]
     if clock:
         nodes += [
             ListPlaceNode("Clock", int, [0]),
@@ -364,16 +367,25 @@ def clockwork(deep_policy: str = "outer_first", clock: bool = True) -> Executabl
             FunctionTransitionNode("Tick", keep_time),
             ReturnedEdgeFromTransition("Tick", "Clock"),
         ]
-    return ExecutableGraphOperations.construct_graph(nodes, deep_policy=deep_policy)
+    return ExecutableGraphOperations.construct_graph(nodes)
 
 
 async def stepped(harness, count):
-    """What ``count`` steps fired: the transition, after its crate's token id for an inner one."""
+    """What ``count`` steps fired: the transition, after its crate's token id for an
+    inner one; ``None`` for a step that fired nothing."""
     fired = []
     for _ in range(count):
         answer = result(await harness.send("step"))
-        fired.append(answer["path"][0]["token"] + " " + answer["transition"] if "path" in answer else answer["transition"])
+        if not answer["fired"]:
+            fired.append(None)
+        else:
+            fired.append(answer["path"][0]["token"] + " " + answer["transition"] if "path" in answer else answer["transition"])
     return fired
+
+
+async def crates_of(harness):
+    shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
+    return tuple(token["id"] for token in shelf)
 
 
 class TestPoliciesThroughTheRunner:
@@ -391,33 +403,58 @@ class TestPoliciesThroughTheRunner:
         await harness.send("load", {"net": "turns", "params": {"tie_break": "first_declared"}})
         assert await stepped(harness, 2) == ["A", "A"]
 
-    async def test_outer_first_starves_the_crates_and_interleaved_does_not(self):
-        harness = Harness(clockwork)
-        await harness.send("load", {"net": "clockwork"})
-        shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
-        a, b = (token["id"] for token in shelf)
-        assert await stepped(harness, 4) == ["Tick"] * 4
-        await harness.send("load", {"net": "clockwork", "params": {"deep_policy": "interleaved"}})
-        assert await stepped(harness, 6) == ["Tick", f"{a} Up", f"{b} Up", "Tick", f"{a} Up", f"{b} Up"]
-        assert await stepped(harness, 2) == ["Tick", "Tick"], "both tallies done: the clock alone"
 
-    async def test_a_policy_switched_mid_run_resumes_after_the_net_that_fired_last(self):
+class TestSteppingThroughTheRunner:
+
+    async def test_the_topology_carries_each_place_s_rule(self):
         harness = Harness(clockwork)
-        await harness.send("load", {"net": "clockwork", "params": {"clock": False}})
-        shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
-        a, b = (token["id"] for token in shelf)
+        for stepping in ("inner_first", "take_turns", "outer_first", "passive"):
+            await harness.send("load", {"net": "clockwork", "params": {"stepping": stepping}})
+            places = result(await harness.send("get_state"))["topology"]["places"]
+            assert places[0] == {
+                "name": "Shelf", "type_name": "Crate", "serializable": True, "nested": True, "stepping": stepping,
+            }
+            assert "stepping" not in places[1], "a place that holds no nets has no rule"
+            tally = result(await harness.send("get_state", {"path": [
+                {"place": "Shelf", "token": (await crates_of(harness))[0], "net": "tally"},
+            ]}))
+            assert all("stepping" not in place for place in tally["topology"]["places"])
+
+    async def test_step_follows_each_rule(self):
+        harness = Harness(clockwork)
+        expected = {
+            "inner_first": lambda a, b: [f"{a} Up", f"{a} Up", f"{b} Up", f"{b} Up", "Tick", "Tick"],
+            "take_turns": lambda a, b: ["Tick", f"{a} Up", f"{b} Up", "Tick", f"{a} Up", f"{b} Up", "Tick", "Tick"],
+            "outer_first": lambda a, b: ["Tick"] * 4,
+            "passive": lambda a, b: ["Tick"] * 4,
+        }
+        for stepping, story in expected.items():
+            await harness.send("load", {"net": "clockwork", "params": {"stepping": stepping}})
+            a, b = await crates_of(harness)
+            want = story(a, b)
+            assert await stepped(harness, len(want)) == want, stepping
+        await harness.send("load", {"net": "clockwork", "params": {"stepping": "passive", "clock": False}})
+        assert await stepped(harness, 1) == [None], "a passive place's nets are never entered"
+
+    async def test_an_outer_first_firing_leaves_the_ring_s_cursor_so_the_round_starts_at_the_net(self):
+        harness = Harness(clockwork)
+        await harness.send("load", {"net": "clockwork", "params": {"stepping": "outer_first", "clock": False}})
+        a, b = await crates_of(harness)
         assert await stepped(harness, 1) == [f"{a} Up"]
-        harness.owner._loaded.outer.graph.deep_policy = "interleaved"
-        assert await stepped(harness, 2) == [f"{b} Up", f"{a} Up"]
+        harness.owner._loaded.outer.graph.place_named("Shelf").stepping = "take_turns"
+        assert await stepped(harness, 3) == [f"{a} Up", f"{b} Up", f"{b} Up"]
 
-    async def test_a_running_net_alternates_its_inner_nets(self):
+    async def test_a_running_net_follows_each_rule(self):
         harness = Harness(clockwork)
-        await harness.send("load", {"net": "clockwork", "params": {"deep_policy": "interleaved", "clock": False}})
+        for stepping, alternate in (("inner_first", False), ("take_turns", True), ("outer_first", False)):
+            await harness.send("load", {"net": "clockwork", "params": {"stepping": stepping, "clock": False}})
+            lines = await harness.send("start")
+            launched = [nid for nid, _event in nested_events(lines, "launched")]
+            assert len(launched) == 4 and lines[-1]["method"] == "execution_stopped", stepping
+            if alternate:
+                assert launched[0] != launched[1] and launched[::2] == [launched[0]] * 2, "in turn"
+            else:
+                assert launched[0] == launched[1] and launched[2] == launched[3] != launched[0], "one, then the other"
+        await harness.send("load", {"net": "clockwork", "params": {"stepping": "passive", "clock": False}})
         lines = await harness.send("start")
-        launched = [nid for nid, _event in nested_events(lines, "launched")]
-        assert len(launched) == 4 and launched[0] != launched[1] and launched[::2] == [launched[0]] * 2
-        assert lines[-1]["method"] == "execution_stopped"
-        await harness.send("load", {"net": "clockwork", "params": {"clock": False}})
-        lines = await harness.send("start")
-        launched = [nid for nid, _event in nested_events(lines, "launched")]
-        assert launched[0] == launched[1] and launched[2] == launched[3] != launched[0], "outer first: one, then the other"
+        assert nested_events(lines) == [] and lines[-1]["params"]["reason"] == "no_fireable_transitions"

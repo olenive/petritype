@@ -382,18 +382,28 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 - **Declaring.** `ListPlaceNode(..., nested=True)` says the place's tokens hold nets: each
   token is an `ExecutableGraph` (one unnamed inner net, `""`) or implements
   `__petritype_nets__(self) -> dict[str, ExecutableGraph]`. Checked at seed, deposit and
-  `Extend`/`SetTokens` time with an error naming the place. `passive=True` (nested only)
-  keeps the engine's hands off the inner nets: an outer body steps them.
-- **Running (R2).** Inner nets are live. `fire_one_transition` gives one inner net the turn
-  when the outer net's selector picks nothing: place order, then token order, then net order
-  within a token, descending into a net's own inner nets before the next token, each net by
-  its own selector (`NestedNets.fire_one_inner`). Both `execute_graph` and the sequential
-  `Runner` loops get this for free; the concurrent loops take the same turn when nothing
-  outer can launch and nothing is in flight (an inner net is never touched while an outer
-  body that could reach it runs). Quiescence means nothing fireable anywhere. An inner
-  firing counts as a firing of the outer net under its path, `"Depot/#17/cabin/Sit"`: that
-  is what `step_count`, `last_fired`, `fired_counts`, `RunSummary` and the pacing and fuse
-  limits see, so every existing driver and limit stays coherent without a second counter.
+  `Extend`/`SetTokens` time with an error naming the place. Since 2026-11-21 the place
+  also has a stepping rule, `stepping=` one of `"inner_first"` (the default),
+  `"take_turns"`, `"outer_first"` and `"passive"` (below); a place that holds no nets has
+  none, and giving it one is an error. `"passive"` keeps the engine's hands off the inner
+  nets: an outer body steps them.
+- **Running (R2).** Inner nets are live. `fire_one_transition` with `descend` makes one
+  deep step, which fires at most one transition in the whole tree, trying in this order:
+  the nets of the inner-first places, in walk order (place order, then token order, then
+  net order within a token); the ring of the net itself and the nets of its take-turns
+  places, starting after the member that fired last; the nets of the outer-first places,
+  while no body of the net is in flight. A member's turn is a deep step of that net, by its
+  own selector and the rules of its own places (`NestedNets.take_turn`). Both
+  `execute_graph` and the sequential `Runner` loops get this for free; the concurrent loops
+  take the same three parts round their launch sweep, firing an inner net inline beside
+  outer bodies in flight but never inside a token one of them holds through a mutate edge.
+  Quiescence means nothing fireable in the net or in any net of a non-passive place. An
+  inner firing counts as a firing of the outer net under its `InnerFiring`, the path to the
+  net (a tuple of `PathStep(place, token, net)`) and the transition's own name: that is what
+  `step_count`, `last_fired`, `fired_counts`, `RunSummary` and the pacing and fuse limits
+  see, so every existing driver and limit stays coherent without a second counter. Until
+  2026-11-21 the outer net's selector went first and the inner firing was counted under a
+  name joined with `/`, `"Depot/#17/cabin/Sit"`.
 - **Reaching inside (R3).** An outer body reaches into the tokens it holds (an argument or a
   mutate edge) with `NestedNets.put(inner, place, tokens)`, `take(inner, place, n)` and
   `set_param(inner, name, value)`, which type-check, move ids and record `Added`,
@@ -424,22 +434,26 @@ runs them, observes them and (phase 2) saves them *through the boundary*.
 ## Defaults taken from the design document (section 7)
 
 1. Driver policy: outer first, then inner nets in place, token and net order, repeated.
-   Since 2026-10-12 a setting, `ExecutableGraph.deep_policy`, also a `construct_graph`
-   keyword: `"outer_first"`, the default, is this rule; `"interleaved"` makes the nets a
+   Since 2026-11-21 a rule per place instead, `stepping`, whose default is inner first
+   (`PROTOCOL.md` §12.3), the setting below and `passive=True` removed; the transit city
+   states outer first on its places of vehicles, the order its guards were written for.
+   From 2026-10-12 it was a setting, `ExecutableGraph.deep_policy`, also a `construct_graph`
+   keyword: `"outer_first"`, the default, was this rule; `"interleaved"` made the nets a
    cycle, the outer net and then the inner nets in the same order, and each deep step
-   starts from the net after the one the previous step fired in, goes round once and
-   fires in the first net with a firing, by that net's own selector, so an outer net that
-   can always fire no longer starves the inner ones (`NestedNets.deep_turns`). The cursor
-   is the `net_id` of the net that fired last (`_last_turn`), kept in memory only and
+   started from the net after the one the previous step fired in, went round once and
+   fired in the first net with a firing, by that net's own selector, so an outer net that
+   could always fire no longer starved the inner ones (`NestedNets.deep_turns`). The cursor
+   was the `net_id` of the net that fired last (`_last_turn`), kept in memory only and
    recorded under both policies whenever a deep step fires anywhere, outer or inner, in
    success or failure, so a policy switched to `interleaved` mid-run resumes after the net
    that fired last; the
-   policy of the net being stepped governs the whole step, at any depth; quiescence is
-   unchanged; the concurrent loops, which launch every fireable outer transition, are
+   policy of the net being stepped governed the whole step, at any depth; quiescence was
+   unchanged; the concurrent loops, which launch every fireable outer transition, were
    unaffected. `fire_one_transition`, `execute_graph`, the sequential `Runner` and the
-   protocol runner honour it (`DESIGN_RUNNER.md`). The transit example keeps the default,
+   protocol runner honoured it (`DESIGN_RUNNER.md`). The transit example kept the default,
    since its guards let the city fall quiet while a cabin has work; the Rust port's
-   `DeepPolicy::Interleaved` is the same rule.
+   `DeepPolicy::Interleaved` was the same rule. One place of take-turns nets steps as
+   `"interleaved"` did, and outer first at every place as the old default did.
 2. Both token-id paths and the stable nested id on the wire (PROTOCOL.md §12.1).
 3. Inner events wrapped in a new `Nested` record, not a path field on every record.
 4. Inner changes made by a failing body are not rolled back; `restore_tokens_on_failure` is

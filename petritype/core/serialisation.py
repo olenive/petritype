@@ -305,7 +305,7 @@ class NetJson:
         NetJson.import_marking(graph, saved.get("marking", {}))
         graph.params.update(params)
         graph.disabled = {name for name, on in enabled.items() if not on}
-        # The tie-break's and the deep step's cursors are not saved: a loaded net
+        # The tie-break's and the ring's cursors are not saved: a loaded net
         # starts its rounds afresh.
         graph.forget_cursors()
         return graph

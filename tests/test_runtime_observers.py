@@ -15,7 +15,7 @@ import threading
 import pytest
 from pydantic import BaseModel
 
-from petritype.core.events import Failed, Fired
+from petritype.core.events import Failed, Fired, InnerFiring, PathStep
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
     ExecutableGraph,
@@ -395,8 +395,9 @@ class TestSequentialLaunchNotification:
         summary = await Runner.run(RunContext(graph=outer, observers=(observe,)), stop_after_n_firings=1)
         assert calls == [set(), set()]
         assert outer_in_flight == [set()]
-        assert summary.fired == {'Shelf/#1/counter/Work': 1}
-        assert outer.fired_counts == {'Shelf/#1/counter/Work': 1}
+        work = InnerFiring((PathStep('Shelf', 1, 'counter'),), 'Work')
+        assert summary.fired == {work: 1}
+        assert outer.fired_counts == {work: 1}
 
     @pytest.mark.asyncio
     async def test_a_fire_command_has_no_launch_call(self):

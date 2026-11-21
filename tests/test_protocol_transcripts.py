@@ -87,11 +87,16 @@ NET_MODULES = {
     "wildlife": "tests.protocol_nets.wildlife",
     "shop": "tests.protocol_nets.shop",
     "traffic-light": "tests.protocol_nets.traffic_light",
+    "stepping-rules": "tests.protocol_nets.stepping_rules",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
-# the nested-net one, whose example module and templates must import in the process; and
-# the two over the edges that accept an empty place, whose example modules must too.
-OVER_PIPES = ("04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json")
+# the nested-net one, whose example module and templates must import in the process; the
+# two over the edges that accept an empty place, whose example modules must too; and the
+# stepping rules, whose net runs and whose templates must import.
+OVER_PIPES = (
+    "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
+    "10_stepping_rules.json",
+)
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
 STEP = timedelta(seconds=1)  # ``now`` moves on by this much per exchange

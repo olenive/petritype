@@ -23,10 +23,12 @@ while alighting, depart once every door is closed), the cabin closes the doors
 stepping, the city first and a cabin only when the city has nothing to fire,
 carries every passenger to ``Arrived`` with nothing disabled and no transition
 picked by name. A passenger who alights goes to ``Arrived``, never back onto a
-platform, where they would board again. The city keeps the engine's default
-deep-step policy, outer first, because its guards let it fall quiet while a cabin
-has work; ``deep_policy="interleaved"`` is the policy for a net that cannot give
-its outer transitions guards, since it lets every live net fire in turn.
+platform, where they would board again. That order is the city's own choice:
+every place that holds vehicles states the stepping rule ``"outer_first"``,
+which its guards make safe by letting it fall quiet while a cabin has work. The
+engine's default, ``"inner_first"``, would let each cabin close its doors before
+anyone boarded; ``"take_turns"`` is the rule for a net that cannot give its
+outer transitions guards, since it lets every live net fire in turn.
 
 Run it to watch the journey, with the city's event log showing the inner firings
 under the path of the vehicle they happened in::
@@ -37,12 +39,12 @@ under the path of the vehicle they happened in::
 from __future__ import annotations
 
 import asyncio
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel
 
 from petritype import petri_net
-from petritype.core.events import Fired, Nested
+from petritype.core.events import Fired, InnerFiring, Nested, PathStep
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
     ExecutableGraph,
@@ -316,11 +318,15 @@ def can_depart(stop: str):
 
 def city_nodes_and_edges(vehicles: dict[str, list[Vehicle]], waiting: dict[str, list[str]]) -> list:
     """Every node and edge of the city, with the given seed: the vehicles standing
-    at each stop and the passengers waiting on each platform."""
-    nodes = [ListPlaceNode(stop, Vehicle, vehicles.get(stop, []), nested=True) for stop in LOCATIONS]
+    at each stop and the passengers waiting on each platform. Every place of
+    vehicles steps outer first: the city fires before its cabins."""
+    nodes = [
+        ListPlaceNode(stop, Vehicle, vehicles.get(stop, []), nested=True, stepping="outer_first")
+        for stop in LOCATIONS
+    ]
     nodes += [ListPlaceNode(f"Platform@{stop}", str, waiting.get(stop, [])) for stop in LOCATIONS]
     nodes += [
-        ListPlaceNode("In Transit", Vehicle, nested=True),
+        ListPlaceNode("In Transit", Vehicle, nested=True, stepping="outer_first"),
         ListPlaceNode("Arrived", str),
     ]
     for stop in LOCATIONS:
@@ -386,12 +392,28 @@ def transit(destination: str | None = None) -> ExecutableGraph:
 # --- stepping ---------------------------------------------------------------------------------
 
 
-async def step(city: ExecutableGraph) -> Optional[str]:
+async def step(city: ExecutableGraph) -> Optional[Union[str, InnerFiring]]:
     """One firing, outer or inner, the engine's own choice: the city's first
     fireable transition in declared order, else the first cabin with anything to
-    fire, in place order then token order. Returns what fired (an inner firing
-    under its path, ``"Depot/#1/cabin/Sit"``), or ``None`` if nothing could."""
+    fire, in place order then token order (every place of vehicles is outer
+    first). Returns what fired: the city's transition by name, a cabin's as an
+    ``InnerFiring`` (``InnerFiring((PathStep("Depot", 1, "cabin"),), "Sit")``),
+    or ``None`` if nothing could."""
     return await ExecutableGraphOperations.fire_one_transition(city, *ExecutableGraphOperations.maps(city))
+
+
+def where(path: tuple[PathStep, ...]) -> str:
+    """Where an inner net is, in words, for display: ``"the cabin of token 1 in
+    Depot"``, one clause per level."""
+    return ", in ".join(f"the {step.net or 'net'} of token {step.token} in {step.place}" for step in reversed(path))
+
+
+def label(fired: Union[str, InnerFiring]) -> str:
+    """What a step fired, in words, for display: the city's transition by name, a
+    cabin's as ``"Sit, in the cabin of token 1 in Depot"``."""
+    if isinstance(fired, InnerFiring):
+        return f"{fired.transition}, in {where(fired.path)}"
+    return fired
 
 
 def travelling(city: ExecutableGraph) -> int:
@@ -419,7 +441,7 @@ def describe_log(events: list) -> list[str]:
     lines = []
     for event in events:
         if isinstance(event, Nested) and isinstance(event.event, Fired):
-            lines.append(f"{'/'.join(event.path)}: {event.event.transition}")
+            lines.append(f"{event.event.transition}, in {where(event.path)}")
         elif isinstance(event, Fired):
             lines.append(event.transition)
     return lines

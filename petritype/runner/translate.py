@@ -19,6 +19,7 @@ from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_a
 from pydantic import BaseModel, TypeAdapter
 
 from petritype.core import serialisation as _serialisation
+from petritype.core.events import PathStep
 from petritype.core.executable_graph_components import (
     DrainEdge, ExecutableGraph, ListPlaceNode, MutateWhereEdge, SurveyEdge, TakeWhereEdge,
 )
@@ -234,16 +235,15 @@ class Paths:
             steps.append(wire.PathStep(place=step["place"], token=step.get("token"), net=step.get("net")))
         return tuple(steps)
 
-    def of_segments(segments: tuple[str, ...]) -> tuple[wire.PathStep, ...]:
-        """The steps of a path in the library's own form (``NestedNets.walk``,
-        ``find`` and the ``Nested`` records): three segments per level, the
-        place, the holding token's id spelt ``#<id>`` and the net's name. The one
-        place the runner reads that form; its place and net segments are names
-        taken whole, so every name survives the translation."""
-        return tuple(
-            wire.PathStep(place=segments[level], token=segments[level + 1].removeprefix("#"), net=segments[level + 2])
-            for level in range(0, len(segments) - 2, 3)
-        )
+    def of_step(step: PathStep) -> wire.PathStep:
+        """A step of the library's own path (``NestedNets.walk``, ``find``, the
+        ``Nested`` records and an ``InnerFiring``) as the wire spells it: the same
+        place and net names, taken whole, and the token's id as a string."""
+        return Paths.step(step.place, step.token, step.net)
+
+    def of_steps(steps: tuple[PathStep, ...]) -> tuple[wire.PathStep, ...]:
+        """A path of the library's own (``of_step``) as the wire's steps."""
+        return tuple(Paths.of_step(step) for step in steps)
 
     def to_wire(steps: tuple[wire.PathStep, ...]) -> list[dict]:
         """The steps as JSON, for a result built as a plain dict."""
@@ -460,10 +460,11 @@ class Topologies:
         )
 
     def of(graph: ExecutableGraph) -> wire.Topology:
-        """The net's shape. An input edge's ``kind`` is its class's (``take_where``,
-        ``drain``, ``snapshot``, ``survey``, ``mutate``, ``mutate_where``), or for a
-        plain argument edge ``take_all`` when its argument takes every token as a
-        list and ``take`` otherwise."""
+        """The net's shape. A place whose tokens hold nets carries ``nested`` and its
+        ``stepping`` rule, the default included (§12.3). An input edge's ``kind`` is
+        its class's (``take_where``, ``drain``, ``snapshot``, ``survey``, ``mutate``,
+        ``mutate_where``), or for a plain argument edge ``take_all`` when its argument
+        takes every token as a list and ``take`` otherwise."""
         places = {place.name: place for place in graph.places}
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
@@ -519,7 +520,7 @@ class Topologies:
                     type_name=TypeNames.of(place.type),
                     serializable=Serializable.place_type(place.type),
                     nested=True if place.nested else None,
-                    passive=True if place.passive else None,
+                    stepping=place.stepping if place.nested else None,
                     key_names=list(place.key_names) if place.keys else None,
                 )
                 for place in graph.places

@@ -36,11 +36,15 @@ Layers built so far:
   no longer grows with net size. Mid-run tokens are validated at their own gates:
   deposits by the engine, inbox commands as they are applied.
 - **Nested tokens:** a token of a ``nested`` place holds nets of its own (``NestedNets``),
-  which every loop here runs as part of running the outer net: sequential firing descends
-  through ``fire_one_transition`` (outer first, then inner nets in place, token, net order,
-  or the nets in turn under the graph's ``deep_policy="interleaved"``);
-  the concurrent loops give one inner net the turn when nothing outer can launch and
-  nothing is in flight. Inner firings count as firings of the outer net under their path.
+  which every loop here runs as part of running the outer net, in the order each place's
+  stepping rule gives: sequential firing makes one deep step through
+  ``fire_one_transition``; the concurrent loops take the same three parts round the outer
+  net's launch sweep, which is the outer net's turn: an inner firing ahead of it
+  (inner-first places, then the ring after its cursor), else the sweep, else one behind it
+  (the rest of the ring, then the outer-first places once nothing outer is in flight). An
+  inner firing runs inline while outer bodies may be in flight, never in a token one of
+  them holds through a mutate edge. Inner firings count as firings of the outer net under
+  their ``InnerFiring``.
 
 Design notes realised here:
 - **Functional, no `__init__`:** `Runner` is a namespace class of functions (matching
@@ -82,7 +86,7 @@ from petritype.core.executable_graph_components import (
     TokenIds,
     default_transition_selector,
 )
-from petritype.core.events import Added, ParamChanged, Removed, Toggled
+from petritype.core.events import Added, InnerFiring, ParamChanged, Removed, Toggled
 from petritype.core.type_comparisons import CompareTypes
 
 _log = logging.getLogger(__name__)
@@ -103,9 +107,12 @@ _log = logging.getLogger(__name__)
 Observer = Callable[[ExecutableGraph], Union[None, Awaitable[None]]]
 
 
-def fired_since(previous: dict[str, int], current: dict[str, int]) -> dict[str, int]:
+def fired_since(
+    previous: dict[Union[str, InnerFiring], int], current: dict[Union[str, InnerFiring], int],
+) -> dict[Union[str, InnerFiring], int]:
     """Per-transition firing counts that occurred between two snapshots of
-    ``graph.fired_counts``. Keys with a zero delta are omitted.
+    ``graph.fired_counts``. Keys with a zero delta are omitted. A firing inside an
+    inner net is keyed by its ``InnerFiring``, as ``fired_counts`` keys it.
 
     The lossless way for an observer to answer "what fired since I last looked",
     in every execution mode: snapshot ``dict(graph.fired_counts)`` (a copy — the
@@ -130,7 +137,9 @@ class RunSummary(BaseModel):
       (state lives in the graph — nothing resumes by itself).
     - ``n_fired``  — transition firings during this call.
     - ``fired``    — per-transition firing counts for this call (zero-count names
-      omitted): the ``fired_since`` diff of the call's entry/exit snapshots.
+      omitted): the ``fired_since`` diff of the call's entry/exit snapshots. A
+      firing inside an inner net is counted under its ``InnerFiring``, the path to
+      the net and the transition's own name.
 
     Per-firing detail (timestamps, token values, orderings) is the observers' job —
     see ``fired_since`` — not extra fields here.
@@ -140,7 +149,7 @@ class RunSummary(BaseModel):
 
     quiesced: bool
     n_fired: int
-    fired: dict[str, int]
+    fired: dict[Union[str, InnerFiring], int]
 
 
 class TooManyFiringsError(RuntimeError):
@@ -588,14 +597,20 @@ def _blow_fuse(ctx: RunContext, transition_name: str) -> None:
 
 def _check_fuse(ctx: RunContext, place_nodes: dict, incoming: dict, read: dict) -> None:
     """Sequential-path fuse check on prebuilt maps: raise iff the fuse is spent *and*
-    a firing would be attempted (some non-disabled transition is fireable). Costs one
-    int compare until the fuse is spent. A custom selector that would have vetoed
-    every fireable transition is not consulted — a fireable net with a spent fuse
-    counts as attempting. (The concurrent loops don't need this sweep: they check
-    the fuse right before each launch, where fireability is already established.)"""
+    a firing would be attempted (some non-disabled transition is fireable, here or in
+    an inner net a deep step enters). Costs one int compare until the fuse is spent.
+    It blames what the deep step would try first: an inner net ahead of the outer
+    net's own turn, then the outer net's first fireable transition, then an inner net
+    behind it. A custom selector that would have vetoed every fireable transition is
+    not consulted: a fireable net with a spent fuse counts as attempting. (The
+    concurrent loops don't need this sweep: they check the fuse right before each
+    launch and each inner turn, where fireability is already established.)"""
     if not _fuse_spent(ctx):
         return
     graph = ctx.graph
+    nested = NestedNets.any_nested(graph)
+    if nested and NestedNets.any_fireable(graph, "ahead"):
+        _blow_fuse(ctx, "an inner net")
     for transition in graph.transitions:
         if transition.name in ctx.disabled:
             continue
@@ -607,6 +622,8 @@ def _check_fuse(ctx: RunContext, place_nodes: dict, incoming: dict, read: dict) 
             transition_names_to_read_edges=read,
         ):
             _blow_fuse(ctx, transition.name)
+    if nested and NestedNets.any_fireable(graph, "behind"):
+        _blow_fuse(ctx, "an inner net")
 
 
 async def _fire_one(ctx: RunContext, place_nodes: dict, incoming: dict, outgoing: dict, read: dict) -> bool:
@@ -698,23 +715,29 @@ def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransit
     graph.last_fired = name
 
 
-async def _fire_inner(ctx: RunContext) -> bool:
-    """Concurrent-mode turn for the inner nets of nested tokens, taken only when
-    nothing outer can launch and nothing is in flight (so no outer body holds a
-    token whose inner net this could touch): one inner firing, sequentially, by
-    the order ``NestedNets.fire_one_inner`` defines. Counted and tallied as the
-    sequential path counts an inner firing. Returns True iff something fired."""
+def _held(flight_state: dict) -> frozenset:
+    """The ``(place, token id)`` pairs the outer bodies in flight hold through a
+    mutate edge: tokens still in their places, whose inner nets no inner firing may
+    touch while such a body runs."""
+    return frozenset(pair for _transition, _args, firing_ids in flight_state.values() for pair in firing_ids.mutated)
+
+
+async def _fire_inner(ctx: RunContext, part: str, held: frozenset = frozenset()) -> bool:
+    """Concurrent-mode turn for the inner nets of nested tokens: one inner firing,
+    inline, among the turns of one part of the outer net's round
+    (``NestedNets.take_turn``): ``"ahead"`` of its launch sweep, or ``"behind"`` it,
+    where the outer-first places wait until nothing outer is in flight. The tokens
+    in ``held`` are skipped. The fuse is checked first, against what that part could
+    fire. Counted on the graph as the sequential path counts an inner firing, and
+    tallied. Returns True iff something fired."""
     graph = ctx.graph
     if not NestedNets.any_nested(graph):
         return False
-    if _fuse_spent(ctx) and NestedNets.any_fireable(graph):
+    if _fuse_spent(ctx) and NestedNets.any_fireable(graph, part, held):
         _blow_fuse(ctx, "an inner net")
-    fired = await NestedNets.fire_one_inner(graph, executor=ctx.thread_pool)
+    fired = await NestedNets.take_turn(graph, part, executor=ctx.thread_pool, held=held)
     if fired is None:
         return False
-    graph.step_count += 1
-    graph.last_fired = fired
-    graph.fired_counts[fired] = graph.fired_counts.get(fired, 0) + 1
     ctx.n_fired += 1
     return True
 
@@ -876,7 +899,14 @@ class Runner:
     async def _run_concurrent(ctx: RunContext, stop_after_n_firings: Optional[int] = None) -> bool:
         """Returns True if the net quiesced, False if ``stop_after_n_firings`` capped
         this call's launches (work may remain). In-flight firings always finish and
-        deposit before returning."""
+        deposit before returning.
+
+        Each time round: an inner firing ahead of the outer net's turn, if one has a
+        firing; else the outer net's turn, one launch sweep of every fireable
+        transition (which moves the ring's cursor to the outer net when it launches
+        something); else, when the sweep launched nothing, an inner firing behind
+        it. An inner firing counts against ``stop_after_n_firings`` as a launch
+        does."""
         graph = ctx.graph
         place_nodes, incoming, outgoing, read = _prepare(graph)
 
@@ -896,8 +926,13 @@ class Runner:
                     stop_after_n_firings is not None
                     and launched_this_call >= stop_after_n_firings
                 )
+                # The turns ahead of the outer net's own.
+                inner_turn = not capped and await _fire_inner(ctx, "ahead", _held(flight_state))
+                if inner_turn:
+                    launched_this_call += 1
                 airborne = set(in_flight.values())
-                if not capped:
+                launched_this_sweep = 0
+                if not capped and not inner_turn:
                     for transition in graph.transitions:
                         if transition.name in airborne or transition.name in ctx.disabled:
                             continue  # already running, or toggled off via Disable
@@ -915,6 +950,7 @@ class Runner:
                             flight_state[task] = (transition, args, firing_ids)
                             airborne.add(transition.name)
                             launched_this_call += 1
+                            launched_this_sweep += 1
                             ctx.n_fired += 1
                             if (
                                 stop_after_n_firings is not None
@@ -922,23 +958,38 @@ class Runner:
                             ):
                                 capped = True
                                 break
+                    if launched_this_sweep:
+                        NestedNets.took_own_turn(graph)  # the sweep was the outer net's turn
 
                 if set(in_flight.values()) != graph.in_flight:
                     graph.in_flight = set(in_flight.values())
                     await _notify(ctx)  # newly in-flight transitions light up as "working"
 
-                if not in_flight:
-                    # Nothing airborne and nothing launchable in the outer net: an
-                    # inner net may still have a move (nested tokens).
-                    if not capped and await _fire_inner(ctx):
+                if not capped and not inner_turn and not launched_this_sweep:
+                    # The turns behind the outer net's own: the rest of the ring, bodies
+                    # in flight or not, then the outer-first places once none is.
+                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state))
+                    if inner_turn:
                         launched_this_call += 1
-                        await _notify(ctx)
-                        continue
+                if inner_turn:
+                    await _notify(ctx)
+
+                if not in_flight:
+                    if inner_turn:
+                        continue  # an inline firing moved the marking: go round again
                     # Either the net quiesced, or the pacing cap stopped the launch
                     # sweep (work may remain).
                     return not capped
 
-                done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
+                if inner_turn:
+                    # An inner net fired while bodies are in flight: let them run, take
+                    # what has landed meanwhile, and go round again without waiting.
+                    await asyncio.sleep(0)
+                    done = {task for task in in_flight if task.done()}
+                else:
+                    done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    continue
                 for task in done:
                     in_flight.pop(task)
                     fired_transition, consumed, firing_ids = flight_state.pop(task)
@@ -971,6 +1022,9 @@ class Runner:
                 return
 
     async def _tick_concurrent(ctx: RunContext, tick: float) -> None:
+        """One turn a tick, in the order of ``_run_concurrent``: an inner firing ahead
+        of the outer net's turn if one has a firing, else the launch sweep, else an
+        inner firing behind it; then whatever has landed is distributed."""
         graph = ctx.graph
         place_nodes, incoming, outgoing, read = _prepare(graph)
 
@@ -984,8 +1038,10 @@ class Runner:
                 # An observer or a body may have assigned place.tokens directly.
                 TokenIds.resync(graph)
 
+                inner_turn = await _fire_inner(ctx, "ahead", _held(flight_state))
                 airborne = set(in_flight.values())
-                for transition in graph.transitions:
+                launched_this_sweep = 0
+                for transition in [] if inner_turn else graph.transitions:
                     if transition.name in airborne or transition.name in ctx.disabled:
                         continue
                     if ExecutableGraphCheck.transition_is_fireable(
@@ -1002,7 +1058,9 @@ class Runner:
                         flight_state[task] = (transition, args, firing_ids)
                         airborne.add(transition.name)
                         ctx.n_fired += 1
-                        changed = True
+                        launched_this_sweep += 1
+                if launched_this_sweep:
+                    NestedNets.took_own_turn(graph)  # the sweep was the outer net's turn
 
                 for task in [t for t in in_flight if t.done()]:
                     in_flight.pop(task)
@@ -1012,10 +1070,12 @@ class Runner:
                     _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
                     changed = True
 
-                if not in_flight and await _fire_inner(ctx):
-                    changed = True
-
                 graph.in_flight = set(in_flight.values())
+                if not inner_turn and not launched_this_sweep:
+                    # The rest of the ring, then the outer-first places once nothing is in flight.
+                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state))
+                changed = changed or inner_turn or bool(launched_this_sweep)
+
                 if changed:
                     await _notify(ctx)
                 if await _sleep_or_stop(ctx, tick):

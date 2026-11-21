@@ -337,7 +337,8 @@ Settlements:
   `last_fired`), as the library driver does, so `progress` means the same
   whichever drove the net. `execution_stopped {no_fireable_transitions}` now
   means nothing fireable anywhere. *2026-11-21:* the outer net counts an inner
-  firing no more; progress is per net (the last section).
+  firing no more; progress is per net, and the driver makes one deep step by
+  the stepping rules of the places (the last two sections).
 - **Reads during a body** keep the snapshot rule and add two cases. An outer
   body may reach into the inner nets of the tokens it took or holds through a
   mutate edge, so a read addressed to one of those waits for the landing
@@ -496,6 +497,8 @@ Settlements:
   as it launches, as the library does, so a `deep_policy` switched to
   `"interleaved"` mid-run resumes after the net that fired last. `step` and a
   running net share `_select`, so both honour it. Nothing on the wire changes.
+  *2026-11-21:* the stepping rule per place replaced `deep_policy` (the last
+  section).
 
 The shared transcript `tests/protocol/05_nested_nets.json` was re-recorded
 with `tests/record_transcript.py` for two lines: `describe` now lists
@@ -645,7 +648,9 @@ Settlements:
   `fire_one_transition` with `descend`, `RunSummary.fired`). The runner never
   drives a net that way, so the protocol does not see it, unless a body
   steps an inner net through that descent itself; it goes with the descent,
-  when the stepping rule replaces it.
+  when the stepping rule replaces it. *Done the same day (the next section):*
+  the library's paths are tuples of its own `PathStep`s and an inner firing an
+  `InnerFiring`, and `Paths.of_segments` went with the segments.
 - **Progress is per net** (§5.4). The owner no longer counts an inner firing
   in the outer net's progress under a joined key. Each net's progress is its
   own graph's `step_count`, `fired_counts` and `last_fired`, which the engine
@@ -671,3 +676,96 @@ Settlements:
 `tests/test_runner_nested.py` covers each wrong shape of a path, the index of
 the failing step, the empty path, names with a slash or a leading hash, and
 progress per net at two depths.
+
+## As built, 2026-11-21: the stepping rule per place (PROTOCOL.md §12.3)
+
+The second part of the same change (`../petritype-rs/dev-docs/subnet-place-spec.md`
+§1.3 and §5). Every place that holds nets has one stepping rule, and one deep step
+follows the rules of the places it meets, at every level. The rule replaced the
+net-wide `deep_policy` and the `passive` setting, which are removed with no alias.
+
+Settlements:
+
+- **The setting.** `ListPlaceNode(..., nested=True, stepping=...)`, one of
+  `"inner_first"` (the default), `"take_turns"`, `"outer_first"` and `"passive"`,
+  typed as the `Literal` `Stepping`, which is how the library types its other
+  choices of a name (`tie_break`). A nested place built without one has
+  `"inner_first"`; a place that holds no nets has `None`, and one given a rule is
+  a `ValueError` when it is built. The rule belongs to the place, so it is part of
+  the definition: a template rebuilds it, `NetJson` does not save it, and assigning
+  `place.stepping` changes it from the next deep step, the ring's cursor staying
+  where it is.
+- **One deep step** (`fire_one_transition` with `descend`, so `execute_graph` and
+  the sequential `Runner` too): `NestedNets.take_turn(graph, "ahead")`, the
+  inner-first members then the ring's members after the cursor; else the net's own
+  selector, whose choice is the net's ring turn (`NestedNets.took_own_turn`),
+  whatever comes of the firing; else `take_turn(graph, "behind")`, the rest of the
+  ring then the outer-first members, offered only while `graph.in_flight` is empty.
+  A member's turn is `fire_one_transition` with `descend` on that net
+  (`NestedNets.deep_step`), so each level follows its own places' rules, and the
+  member that fires, or fails, moves the cursor only if it is in the ring
+  (`NestedNets.took_turn`). The cursor is `ExecutableGraph._ring_cursor`, the
+  `net_id` of the member that fired last; `forget_cursors` (a load) and a deep copy
+  clear it. The member list (`NestedNets.members`, `turns`) is read once per part,
+  in walk order; nothing out here moves until something fires, and the step ends
+  there. Under inner first a deep step still fires one transition, not a run to
+  rest. A plain step (`descend=False`: the `Fire` command, a `press`) never moves
+  a cursor.
+- **Structured values.** A path is a tuple of `petritype.core.events.PathStep`
+  (`place`, `token` as an integer, `net`), in `NestedNets.walk`, `find`,
+  `resolve`, `members` and the `Nested` records. A firing inside an inner net is an
+  `InnerFiring(path, transition)`: what `fire_one_transition` with `descend`
+  returns, and the key under which `fired_counts`, `last_fired` and
+  `RunSummary.fired` count it, on every net between. Nothing in the library builds
+  or parses a name joined with a separator. The wire's `PathStep` keeps the token
+  id as a string (§2), so the two stay two types: `Paths.of_step` and `of_steps`
+  (`translate.py`) turn the library's into the wire's.
+- **Quiescence deep** is a deep step that finds nothing: the net and every net in
+  its non-passive places at rest. `NestedNets.any_fireable(graph, part)` asks it
+  of one part of the round, which the fuse uses.
+- **The concurrent runtime.** Each time round, `_fire_inner(ctx, "ahead")`, one
+  inner firing inline; else the launch sweep, which is the outer net's turn and
+  moves the cursor when it launched something; else, when it launched nothing,
+  `_fire_inner(ctx, "behind")`, where the outer-first members wait while anything
+  outer is in flight. So inner nets now fire beside outer bodies in flight, where
+  before an inner net had its turn only when nothing was in flight. Two things
+  keep that safe in Python, where a body may be a coroutine or on a thread while
+  the loop fires inline: the nets of a token an in-flight body holds through a
+  mutate edge are left out of the round until it lands (`_held`, from each
+  flight's `FiringTokenIds.mutated`; a taken token is out of its place anyway),
+  and after an inner firing with bodies in flight the loop yields
+  (`asyncio.sleep(0)`) and takes what has landed before going round again. An
+  inner firing counts against `stop_after_n_firings` as a launch does.
+  `_tick_concurrent` takes the same three parts, one turn a tick.
+- **The fuse** in sequential mode now counts the inner nets a deep step would
+  enter, and blames what it would try first: `"an inner net"` ahead of the outer
+  net's turn, the outer net's first fireable transition, then `"an inner net"`
+  behind it. Before, a spent fuse let an inner firing through when the outer net
+  had nothing fireable.
+- **The owner.** `_select` is `_choose(outer)`: one deep step of the loaded net,
+  chosen and not fired, by the same parts (`NestedNets.turns`) and the same cursor
+  moves, each member's turn chosen by `_choose` on that net, so the runner and the
+  library step alike. One firing is airborne at a time and nothing is chosen while
+  it is, so the outer-first members are always offered. A `press` of a `fire`
+  control is a plain firing and no longer records a turn. `topology.places[]`
+  carries `stepping` on every place that holds nets, the default included, and
+  `passive` is gone from `wire.Place`. Progress lists a net's own firings, the
+  counts under its transitions' names, so that an `InnerFiring` a body's own deep
+  step leaves on a graph never reaches the wire.
+
+The transit city states `outer_first` on its five places of vehicles, so that its
+journey holds: under inner first the cabins would close every door before anyone
+boarded. `tests/protocol/05_nested_nets.json` was re-recorded and differs from
+what it replaced by those five `stepping` fields alone. The new conformance net
+`stepping-rules` (`tests/protocol_nets/stepping_rules.py`, fixed in PROTOCOL.md
+§11) and its transcript `tests/protocol/10_stepping_rules.json` show the four rules
+and a second level, ten steps and a run; both transcripts re-record to the same
+bytes, and the other seven re-record unchanged. The recorder lost its check for a
+token id embedded in text, which only the library's old joined names could raise.
+
+`tests/test_stepping_rules.py` covers the rules case for case with the Rust core's
+`tests/stepping.rs`, and the concurrent runtime beside a body in flight;
+`tests/test_engine_policies.py` keeps the evidence that one level of take turns
+steps as the interleaved policy did and outer first as the old default did;
+`tests/test_runner_protocol_gaps.py` drives `step` and `start` under each rule and
+reads `stepping` in the topology.

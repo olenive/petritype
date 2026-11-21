@@ -200,11 +200,14 @@ class PlaceStyle(Wire):
 
 
 class Place(Wire):
+    """``stepping`` is present exactly on a place that holds nets, its stepping
+    rule (§5.1, §12.3)."""
+
     name: str
     type_name: str
     serializable: bool
     nested: Optional[bool] = None
-    passive: Optional[bool] = None
+    stepping: Optional[Literal["inner_first", "take_turns", "outer_first", "passive"]] = None
     key_names: Optional[list[str]] = None
     style: Optional[PlaceStyle] = None
 

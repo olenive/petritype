@@ -135,9 +135,11 @@ def seed_box(label: str, low: list[int]) -> Box:
 
 @petri_net(name="boxes", description="Boxes holding counters")
 def boxes() -> ExecutableGraph:
+    """Outer first, so that ``Fill``, once its guard lets it, fires before the
+    counters it reaches into."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Shelf", Box, [seed_box("a", [1]), seed_box("b", [2])], nested=True),
-        ListPlaceNode("Spare", Box, [seed_box("c", [])], nested=True),
+        ListPlaceNode("Shelf", Box, [seed_box("a", [1]), seed_box("b", [2])], nested=True, stepping="outer_first"),
+        ListPlaceNode("Spare", Box, [seed_box("c", [])], nested=True, stepping="outer_first"),
         MutateEdge("Shelf", "Fill", "box"),
         FunctionTransitionNode("Fill", fill, guard=lambda g: g.params["fill"]),
     ], params={"fill": False})
@@ -222,7 +224,7 @@ class TestAddressing:
         assert by_id["marking_version"] == 0
         assert by_id["topology"]["places"][0] == {"name": "Low", "type_name": "int", "serializable": True}
         assert result(await harness.send("get_state"))["topology"]["places"][0] == {
-            "name": "Shelf", "type_name": "Box", "serializable": True, "nested": True,
+            "name": "Shelf", "type_name": "Box", "serializable": True, "nested": True, "stepping": "outer_first",
         }
 
     async def test_step_fires_inner_nets_in_order_and_versions_are_per_net(self):
@@ -478,7 +480,7 @@ class TestNamesAndDepth:
         fired = []
         while (answer := result(await harness.send("step")))["fired"]:
             fired.append((answer["transition"], answer.get("path")))
-        assert fired == [("Ring", None), ("Up", middle_path), ("Up", deep_path)], "outer first, then down"
+        assert fired == [("Up", deep_path), ("Up", middle_path), ("Ring", None)], "inner first, the default, at both levels"
         counts = {}
         for name, params in (("outer", {}), ("middle", {"path": middle_path}), ("deep", {"path": deep_path})):
             progress = result(await harness.send("get_state", params))["progress"]
@@ -489,7 +491,7 @@ class TestNamesAndDepth:
             "deep": (1, "Up", {"Up": 1}),
         }, "each net counts its own firings under their own names, and none of the nets inside it"
         log = result(await harness.send("get_log", {"path": middle_path}))["entries"]
-        assert [entry.get("path") for entry in log] == [middle_path, deep_path], "a net's log holds the nets inside it"
+        assert [entry.get("path") for entry in log] == [deep_path, middle_path], "a net's log holds the nets inside it"
         wrong = await harness.send("get_state", {"path": [*middle_path, step("Inside", "999", "inner")]})
         assert error(wrong) == "unknown_net" and message(wrong).startswith("step 1 of the path:")
 

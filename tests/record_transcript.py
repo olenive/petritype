@@ -37,10 +37,10 @@ one: the token is named where its label is seen). Every ``marking_version`` is
 ``{"<unordered>": [...]}``. ``topology.controls`` is kept as it stands, labels
 included: it is what the net declares, the same in every runtime. A ``color`` is
 kept too, and must be a hex ``"#rrggbb"`` (lowercase), which every runtime gives
-alike (§11, since 2026-10-16); a colour spelt any other way, or any value or key
-that embeds a token id in the text form of the library's own descent
-(``Shelf/#1/counter/Up``, a name its ``fired_counts`` may hold), cannot be
-shared and stops the recording: change the scenario.
+alike (§11, since 2026-10-16); a colour spelt any other way cannot be shared and
+stops the recording: change the scenario. (Until 2026-11-21 so did a value or key
+that embedded a token id in text, as the library's own descent once named an
+inner firing; nothing names one that way any more.)
 
 Re-recording a transcript keeps what it chose: where the line it expected at the
 same place in the same exchange binds a capture, masks plainly with ``"<id>"``
@@ -75,7 +75,6 @@ from tests.test_protocol_transcripts import (  # noqa: E402
 
 LABEL_KEYS = frozenset({"label", "type_name", "message", "runtime", "runtime_version"})
 TIME_KEYS = frozenset({"started_at", "last_progress_at", "idle_since"})
-EMBEDDED_ID = re.compile(r"/#\d")
 HEX_COLOUR = re.compile(r"#[0-9a-f]{6}")
 SETTLE_SECONDS = 0.2
 
@@ -227,12 +226,10 @@ class Masker:
         ``old`` is the line a re-recorded transcript expected in its place."""
         if line.get("method") == "reloaded":
             self.forget()
-        masked = {
+        return {
             key: (value if key == "id" else self.walk(value, net, None, _get(old, key)))
             for key, value in line.items()
         }
-        self._check_shareable(masked, "")
-        return masked
 
     def walk(self, value, net: str, place: str | None, old=None):
         if old == ANY:
@@ -328,20 +325,6 @@ class Masker:
         if not (isinstance(value, str) and HEX_COLOUR.fullmatch(value)):
             raise ValueError(f"a shared transcript carries a colour only as #rrggbb, not {value!r}")
         return value
-
-    def _check_shareable(self, value, where: str) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key == "value":
-                    continue
-                if EMBEDDED_ID.search(key):
-                    raise ValueError(f"{where}.{key}: a key embeds a token id, which a shared transcript cannot pin")
-                self._check_shareable(item, f"{where}.{key}")
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                self._check_shareable(item, f"{where}[{index}]")
-        elif isinstance(value, str) and EMBEDDED_ID.search(value):
-            raise ValueError(f"{where}: {value!r} embeds a token id, which a shared transcript cannot pin")
 
 
 # --- the process -------------------------------------------------------------------------------

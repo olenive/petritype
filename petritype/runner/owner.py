@@ -32,12 +32,12 @@ knows of the net: at the load for the nets the factory seeded, at the ``inject``
 that carried its token, at the landing of the firing that produced it (since
 2026-10-12; until then when first addressed or fired), which is when its
 ``fireable`` baseline is taken. The outer one is ``_Loaded.outer`` and every
-method below takes the net it acts on. A firing may be in any net: under the
-loaded net's default ``deep_policy`` the driver picks the outer net's choice
-first and, when it has none, descends in the order the library's own driver uses
-(place, token, net order; a net's own inner nets before the next token); under
-``"interleaved"`` it goes round the same nets from the one after the net that
-fired last, by the library's cycle and cursor. An inner net's notifications go out wrapped in
+method below takes the net it acts on. A firing may be in any net: the driver
+chooses it by one deep step of the loaded net (§12.3), in the order the stepping
+rules of its places give (``_choose``: the inner-first places, the ring of the net
+and its take-turns places from after the ring's cursor, then the outer-first
+places, each member's turn a deep step of its own), the library's own order and
+cursors, and launches what it chose. An inner net's notifications go out wrapped in
 ``nested`` with the inner version inside and the outer version, unmoved, on the
 wrapper; the engine delivers inner events to the outer log already wrapped as
 ``Nested`` records with the path as it stood.
@@ -46,8 +46,8 @@ A path is a list of steps on the wire (§12.1, since 2026-11-21, when the
 protocol became version 2), one per level from the loaded net down, and inside
 the owner a tuple of ``wire.PathStep``s: a request's path is checked by
 ``Paths.parse`` and resolved one step at a time (``_descend``), and the
-library's own spelling of a level, three segments with the token as ``#<id>``,
-is read only through ``Paths.of_segments``. Progress is per net (§5.4): each
+library's own path, a tuple of its ``PathStep``s with the token id an integer,
+becomes the wire's through ``Paths.of_steps``. Progress is per net (§5.4): each
 net counts the firings of its own transitions under their own names, and the
 outer net's progress says nothing of the firings inside it.
 
@@ -645,8 +645,8 @@ class Owner:
             return
 
         def visit(graph: ExecutableGraph, prefix: tuple[wire.PathStep, ...]) -> None:
-            for segments, _token, _name, inner in NestedNets.walk(graph):
-                path = (*prefix, *Paths.of_segments(segments))
+            for step, inner in NestedNets.walk(graph):
+                path = (*prefix, Paths.of_step(step))
                 if inner.net_id not in loaded.inner:
                     self._net_for(inner, path)
                 visit(inner, path)
@@ -665,7 +665,7 @@ class Owner:
         found = NestedNets.find(loaded.outer.graph, net_id)
         if found is None:
             return None
-        return self._net_for(found[1], Paths.of_segments(found[0]))
+        return self._net_for(found[1], Paths.of_steps(found[0]))
 
     def _target(self, params: dict) -> _Net:
         """The net a request addresses: the outer net, or the inner net its
@@ -683,7 +683,7 @@ class Owner:
             found = NestedNets.find(loaded.outer.graph, net_id) if net_id is not None else None
             if found is None:
                 raise ProtocolError(ErrorCode.UNKNOWN_NET, f"no live inner net {spelt!r}")
-            return self._net_for(found[1], Paths.of_segments(found[0]))
+            return self._net_for(found[1], Paths.of_steps(found[0]))
         if has_path:
             steps = Paths.parse(params["path"])
             graph = loaded.outer.graph
@@ -726,7 +726,7 @@ class Owner:
             return ()
         found = NestedNets.find(self._loaded.outer.graph, net.nested_id)
         if found is not None:
-            net.last_path = Paths.of_segments(found[0])
+            net.last_path = Paths.of_steps(found[0])
         return net.last_path
 
     def _net_name(self, net: _Net) -> str:
@@ -971,8 +971,12 @@ class Owner:
         the marking without them), the tokens its mutate edges hand over are
         rendered at once, and it is shown ``in_flight``. ``eager`` names further
         tokens (per place, by index) to render at once: those holding a net an
-        airborne body is changing."""
+        airborne body is changing. Progress counts the firings of the net's own
+        transitions (§5.4), under their names: a body that steps an inner net of
+        its own through the library's deep step leaves counts under an
+        ``InnerFiring`` on that net's graph, which are not the net's own."""
         graph = net.graph
+        own = {name: count for name, count in graph.fired_counts.items() if isinstance(name, str)}
         places = {place.name: self._view(net, place) for place in graph.places}
         for place_name, indices in (eager or {}).items():
             view = places[place_name]
@@ -1007,9 +1011,9 @@ class Owner:
             transitions=transitions,
             places=places,
             progress=wire.Progress(
-                step_count=graph.step_count,
+                step_count=sum(own.values()),
                 last_fired=net.last_fired,
-                fired_counts=dict(graph.fired_counts),
+                fired_counts=own,
                 last_progress_at=_iso(net.last_progress_at) if net.last_progress_at else None,
             ),
         )
@@ -1142,50 +1146,46 @@ class Owner:
             return None
         return (graph.transition_selector or default_transition_selector)(graph, fireable)
 
-    def _select_inner(self, net: _Net) -> Optional[tuple[_Net, FunctionTransitionNode]]:
-        """The first inner firing below ``net`` in the library driver's order:
-        place, token, net order, a net's own inner nets before the next token."""
-        for segments, _token, _name, graph in NestedNets.walk(net.graph, passive=False):
-            inner = self._net_for(graph, (*net.last_path, *Paths.of_segments(segments)))
-            chosen = self._select_in(inner)
-            if chosen is not None:
-                return inner, chosen
-            deeper = self._select_inner(inner)
-            if deeper is not None:
-                return deeper
-        return None
-
     def _select(self) -> Optional[tuple[_Net, FunctionTransitionNode]]:
-        """The next firing anywhere, by the loaded net's ``deep_policy``: under
-        ``"outer_first"`` (the default) the outer net's choice, else the first
-        inner net's (§12.3); under ``"interleaved"`` the first net with a firing
-        round the cycle of nets, from the one after the net the last deep step
-        fired in (``NestedNets.deep_turns``, the library's own order and cursor).
-        Every net chooses by its own selector, so a round-robin tie-break moves
-        only the cursor of the net that fires. The deep-step cursor is recorded
-        under both policies, as the library records it, so a ``deep_policy``
-        switched to ``"interleaved"`` mid-run resumes after the net that fired
-        last."""
-        outer = self._loaded.outer
-        if outer.graph.deep_policy == "interleaved" and NestedNets.any_nested(outer.graph):
-            for segments, graph in NestedNets.deep_turns(outer.graph):
-                net = self._net_for(graph, Paths.of_segments(segments))
-                chosen = self._select_in(net)
-                if chosen is not None:
-                    # Chosen here, launched at once: this net took the turn.
-                    NestedNets.took_turn(outer.graph, graph)
-                    return net, chosen
-            return None
-        chosen = self._select_in(outer)
+        """The next firing anywhere: one deep step of the loaded net (§12.3),
+        chosen rather than fired (``_choose``)."""
+        return self._choose(self._loaded.outer)
+
+    def _choose(self, net: _Net) -> Optional[tuple[_Net, FunctionTransitionNode]]:
+        """One deep step of ``net`` in the order the stepping rules of its places
+        give, as the library's ``fire_one_transition`` with ``descend`` takes it,
+        except that what it comes to is chosen and not fired: the turns ahead of
+        ``net``'s own (its inner-first places, then the ring's members after its
+        cursor), its own selector's choice, then the turns behind it (the rest of
+        the ring, then its outer-first places; nothing is in flight while the
+        owner chooses, one firing being airborne at a time). A member's turn is
+        that net's deep step, chosen the same way, so every level follows the
+        rules of its own places. Each net chooses by its own selector, so a
+        round-robin tie-break moves only the cursor of the net that fires. The
+        choice is launched at once, so it is the turn: each ring's cursor moves
+        as the library moves it (``NestedNets.took_own_turn``, ``took_turn``)."""
+        graph = net.graph
+        nested = NestedNets.any_nested(graph)
+        if nested:
+            found = self._choose_among(net, "ahead")
+            if found is not None:
+                return found
+        chosen = self._select_in(net)
         if chosen is not None:
-            NestedNets.took_turn(outer.graph, outer.graph)
-            return outer, chosen
-        if not NestedNets.any_nested(outer.graph):
-            return None
-        found = self._select_inner(outer)
-        if found is not None:
-            NestedNets.took_turn(outer.graph, found[0].graph)
-        return found
+            NestedNets.took_own_turn(graph)
+            return net, chosen
+        return self._choose_among(net, "behind") if nested else None
+
+    def _choose_among(self, net: _Net, part: str) -> Optional[tuple[_Net, FunctionTransitionNode]]:
+        """The first member of one part of ``net``'s round (``NestedNets.turns``)
+        whose deep step chooses something, and what it chose."""
+        for member in NestedNets.turns(net.graph, part):
+            inner = self._net_for(member.net, (*net.last_path, Paths.of_step(member.step)))
+            found = self._choose(inner)
+            if found is not None:
+                NestedNets.took_turn(net.graph, member)
+                return found
+        return None
 
     # --- the firing cycle ---
 
@@ -1272,7 +1272,7 @@ class Owner:
         the place and index of the token that holds the next level."""
         loaded = self._loaded
         found = NestedNets.find(loaded.outer.graph, net.nested_id)
-        steps = Paths.of_segments(found[0]) if found is not None else net.last_path
+        steps = Paths.of_steps(found[0]) if found is not None else net.last_path
         chain = []
         graph = loaded.outer.graph
         for level, step in enumerate(steps):
@@ -1395,7 +1395,7 @@ class Owner:
             else:
                 continue
             if isinstance(event, core_events.Nested):
-                path = Paths.of_segments(event.path)
+                path = Paths.of_steps(event.path)
         if flight.net_id is not None and not path:
             net = self._loaded.inner.get(flight.net_id)
             path = net.last_path if net is not None else ()
@@ -1511,8 +1511,8 @@ class Owner:
         command, handed the net when it takes it. ``None`` answers ``nothing``. A
         ``Fire`` is a pinned ``step``: launched as a step launches, so ``fired``,
         progress and ``fireable`` follow as for a step, and answered when it lands
-        (``_pressed``), or ``nothing`` at once when the transition is not fireable.
-        Any other command goes through the engine's command path (``_apply``) and
+        (``_pressed``), or ``nothing`` at once when the transition is not fireable;
+        being no deep step, it leaves every ring's cursor where it is. Any other command goes through the engine's command path (``_apply``) and
         its events out as an ``inject``'s do. A ``to_command`` that raises, or a
         command the net refuses, is ``internal``."""
         loaded = self._loaded
@@ -1540,7 +1540,7 @@ class Owner:
             if not self._is_fireable(outer, transition):
                 self._nothing(request_id, f"{transition.name} is not fireable", out)
                 return
-            NestedNets.took_turn(outer.graph, outer.graph)
+            # A plain firing of the outer net, not a deep step: no ring's cursor moves.
             self._launch(outer, transition, None, now, out, press_id=request_id)
             return
         self._apply(outer, command)
@@ -1693,7 +1693,7 @@ class Owner:
             if isinstance(event, core_events.Nested):
                 inner = self._net_by_id(event.nested_id)
                 notification = self._notification(inner, event.event)
-                path = Paths.of_segments(event.path)
+                path = Paths.of_steps(event.path)
                 if inner is not None:
                     inner.last_path = path
                     if notification.moves_version:

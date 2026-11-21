@@ -3,9 +3,11 @@
 The transit example (``examples/tokens_as_nets/transit.py``) is the acceptance net. It runs
 its journey on its own: each vehicle's state is where its door tokens are in its cabin,
 ``Doors Open`` or ``Doors Closed``, which the city's guards read, so plain stepping (the
-engine's own choice, outer first, then inner nets in place, token and net order) carries
-every passenger to ``Arrived`` with nothing held back. The story it tells from its seed is
-pinned here as ``JOURNEY``.
+engine's own choice, the city first, since every place of vehicles states the stepping rule
+``"outer_first"``, then the cabins in place, token and net order) carries every passenger
+to ``Arrived`` with nothing held back. The story it tells from its seed is pinned here as
+``JOURNEY``. Paths are tuples of ``PathStep`` values, and a firing inside a cabin is told as
+an ``InnerFiring``.
 """
 
 import asyncio
@@ -21,7 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from examples.tokens_as_nets.transit import (  # noqa: E402
     PASSENGERS, WAITING, Vehicle, build_cabin, build_city, everyone_arrived, journey, step,
 )
-from petritype.core.events import Added, Failed, Fired, Mutated, Nested, ParamChanged, Removed  # noqa: E402
+from petritype.core.events import (  # noqa: E402
+    Added, Failed, Fired, InnerFiring, Mutated, Nested, ParamChanged, PathStep, Removed,
+)
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,
     ExecutableGraph,
@@ -42,13 +46,14 @@ def run(coroutine):
     return asyncio.run(coroutine)
 
 
-async def steps(graph: ExecutableGraph, count: int) -> list[str]:
+async def steps(graph: ExecutableGraph, count: int) -> list:
     """``count`` firings of the engine's own choosing; what each fired."""
     return [await step(graph) for _ in range(count)]
 
 
-async def until(graph: ExecutableGraph, name: str, budget: int = 100) -> list[str]:
-    """Step until a firing named ``name``; what each fired, that one last."""
+async def until(graph: ExecutableGraph, name, budget: int = 100) -> list:
+    """Step until a firing that is ``name`` (a transition of the city's, or an
+    ``InnerFiring``); what each fired, that one last."""
     fired = []
     while not fired or fired[-1] != name:
         assert len(fired) < budget, f"no {name} within {budget} firings: {fired}"
@@ -67,7 +72,7 @@ def tokens(graph: ExecutableGraph, place: str) -> list:
     return list(graph.place_named(place).tokens)
 
 
-def firings(events) -> list[tuple[tuple[str, ...], str]]:
+def firings(events) -> list[tuple[tuple[PathStep, ...], str]]:
     """``(path, transition)`` for every firing in the log, outer ones with an empty path."""
     out = []
     for event in events:
@@ -78,12 +83,17 @@ def firings(events) -> list[tuple[tuple[str, ...], str]]:
     return out
 
 
-def _inner(path: tuple[str, ...], *transitions: str) -> list[tuple[tuple[str, ...], str]]:
+def _inner(path: tuple[PathStep, ...], *transitions: str) -> list[tuple[tuple[PathStep, ...], str]]:
     return [(path, transition) for transition in transitions]
 
 
-BUS_AT_DEPOT, BUS_AT_CENTRAL, BUS_AT_HARBOUR = ("Depot", "#1", "cabin"), ("Central", "#11", "cabin"), ("Harbour", "#16", "cabin")
-FERRY_AT_HARBOUR, FERRY_AT_AIRPORT = ("Harbour", "#2", "cabin"), ("Airport", "#18", "cabin")
+def at(place: str, token: int, net: str = "cabin") -> tuple[PathStep, ...]:
+    """The path to the net named ``net`` in the token ``token`` of ``place``."""
+    return (PathStep(place, token, net),)
+
+
+BUS_AT_DEPOT, BUS_AT_CENTRAL, BUS_AT_HARBOUR = at("Depot", 1), at("Central", 11), at("Harbour", 16)
+FERRY_AT_HARBOUR, FERRY_AT_AIRPORT = at("Harbour", 2), at("Airport", 18)
 
 # The story the transit city tells from its seed under plain stepping, every firing
 # with the path of the cabin it happened in (outer ones with an empty path): the bus
@@ -155,10 +165,11 @@ class Crate(BaseModel):
         return {"left": self.left, "right": self.right}
 
 
-def build_shelf(boxes: list[Box], passive: bool = False, record_events: bool = True, **options) -> ExecutableGraph:
-    """An outer net with nothing of its own to fire: ``Shelf`` holds boxes."""
+def build_shelf(boxes: list[Box], stepping=None, record_events: bool = True, **options) -> ExecutableGraph:
+    """An outer net with nothing of its own to fire: ``Shelf`` holds boxes, under
+    ``stepping`` (the default when ``None``)."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Shelf", Box, boxes, nested=True, passive=passive),
+        ListPlaceNode("Shelf", Box, boxes, nested=True, stepping=stepping),
     ], record_events=record_events, **options)
 
 
@@ -179,7 +190,7 @@ class TestDeclaringNestedTokens:
         outer = ExecutableGraphOperations.construct_graph([
             ListPlaceNode("Nets", ExecutableGraph, [inner], nested=True),
         ])
-        assert [path for path, *_ in NestedNets.walk(outer)] == [("Nets", "#1", "")]
+        assert [step for step, _inner in NestedNets.walk(outer)] == [PathStep("Nets", 1, "")]
 
     def test_a_token_without_the_protocol_is_refused_at_seed_time(self):
         with pytest.raises(TypeError, match="nested but its token cannot hold nets"):
@@ -214,9 +225,11 @@ class TestDeclaringNestedTokens:
         with pytest.raises(TypeError, match="dict of str to ExecutableGraph"):
             ListPlaceNode("Shelf", Liar, [Liar()], nested=True)
 
-    def test_passive_needs_nested(self):
-        with pytest.raises(ValueError, match="passive but not nested"):
-            ListPlaceNode("Shelf", Box, passive=True)
+    def test_a_stepping_rule_needs_a_place_that_holds_nets(self):
+        with pytest.raises(ValueError, match="holds no nets, so it has no stepping rule"):
+            ListPlaceNode("Shelf", Box, stepping="passive")
+        assert ListPlaceNode("Shelf", Box).stepping is None
+        assert ListPlaceNode("Shelf", Box, nested=True).stepping == "inner_first", "the default"
 
     def test_every_graph_has_its_own_net_id(self):
         a, b = build_counter([]), build_counter([])
@@ -235,11 +248,14 @@ class TestRunningInnerNets:
         a, b = tokens(shelf, "Shelf")
         assert tokens(a.inner, "High") == [2, 3] and tokens(b.inner, "High") == [4]
         assert a.inner.fired_counts == {"Up": 2} and a.inner.step_count == 2
-        # The outer net counts inner firings under their path.
-        assert shelf.fired_counts == {"Shelf/#1/counter/Up": 2, "Shelf/#2/counter/Up": 1}
+        # The outer net counts inner firings under their InnerFiring.
+        assert shelf.fired_counts == {
+            InnerFiring(at("Shelf", 1, "counter"), "Up"): 2, InnerFiring(at("Shelf", 2, "counter"), "Up"): 1,
+        }
         assert shelf.step_count == 3
 
-    def test_order_is_outer_first_then_place_token_net_order_repeated(self):
+    @pytest.mark.parametrize("stepping", ["outer_first", "inner_first"])
+    def test_order_is_the_rule_s_then_place_token_net_order_repeated(self, stepping):
         crate = Crate(left=build_counter([1]), right=build_counter([2, 3]))
         shelf = ExecutableGraphOperations.construct_graph([
             ListPlaceNode("Seed", int, [0]),
@@ -247,24 +263,27 @@ class TestRunningInnerNets:
             FunctionTransitionNode("Own", tick),
             ReturnedEdgeFromTransition("Own", "Done"),
             ListPlaceNode("Done", int),
-            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1, 2]))], nested=True),
-            ListPlaceNode("Crates", Crate, [crate], nested=True),
+            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1, 2]))], nested=True, stepping=stepping),
+            ListPlaceNode("Crates", Crate, [crate], nested=True, stepping=stepping),
         ], record_events=True)
         run(ExecutableGraphOperations.execute_graph(shelf, stop_after_n_firings=None))
-        assert firings(shelf.drain_events()) == [
-            ((), "Own"),
-            (("Shelf", "#2", "counter"), "Up"),
-            (("Shelf", "#2", "counter"), "Up"),
-            (("Crates", "#3", "left"), "Up"),
-            (("Crates", "#3", "right"), "Up"),
-            (("Crates", "#3", "right"), "Up"),
+        inside = [
+            (at("Shelf", 2, "counter"), "Up"),
+            (at("Shelf", 2, "counter"), "Up"),
+            (at("Crates", 3, "left"), "Up"),
+            (at("Crates", 3, "right"), "Up"),
+            (at("Crates", 3, "right"), "Up"),
         ]
+        own = [((), "Own")]
+        # Outer first, the old default: the net's own firing first. Inner first, the
+        # default: every inner net at rest before it.
+        assert firings(shelf.drain_events()) == (own + inside if stepping == "outer_first" else inside + own)
 
     def test_the_runner_counts_inner_firings_and_quiesces_on_them(self):
         shelf = build_shelf([Box(label="a", inner=build_counter([1, 2]))])
         summary = run(Runner.run(RunContext(graph=shelf)))
         assert summary.quiesced and summary.n_fired == 2
-        assert summary.fired == {"Shelf/#1/counter/Up": 2}
+        assert summary.fired == {InnerFiring(at("Shelf", 1, "counter"), "Up"): 2}
 
     def test_the_runner_paces_inner_firings(self):
         shelf = build_shelf([Box(label="a", inner=build_counter([1, 2, 3]))])
@@ -286,11 +305,11 @@ class TestRunningInnerNets:
             return box
 
         shelf = ExecutableGraphOperations.construct_graph([
-            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1, 2]))], nested=True, passive=True),
+            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1, 2]))], nested=True, stepping="passive"),
             ArgumentEdgeToTransition("Shelf", "Open", "box"),
             FunctionTransitionNode("Open", open_box, guard=lambda g: g.params["open"]),
             ReturnedEdgeFromTransition("Open", "Opened"),
-            ListPlaceNode("Opened", Box, nested=True, passive=True),
+            ListPlaceNode("Opened", Box, nested=True, stepping="passive"),
         ], params={"open": False}, record_events=True)
         _, fired = run(ExecutableGraphOperations.execute_graph(shelf, stop_after_n_firings=None))
         assert fired == 0
@@ -302,15 +321,16 @@ class TestRunningInnerNets:
         assert tokens(box.inner, "High") == [2, 3]
         # The body's inner firings reached the outer log, under the box's path at the time.
         assert firings(shelf.drain_events()) == [
-            (("Opened", "#2", "counter"), "Up"), (("Opened", "#2", "counter"), "Up"), ((), "Open"),
+            (at("Opened", 2, "counter"), "Up"), (at("Opened", 2, "counter"), "Up"), ((), "Open"),
         ]
 
     def test_the_bus_settles_its_passengers_closes_its_doors_and_only_then_departs(self):
         city = build_city()
         bus = tokens(city, "Depot")[0]
         assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == (["Front"], [])
-        assert run(steps(city, 9))[5:] == ["Depot/#1/cabin/Sit", "Depot/#1/cabin/Sit", "Depot/#1/cabin/Stand",
-                                          "Depot/#1/cabin/Close Doors"]
+        assert run(steps(city, 9))[5:] == [
+            InnerFiring(BUS_AT_DEPOT, name) for name in ("Sit", "Sit", "Stand", "Close Doors")
+        ]
         assert tokens(city, "Platform@Depot") == []
         assert (tokens(bus.cabin, "Seats"), tokens(bus.cabin, "Standing"), tokens(bus.cabin, "Door")) == (
             ["Ada", "Bram"], ["Cato"], [],
@@ -328,7 +348,7 @@ class TestRunningInnerNets:
         assert tokens(bus.cabin, "Announcements") == ["Arrived at Central"]
         assert fireable(city) == []
         assert fireable(bus.cabin) == ["Go To Door", "Go To Door From Standing"]
-        assert run(steps(city, 7))[-1] == "Central/#11/cabin/Clear Announcement"
+        assert run(steps(city, 7))[-1] == InnerFiring(BUS_AT_CENTRAL, "Clear Announcement")
         assert tokens(city, "Arrived") == ["Ada", "Bram", "Cato"]
         assert tokens(bus.cabin, "Doors Open") == ["Front"] and tokens(bus.cabin, "Announcements") == []
         assert fireable(city) == ["Board Central"], "a door open and no announcement: boarding again"
@@ -337,10 +357,10 @@ class TestRunningInnerNets:
         city = build_city()
         ferry = tokens(city, "Harbour")[0]
         assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == (["Bow", "Stern"], [])
-        run(until(city, "Harbour/#2/cabin/Close Doors"))
+        run(until(city, InnerFiring(FERRY_AT_HARBOUR, "Close Doors")))
         assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == (["Stern"], ["Bow"])
         assert fireable(city) == [], "one door still open: the ferry does not depart"
-        assert run(step(city)) == "Harbour/#2/cabin/Close Doors"
+        assert run(step(city)) == InnerFiring(FERRY_AT_HARBOUR, "Close Doors")
         assert (tokens(ferry.cabin, "Doors Open"), tokens(ferry.cabin, "Doors Closed")) == ([], ["Bow", "Stern"])
         assert run(steps(city, 2)) == ["Depart Harbour", "Arrive"]
         assert tokens(city, "Airport") == [ferry]
@@ -414,7 +434,7 @@ class TestReachingInside:
         assert tokens(bus.cabin, "Door") == ["Ada"]
         events = city.drain_events()
         assert isinstance(events[-1], Failed) and events[-1].restored
-        assert Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 2)) in events, "id 1 is the door token, Front"
+        assert Nested(BUS_AT_DEPOT, bus.cabin.net_id, Added("Door", 2)) in events, "id 1 is the door token, Front"
 
     def test_put_and_take_check_types_and_record_events(self):
         cabin = build_cabin()
@@ -466,7 +486,7 @@ class TestObservability:
         assert run(step(city)) == "Board Depot"
         bus = tokens(city, "Depot")[0]
         inside, mutated, fired = city.drain_events()
-        assert inside == Nested(("Depot", "#1", "cabin"), bus.cabin.net_id, Added("Door", 2))
+        assert inside == Nested(BUS_AT_DEPOT, bus.cabin.net_id, Added("Door", 2))
         assert mutated == Mutated("Depot", 1)
         assert isinstance(fired, Fired)
         assert (fired.transition, fired.consumed, fired.produced) == ("Board Depot", (("Platform@Depot", 3),), ())
@@ -478,12 +498,12 @@ class TestObservability:
         events = city.drain_events()
         assert {e.nested_id for e in events if isinstance(e, Nested)} == {bus.cabin.net_id, ferry.cabin.net_id}
         assert {e.path for e in events if isinstance(e, Nested) and e.nested_id == bus.cabin.net_id} == {
-            ("Depot", "#1", "cabin"), ("In Transit", "#10", "cabin"), ("Central", "#11", "cabin"),
+            BUS_AT_DEPOT, at("In Transit", 10), BUS_AT_CENTRAL,
         }
-        assert NestedNets.find(city, bus.cabin.net_id) == (("Central", "#11", "cabin"), bus.cabin)
-        assert NestedNets.resolve(city, ("Central", "#11", "cabin")) is bus.cabin
-        with pytest.raises(LookupError, match="no token #1"):
-            NestedNets.resolve(city, ("Depot", "#1", "cabin"))
+        assert NestedNets.find(city, bus.cabin.net_id) == (BUS_AT_CENTRAL, bus.cabin)
+        assert NestedNets.resolve(city, BUS_AT_CENTRAL) is bus.cabin
+        with pytest.raises(LookupError, match="no token 1 in 'Depot'"):
+            NestedNets.resolve(city, BUS_AT_DEPOT)
 
     def test_inner_events_are_wrapped_once_whatever_the_depth(self):
         inner = build_counter([1])
@@ -492,11 +512,12 @@ class TestObservability:
         ])
         outer = build_shelf([Box(label="o", inner=middle)])
         run(ExecutableGraphOperations.execute_graph(outer, stop_after_n_firings=None))
-        assert outer.last_fired == "Shelf/#1/counter/Shelf/#1/counter/Up"
+        two_down = (PathStep("Shelf", 1, "counter"), PathStep("Shelf", 1, "counter"))
+        assert outer.last_fired == InnerFiring(two_down, "Up")
         events = outer.drain_events()
         fired = [e for e in events if isinstance(e, Nested) and isinstance(e.event, Fired)]
         assert len(fired) == 1
-        assert fired[0].path == ("Shelf", "#1", "counter", "Shelf", "#1", "counter")
+        assert fired[0].path == two_down
         assert fired[0].nested_id == inner.net_id
         assert not any(isinstance(e.event, Nested) for e in events if isinstance(e, Nested))
 
@@ -505,8 +526,9 @@ class TestObservability:
         def crush(box: Box) -> None:
             return None
 
+        # Outer first, so that the crush comes before the counter can count the 5.
         shelf = ExecutableGraphOperations.construct_graph([
-            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1]))], nested=True),
+            ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1]))], nested=True, stepping="outer_first"),
             ArgumentEdgeToTransition("Shelf", "Crush", "box"),
             FunctionTransitionNode("Crush", crush, guard=lambda g: g.params["crush"]),
         ], params={"crush": False}, record_events=True)
@@ -518,7 +540,7 @@ class TestObservability:
         run(ExecutableGraphOperations.execute_graph(shelf, stop_after_n_firings=None))
         assert tokens(shelf, "Shelf") == []
         events = shelf.drain_events()
-        assert Nested(("Shelf", "#1", "counter"), box.inner.net_id, Added("Low", 3)) in events
+        assert Nested(at("Shelf", 1, "counter"), box.inner.net_id, Added("Low", 3)) in events
         assert [e.transition for e in events if isinstance(e, Fired)] == ["Crush"]
 
     def test_inner_nets_record_exactly_when_the_outer_does(self):
@@ -532,7 +554,7 @@ class TestObservability:
         shelf = build_shelf([Box(label="a", inner=build_counter([]))])
         box = tokens(shelf, "Shelf")[0]
         NestedNets.put(box.inner, "Low", [7])
-        assert shelf.drain_events() == [Nested(("Shelf", "#1", "counter"), box.inner.net_id, Added("Low", 1))]
+        assert shelf.drain_events() == [Nested(at("Shelf", 1, "counter"), box.inner.net_id, Added("Low", 1))]
         assert shelf.drain_events() == []
 
 
@@ -542,12 +564,12 @@ class TestObservability:
 def _policy(city: ExecutableGraph, policy: str) -> ExecutableGraph:
     """Set a tie-break on the city and on every cabin: ``first_declared`` (the
     default), ``last_declared``, ``round_robin``, or a seeded random choice (``random:<seed>``).
-    Whatever the policy, the city fires before its cabins (the engine's order)."""
+    Whatever the policy, the city fires before its cabins (its places' rule, outer first)."""
     if policy.startswith("random:"):
         rng = random.Random(int(policy.split(":")[1]))
         def choose(graph, candidates):
             return rng.choice(candidates) if candidates else None
-    for graph in (city, *(inner for *_, inner in NestedNets.walk(city))):
+    for graph in (city, *(inner for _step, inner in NestedNets.walk(city))):
         if policy.startswith("random:"):
             graph.transition_selector = choose
         else:
@@ -572,7 +594,9 @@ class TestTheJourney:
         run(journey(city))
         fired = run(steps(city, 40))
         assert None not in fired, "no futile end: the vehicles circulate, empty"
-        assert {name for name in fired if name.startswith("Depart ")} >= {"Depart Airport", "Depart Depot"}
+        assert {name for name in fired if isinstance(name, str) and name.startswith("Depart ")} >= {
+            "Depart Airport", "Depart Depot",
+        }
         assert tokens(city, "Arrived") == list(PASSENGERS)
 
     def test_no_passenger_alights_where_they_boarded_or_returns_to_a_platform(self):
@@ -585,7 +609,7 @@ class TestTheJourney:
             fired = run(step(city))
             assert fired is not None and len(alighted_at) <= len(PASSENGERS)
             assert all(len(tokens(city, place)) <= before[place] for place in platforms), f"{fired} refilled a platform"
-            if fired.startswith("Alight "):
+            if isinstance(fired, str) and fired.startswith("Alight "):
                 alighted_at[tokens(city, "Arrived")[-1]] = fired.removeprefix("Alight ")
         assert set(alighted_at) == set(PASSENGERS)
         assert all(alighted_at[p] != boarded_at[p] for p in PASSENGERS), alighted_at
@@ -663,19 +687,21 @@ class TestDepthTwo:
         station, luggage = self.build()
         _, fired = run(ExecutableGraphOperations.execute_graph(station, stop_after_n_firings=None))
         assert fired == 2 and tokens(luggage, "Unpacked") == ["socks", "book"]
-        assert station.fired_counts == {"Station/#1/cabin/Door/#1/luggage/Unpack": 2}
+        two_down = (PathStep("Station", 1, "cabin"), PathStep("Door", 1, "luggage"))
+        assert station.fired_counts == {InnerFiring(two_down, "Unpack"): 2}
         events = [e for e in station.drain_events() if isinstance(e, Nested)]
-        assert {e.path for e in events} == {("Station", "#1", "cabin", "Door", "#1", "luggage")}
+        assert {e.path for e in events} == {two_down}
         assert {e.nested_id for e in events} == {luggage.net_id}
-        assert NestedNets.resolve(station, ("Station", "#1", "cabin", "Door", "#1", "luggage")) is luggage
-        assert NestedNets.find(station, luggage.net_id)[0] == ("Station", "#1", "cabin", "Door", "#1", "luggage")
+        assert NestedNets.resolve(station, two_down) is luggage
+        assert NestedNets.find(station, luggage.net_id)[0] == two_down
 
-    def test_resolve_names_the_failing_segment(self):
+    def test_resolve_names_the_failing_step(self):
         station, _ = self.build()
         with pytest.raises(LookupError, match="no nested place 'Lobby'"):
-            NestedNets.resolve(station, ("Lobby", "#1", "cabin"))
+            NestedNets.resolve(station, at("Lobby", 1))
         with pytest.raises(LookupError, match="holds no net named 'boot'"):
-            NestedNets.resolve(station, ("Station", "#1", "boot"))
-        with pytest.raises(LookupError, match="three segments per level"):
-            NestedNets.resolve(station, ("Station", "#1"))
+            NestedNets.resolve(station, at("Station", 1, "boot"))
+        with pytest.raises(LookupError, match="a path is a sequence of PathStep values"):
+            NestedNets.resolve(station, (("Station", 1, "cabin"),))
+        assert NestedNets.resolve(station, ()) is station, "the empty path: the net itself"
         assert NestedNets.find(station, 10 ** 9) is None

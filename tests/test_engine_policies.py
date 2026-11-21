@@ -1,8 +1,12 @@
-"""The engine's two scheduling policies of 2026-10-12, both defaulting to what the
-engine did before: the round-robin tie-break (``tie_break="round_robin"``) and the
-interleaved deep step (``deep_policy="interleaved"``), as the library's own drivers
-honour them (``fire_one_transition``, ``execute_graph``, the sequential ``Runner``).
-The protocol runner's side is in ``tests/test_runner_protocol_gaps.py``.
+"""The engine's scheduling settings, as the library's own drivers honour them
+(``fire_one_transition``, ``execute_graph``, the sequential ``Runner``): the
+round-robin tie-break of 2026-10-12 (``tie_break="round_robin"``), and the stepping
+rule of a place that holds nets (``stepping``, since 2026-11-21), shown here at one
+level as the evidence that it replaced the interleaved deep step without changing
+what that stepped: a place of take-turns nets steps as ``deep_policy="interleaved"``
+did, and a place of outer-first nets as the old default did. The rules themselves
+are in ``tests/test_stepping_rules.py``, the protocol runner's side in
+``tests/test_runner_protocol_gaps.py``.
 """
 
 import asyncio
@@ -10,6 +14,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 
+from petritype.core.events import InnerFiring, PathStep
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
     ExecutableGraph,
@@ -142,7 +147,7 @@ class TestRoundRobin:
         assert shared_input(["A"]).tie_break == "first_declared"
 
 
-# --- the interleaved deep step -------------------------------------------------------------------
+# --- one level of nets, outer first and take turns -------------------------------------------
 
 
 def tick(x: int) -> int:
@@ -171,10 +176,11 @@ def keep_time(clock: int) -> int:
     return clock + 1
 
 
-def clockwork(boxes, live_outer: bool = True, **kwargs) -> ExecutableGraph:
-    """A shelf of boxes holding counters, and, when ``live_outer``, an outer
-    ``Tick`` that can always fire (it takes the clock token and puts it back)."""
-    nodes = [ListPlaceNode("Shelf", Box, list(boxes), nested=True)]
+def clockwork(boxes, live_outer: bool = True, stepping=None, **kwargs) -> ExecutableGraph:
+    """A shelf of boxes holding counters under ``stepping`` (the default when
+    ``None``), and, when ``live_outer``, an outer ``Tick`` that can always fire (it
+    takes the clock token and puts it back)."""
+    nodes = [ListPlaceNode("Shelf", Box, list(boxes), nested=True, stepping=stepping)]
     if live_outer:
         nodes += [
             ListPlaceNode("Clock", int, [0]),
@@ -189,73 +195,72 @@ def box(label: str, low) -> Box:
     return Box(label=label, counter=build_counter(low))
 
 
-class TestInterleaved:
+def up(token: int, place: str = "Shelf") -> InnerFiring:
+    """The ``Up`` of the counter in the box with this token id."""
+    return InnerFiring((PathStep(place, token, "counter"),), "Up")
 
-    def test_the_default_is_outer_first_and_starves_an_inner_net_under_a_live_outer_net(self):
-        graph = clockwork([box("a", [1, 2])])
-        assert graph.deep_policy == "outer_first"
+
+class TestOneLevel:
+
+    def test_outer_first_starves_an_inner_net_under_a_live_outer_net(self):
+        graph = clockwork([box("a", [1, 2])], stepping="outer_first")
         assert run(deep_steps(graph, 5)) == ["Tick"] * 5
         assert graph.place_named("Shelf").tokens[0].counter.place_named("High").tokens == [], "starved"
 
-    def test_interleaved_gives_the_inner_net_its_turn(self):
-        graph = clockwork([box("a", [1, 2])], deep_policy="interleaved")
+    def test_take_turns_gives_the_inner_net_its_turn(self):
+        graph = clockwork([box("a", [1, 2])], stepping="take_turns")
         fired = run(deep_steps(graph, 6))
-        assert fired == ["Tick", "Shelf/#1/counter/Up", "Tick", "Shelf/#1/counter/Up", "Tick", "Tick"]
+        assert fired == ["Tick", up(1), "Tick", up(1), "Tick", "Tick"]
         assert graph.place_named("Shelf").tokens[0].counter.place_named("High").tokens == [2, 3]
-        assert graph.step_count == 6 and graph.fired_counts == {"Tick": 4, "Shelf/#1/counter/Up": 2}
+        assert graph.step_count == 6 and graph.fired_counts == {"Tick": 4, up(1): 2}
 
     def test_two_live_inner_nets_alternate(self):
         under = {}
-        for policy in ("outer_first", "interleaved"):
-            graph = clockwork([box("a", [1, 2, 3]), box("b", [4, 5, 6])], live_outer=False, deep_policy=policy)
-            under[policy] = [name.split("/")[1] for name in run(deep_steps(graph, 6))]
-        assert under["outer_first"] == ["#1"] * 3 + ["#2"] * 3
-        assert under["interleaved"] == ["#1", "#2"] * 3
+        for stepping in ("outer_first", "take_turns"):
+            graph = clockwork([box("a", [1, 2, 3]), box("b", [4, 5, 6])], live_outer=False, stepping=stepping)
+            under[stepping] = [fired.path[0].token for fired in run(deep_steps(graph, 6))]
+        assert under["outer_first"] == [1] * 3 + [2] * 3
+        assert under["take_turns"] == [1, 2] * 3
 
     def test_quiescence_is_the_same_and_the_turn_starts_after_the_last(self):
-        graph = clockwork([box("a", [1]), box("b", [2])], live_outer=False, deep_policy="interleaved")
+        graph = clockwork([box("a", [1]), box("b", [2])], live_outer=False, stepping="take_turns")
         first, second = (b.counter for b in graph.place_named("Shelf").tokens)
-        assert run(deep_steps(graph, 3)) == ["Shelf/#1/counter/Up", "Shelf/#2/counter/Up", None]
-        assert graph._last_turn == second.net_id, "the cursor: the net that fired last"
+        assert run(deep_steps(graph, 3)) == [up(1), up(2), None]
+        assert graph._ring_cursor == second.net_id, "the cursor: the member that fired last"
         NestedNets.put(first, "Low", [7])
         NestedNets.put(second, "Low", [8])
-        assert run(deep_steps(graph, 1)) == ["Shelf/#1/counter/Up"], "round from after b: the outer net, then a"
+        assert run(deep_steps(graph, 1)) == [up(1)], "round from after b: the outer net, then a"
 
     def test_the_cursor_is_forgotten_by_a_load_and_a_gone_net_starts_the_round_at_the_outer_net(self):
-        graph = clockwork([box("a", [1, 2])], deep_policy="interleaved")
-        assert run(deep_steps(graph, 2)) == ["Tick", "Shelf/#1/counter/Up"]
+        graph = clockwork([box("a", [1, 2])], stepping="take_turns")
+        assert run(deep_steps(graph, 2)) == ["Tick", up(1)]
         graph.place_named("Shelf").tokens.clear()  # the box is gone (resynced at the next step)
         assert run(deep_steps(graph, 1)) == ["Tick"]
-        graph = clockwork([box("a", [1, 2])], deep_policy="interleaved")
+        graph = clockwork([box("a", [1, 2])], stepping="take_turns")
         run(deep_steps(graph, 1))
         graph.forget_cursors()
-        assert graph._last_turn is None and run(deep_steps(graph, 1)) == ["Tick"]
+        assert graph._ring_cursor is None and run(deep_steps(graph, 1)) == ["Tick"]
 
-    def test_a_deeper_net_takes_its_turn_and_every_net_between_counts_it(self):
+    def test_a_member_s_turn_is_a_deep_step_and_every_net_between_counts_it(self):
         def holder(label: str, inner_boxes) -> Box:
             return Box(label=label, counter=ExecutableGraphOperations.construct_graph([
                 ListPlaceNode("Inside", Box, list(inner_boxes), nested=True),
             ]))
-        graph = clockwork([holder("outer box", [box("inner box", [1])])], deep_policy="interleaved")
+        graph = clockwork([holder("outer box", [box("inner box", [1])])], stepping="take_turns")
         middle = graph.place_named("Shelf").tokens[0].counter
-        cycle = [path for path, _net in NestedNets.deep_cycle(graph)]
-        assert cycle == [(), ("Shelf", "#1", "counter"), ("Shelf", "#1", "counter", "Inside", "#1", "counter")]
-        assert run(deep_steps(graph, 3)) == ["Tick", "Shelf/#1/counter/Inside/#1/counter/Up", "Tick"]
-        assert middle.fired_counts == {"Inside/#1/counter/Up": 1} and middle.step_count == 1
+        assert [member.step for member in NestedNets.members(graph)] == [PathStep("Shelf", 1, "counter")]
+        assert run(deep_steps(graph, 3)) == [
+            "Tick", InnerFiring((PathStep("Shelf", 1, "counter"), PathStep("Inside", 1, "counter")), "Up"), "Tick",
+        ]
+        assert middle.fired_counts == {up(1, "Inside"): 1} and middle.step_count == 1
 
-    def test_the_stepped_nets_policy_governs_the_whole_step(self):
-        middle = ExecutableGraphOperations.construct_graph([
-            ListPlaceNode("Inside", Box, [box("a", [1, 2]), box("b", [3, 4])], nested=True),
-        ], deep_policy="interleaved")  # an inner net's own setting: unused when the outer net steps
-        graph = clockwork([Box(label="holder", counter=middle)], live_outer=False)
-        fired = run(deep_steps(graph, 4))
-        assert [name.split("/")[4] for name in fired] == ["#1", "#1", "#2", "#2"], "outer first all the way down"
-        assert middle._last_turn == middle.place_named("Inside").tokens[1].counter.net_id, "its cursor is kept all the same"
-        middle = ExecutableGraphOperations.construct_graph([
-            ListPlaceNode("Inside", Box, [box("a", [1, 2]), box("b", [3, 4])], nested=True),
-        ])
-        graph = clockwork([Box(label="holder", counter=middle)], live_outer=False, deep_policy="interleaved")
-        assert [name.split("/")[4] for name in run(deep_steps(graph, 4))] == ["#1", "#2", "#1", "#2"]
+    def test_the_rule_of_the_place_the_nets_stand_in_governs_them(self):
+        for stepping, order in (("outer_first", [1, 1, 2, 2]), ("take_turns", [1, 2, 1, 2])):
+            middle = ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Inside", Box, [box("a", [1, 2]), box("b", [3, 4])], nested=True, stepping=stepping),
+            ])
+            graph = clockwork([Box(label="holder", counter=middle)], live_outer=False)
+            assert [fired.path[1].token for fired in run(deep_steps(graph, 4))] == order, stepping
 
     def test_a_failing_inner_firing_took_its_turn(self):
         def explode(x: int) -> int:
@@ -267,36 +272,37 @@ class TestInterleaved:
             ReturnedEdgeFromTransition("Up", "High"),
             ListPlaceNode("High", int),
         ])
-        graph = clockwork([Box(label="f", counter=fragile)], deep_policy="interleaved")
+        graph = clockwork([Box(label="f", counter=fragile)], stepping="take_turns")
         assert run(deep_steps(graph, 1)) == ["Tick"]
         with pytest.raises(TransitionFailedError):
             run(deep_steps(graph, 1))
-        assert graph._last_turn == fragile.net_id
+        assert graph._ring_cursor == fragile.net_id
         assert run(deep_steps(graph, 1)) == ["Tick"]
 
-    def test_a_policy_switched_to_interleaved_resumes_after_the_net_that_fired_last(self):
-        graph = clockwork([box("a", [1, 2]), box("b", [3, 4])], live_outer=False)
-        first, second = (b.counter for b in graph.place_named("Shelf").tokens)
-        assert run(deep_steps(graph, 1)) == ["Shelf/#1/counter/Up"]
-        assert graph._last_turn == first.net_id, "recorded under outer_first too"
-        graph.deep_policy = "interleaved"
-        assert run(deep_steps(graph, 2)) == ["Shelf/#2/counter/Up", "Shelf/#1/counter/Up"]
-        graph = clockwork([box("a", [1])])
-        assert run(deep_steps(graph, 1)) == ["Tick"] and graph._last_turn == graph.net_id
-        graph.deep_policy = "interleaved"
-        assert run(deep_steps(graph, 1)) == ["Shelf/#1/counter/Up"], "after the outer net: the box"
+    def test_an_outer_first_firing_leaves_the_ring_s_cursor_where_it_is(self):
+        graph = clockwork([box("a", [1, 2]), box("b", [3, 4])], live_outer=False, stepping="outer_first")
+        assert run(deep_steps(graph, 1)) == [up(1)]
+        assert graph._ring_cursor is None, "no ring turn yet"
+        graph.place_named("Shelf").stepping = "take_turns"
+        assert run(deep_steps(graph, 2)) == [up(1), up(2)], "the ring starts at the net, then goes round"
+        graph = clockwork([box("a", [1])], stepping="outer_first")
+        assert run(deep_steps(graph, 1)) == ["Tick"] and graph._ring_cursor == graph.net_id
+        graph.place_named("Shelf").stepping = "take_turns"
+        assert run(deep_steps(graph, 1)) == [up(1)], "after the outer net: the box"
 
     def test_execute_graph_and_the_sequential_runner_honour_it(self):
-        graph = clockwork([box("a", [1, 2])], deep_policy="interleaved")
+        graph = clockwork([box("a", [1, 2])], stepping="take_turns")
         graph, fired = run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=4))
-        assert fired == 4 and graph.fired_counts == {"Tick": 2, "Shelf/#1/counter/Up": 2}
-        graph = clockwork([box("a", [1, 2])], deep_policy="interleaved")
+        assert fired == 4 and graph.fired_counts == {"Tick": 2, up(1): 2}
+        graph = clockwork([box("a", [1, 2])], stepping="take_turns")
         summary = run(Runner.run(RunContext(graph=graph), stop_after_n_firings=4))
-        assert summary.fired == {"Tick": 2, "Shelf/#1/counter/Up": 2}
-        graph = clockwork([box("a", [1, 2]), box("b", [3])], live_outer=False, deep_policy="interleaved")
+        assert summary.fired == {"Tick": 2, up(1): 2}
+        graph = clockwork([box("a", [1, 2]), box("b", [3])], live_outer=False, stepping="take_turns")
         summary = run(Runner.run(RunContext(graph=graph)))
         assert summary.quiesced and summary.n_fired == 3
 
     def test_the_setting_is_checked(self):
         with pytest.raises(ValueError):
-            clockwork([], deep_policy="inner_first")
+            clockwork([], stepping="interleaved")
+        with pytest.raises(TypeError):
+            ExecutableGraphOperations.construct_graph([], deep_policy="outer_first")
