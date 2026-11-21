@@ -21,7 +21,12 @@ net around it reaches through port places (§12.7); and each place that holds
 nets has a stepping rule of its own (§12.3), which replaced the deep-step
 policy of a whole net and the passive setting; with what they change in §2,
 §4, §5, §6, §7, §8, §11 and §13, written before either runtime implemented
-them, from `../petritype-rs/dev-docs/subnet-place-spec.md`. Both
+them, from `../petritype-rs/dev-docs/subnet-place-spec.md`. The same day the
+Python runner came to serve subnet places, which settled four points the
+text had left open (§5.1, where a topology shows `port`; §12.3, a read of
+the net around a subnet while a firing of the subnet on its port is in
+flight; §12.7, what counts as a change of a port place; §13.2, the shape of
+a port in a filter's `places`) and fixed the conformance net `levels` (§11). Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -208,7 +213,10 @@ once per generation and lays it out.
   nested place or a subnet place), the rule by which deep stepping fires the
   nets in it, one of `"inner_first"`, `"take_turns"`, `"outer_first"` and
   `"passive"` (§12.3); `port?`, `true` on a place of a subnet that the net
-  around the subnet can reach (§12.7); `key_names?`, the names of the keys
+  around the subnet can reach (§12.7), in the subnet's own topology; a net
+  that is no subnet (the loaded net, or a net a token carries) has no net
+  around it to reach its places, so its topology shows no `port`, whatever
+  its definition marks; `key_names?`, the names of the keys
   the place derives from its tokens, in declaration order, present only when
   the place declares keys (§13.1); `style?`, how a viewer draws the place,
   present only when the net declares one (since 2026-10-16). The one style so
@@ -1061,6 +1069,58 @@ dated where the net is described.
   whose `Helpers` shows `take_turns`; steps ten times; reads the outer state
   again; then resets and starts the net, which fires the same nine and stops
   with `execution_stopped {reason: "no_fireable_transitions"}`.
+- The subnet places got their conformance net and transcript on 2026-11-21,
+  `09_subnet_places.json` over `tests/protocol_nets/levels.py`. Its names,
+  places, transitions, guards, template and seed are fixed here, since the
+  transcript depends on them:
+
+  **`levels`** ("Heroes enter two levels through one port and leave through
+  another"), hosted `manual`, with no load parameters and no net parameters.
+  Its one token type is `Hero`, `{name, fought}`, `name` a string and
+  `fought` a boolean; every place of it is serializable, a hero's JSON form is
+  that object, and its label is the runtime's own. The world's places, in
+  this order: `Door` (`Hero`); `Level 1` and `Level 2`, subnet places, each
+  holding a net the template `Level` builds, both with the default stepping
+  rule, `inner_first`; and `Outside` (`Hero`). The template `Level` takes no
+  parameters and builds a level holding no tokens, with places, in this
+  order, `Lobby` (`Hero`, a port), `Arena` (`Hero`) and `Exit Hall` (`Hero`, a
+  port), and transitions, in this order: `Walk In`, which takes the front of
+  `Lobby` (a `take` edge) and produces it into `Arena` with `fought` set to
+  `false`; `Fight`, which takes the front of `Arena` and produces it into
+  `Arena` with `fought` set to `true`, guarded by the hero at the front of
+  `Arena` having `fought` `false`; and `Win`, which takes the front of `Arena`
+  and produces it unchanged into `Exit Hall`, guarded by the hero at the front
+  of `Arena` having `fought` `true`. At most one of `Fight` and `Win` is
+  fireable at a time. The world's transitions, in this order: `Enter`, from
+  `Door` into the port `Lobby` of `Level 1`; `Climb`, from the port `Exit
+  Hall` of `Level 1` into the port `Lobby` of `Level 2`; and `Leave`, from the
+  port `Exit Hall` of `Level 2` into `Outside`; each takes the front of its
+  place (a `take` edge) and produces the hero unchanged. Seed: `Door` holds
+  one hero, `{"name": "Ada", "fought": false}`, and every other place is
+  empty. No body fails, nothing has a priority, and every net chooses by the
+  default selector. From the seed, a deep step a `step` (§12.3), the net fires
+  `Enter`; level 1's `Walk In`, `Fight` and `Win` (path `[{"place": "Level
+  1"}]`), the level being inner first; `Climb`; level 2's three; `Leave`; and
+  then nothing. The transcript reads the world's state, whose topology lists
+  the two subnet places with their ports and whose marking their `subnet`
+  entries, then level 1's state by path and level 2's by nested id; steps
+  four times, showing a firing of the world into a port (`Enter`, the pair in
+  `produced` and `subnet_marking_versions`), firings of the level out of its
+  port (`Walk In`, with `outer_marking_version` and the wrapper's version),
+  wholly inside it (`Fight`) and into its port (`Win`, which makes `Climb`
+  fireable); reads level 1's exit hall both ways, by the pair on the world and
+  by its own name addressed to the level, the same token with the same id, and
+  that token through the level with `get_token`; steps once more, to `Climb`,
+  a firing of the world out of one level's port and into the other's, whose
+  `fired` carries the versions of both levels; injects `{"name": "Bram",
+  "fought": false}` into level 1's lobby by the pair on the world, and
+  `{"name": "Cato", "fought": true}` into level 2's exit hall addressed to the
+  level, which makes `Leave` fireable; queries the world, every match in a
+  port; is refused three times, `get_place_tokens` naming `Level 1` without a
+  `port` (`invalid_params`), `inject` naming the port `Arena` of `Level 1`,
+  which is no port (`unknown_place`), and `get_place_tokens` naming the port
+  `Lobby` of `Door`, an ordinary place (`unknown_place`); reads the log, whose
+  world entries name the ports by the object; and resets.
 
 ## 12. Nested nets
 
@@ -1234,7 +1294,11 @@ the list counted from 0.
   places that firing touches; every other inner net is unchanged by that
   body, since an outer body reaches only the tokens it holds and an inner
   body only its own net, and is answered at once. While an inner body runs,
-  reads of that inner net follow §6.3 as for the outer net.
+  reads of that inner net follow §6.3 as for the outer net. While a body of a
+  subnet runs whose firing took a token from one of the subnet's port places,
+  or holds one there through a mutate edge, a read of the net around the
+  subnet is answered at once, with that port as the firing's `launched` left
+  it and at the version that `launched` gave the net (§12.7).
 - `enable`, `disable`, `set_param`, `start`, `stop`, `reset`, `step` and
   `press` act on the outer net only; any of them given `path` or `nested_id`
   is `invalid_params` (`step` named here since 2026-10-12: its result names
@@ -1469,13 +1533,23 @@ at whatever depth, and the loaded net is the one the process loaded.
   Each field is present only on a notification that changed a port place
   the field covers, and one notification may carry both: an inner firing
   that takes from a port of its own net and puts into a port of a subnet of
-  its own. A version stamped on a read of either net covers every change of
-  the port place told up to that version. A reader that follows both nets
-  moves each version it holds to the value given for that net and sees no
-  version skipped in either. A reader that follows one of the two nets and
-  not the other sees a change told by the other as a gap in its own version
-  (§4), the next value it meets being more than one beyond the one it holds,
-  and refetches, as at any gap.
+  its own. A notification changes a port place when what it tells took a
+  token from the place or put one into it: a `launched` (or `fired`) that
+  took one from it, a `distributed` (or `fired`) that put one into it, a
+  `failed` that put back what it took (`restored: true`), and an `added`,
+  `removed` or `mutated` of a token there or the `hidden` that stands in for
+  one, those a connection's filter sends when a token comes into or goes out
+  of view included (§13.4). An edge that took nothing there, a read edge or a
+  drain on an empty port, changes nothing, nor does a `failed` that did not
+  restore; under a filter what happened counts, not the tokens the
+  notification lists. Each net moves by one per notification, however many
+  tokens of its ports the change touched. A version stamped on a read of
+  either net covers every change of the port place told up to that version.
+  A reader that follows both nets moves each version it holds to the value
+  given for that net and sees no version skipped in either. A reader that
+  follows one of the two nets and not the other sees a change told by the
+  other as a gap in its own version (§4), the next value it meets being more
+  than one beyond the one it holds, and refetches, as at any gap.
 
   For example, the loaded net `world` is at version 42 and holds the subnet
   place `Level 3`, whose subnet, nested id `"5"`, is at version 7. `Enter`
@@ -1549,7 +1623,8 @@ side of `TOKEN_QUERYING_AND_FILTERING.md` (R3); both runners implement it.
 A filter is `{clauses?: [clause], places?: [place], prefix?: string}`; a
 clause is `{key, values: [value]}` or `{key, param}`. A `places` entry is a
 place name, or `{place, port}` for a port place of one of the net's subnet
-places, which is filtered by its own name (§12.7).
+places, which is filtered by its own name (§12.7); other keys of that object
+are ignored (§2), and an entry of any other shape is `invalid_params`.
 
 - A token matches a filter when it matches every clause (AND across
   clauses) and lies in a place `places` names, if given, whose name begins

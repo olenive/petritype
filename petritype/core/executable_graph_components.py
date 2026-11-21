@@ -1791,9 +1791,11 @@ class KeyedEdges:
     """Functions over keyed edges (``TakeWhereEdge``, ``MutateWhereEdge``)."""
 
     def first_kept(edge: Union[TakeWhereEdge, MutateWhereEdge], place: ListPlaceNode, params: dict) -> Optional[int]:
-        """The index of the oldest token of ``place`` the edge's filter keeps, or ``None``."""
+        """The index of the oldest token of ``place`` the edge's filter keeps, or ``None``.
+        The filter sees the place as the edge names it, so on a port its ``places``
+        names the port by its ``Port`` pair."""
         for index, token in enumerate(place.tokens):
-            if edge.where.keeps(place, token, params):
+            if edge.where.keeps(place, token, params, edge.place_node_name):
                 return index
         return None
 

@@ -2,10 +2,10 @@
 
 Status: **design of 2026-10-03; token ids, events, the runner's state
 machine and its process layer built the same day** ("As built" sections
-below). `python -m petritype.runner` works and the eight shared transcripts
-replay against it. It speaks protocol version 2 since 2026-11-21 (the last
-section). Version bumped to 0.2.0 on 2026-10-03, and 0.2.0 shipped
-on 2026-10-04 (the `v0.2.0` tag). The protocol
+below). `python -m petritype.runner` works and the ten shared transcripts
+replay against it. It speaks protocol version 2 since 2026-11-21, subnet
+places included (the last three sections). Version bumped to 0.2.0 on
+2026-10-03, and 0.2.0 shipped on 2026-10-04 (the `v0.2.0` tag). The protocol
 itself is [`PROTOCOL.md`](PROTOCOL.md)
 (<https://github.com/olenive/petritype/blob/main/PROTOCOL.md>); this note
 covers only what changes in this library to speak it. House conventions
@@ -635,7 +635,8 @@ Settlements:
   from 0. The empty path names the loaded net, and a result about the loaded
   net carries no path. A step of the subnet form, `{place}` alone, is read and
   answered `unknown_net`, since no net has subnet places yet; `_descend` is
-  where they join.
+  where they join. *Done the same day (the last section):* `_descend` takes a
+  subnet step to the subnet of its subnet place.
 - **Names.** Nothing in the runner builds or parses an address as text, so a
   place or a net may be named with a `/` or a leading `#` and still be reached
   by path. Inside the owner a path is a tuple of `PathStep`s. The library
@@ -769,3 +770,90 @@ token id embedded in text, which only the library's old joined names could raise
 steps as the interleaved policy did and outer first as the old default did;
 `tests/test_runner_protocol_gaps.py` drives `step` and `start` under each rule and
 reads `stepping` in the topology.
+
+## As built, 2026-11-21: subnet places in the runner (PROTOCOL.md §12.7)
+
+The spec's step 7 for Python (`../petritype-rs/dev-docs/subnet-place-spec.md` §2
+and §5). The runner serves a net with subnet places and port places as the
+protocol text says; the refusal to load one, which the library's step left in
+`_build`, is gone.
+
+Settlements:
+
+- **One more inner net.** A subnet is one more `_Net` in `_Loaded.inner`, built by
+  `_know_new` at the load or reset that builds it, with its own version, topology,
+  progress, log view and fireable baseline, and kept until the next load or reset.
+  `_net_for` tells a subnet by its path, whose last step is `{place}`, and links its
+  record to the net around it (`_Net.parent`) and its subnet place
+  (`_Net.subnet_place`); a subnet's `get_state` names its subnet place as `net`.
+  `_descend` takes a subnet step to the subnet, `Paths.of_step` writes one for a
+  library step with no token, and `_chain` passes through one without rendering a
+  token.
+- **Keys.** Every per-place table of a `_Net` is keyed as the net names its places:
+  its own by name, the ports of its subnet places by the library's `Port` pair, the
+  key every edge, event and handover of the library uses. The node under a `Port`
+  is the subnet's own place, the one list of tokens; `_owner_of` gives the subnet
+  and the port's own name, whose filter, visible set, type name and ids a port
+  has. `Places` (`translate.py`) puts a key on the wire: `port` beside `place` in an
+  object (`_where`), and `{"place", "port"}` where a place is named by position
+  (`Places.ref`, `_pairs`, `Tokens.produced`).
+- **Topology.** `Topologies.of` lists a subnet place as `wire.SubnetPlace`, its
+  template's name as `type_name`, its ports as the subnet's own topology lists them,
+  and its stepping rule; an edge on a port carries `port`. With `subnet`, which the
+  owner passes for a subnet's record, a port place carries `port: true`. A net
+  loaded on its own or carried by a token shows no `port`, since nothing reaches
+  its ports (written into PROTOCOL.md §5.1). A place style on a subnet place is
+  `load_failed`.
+- **State and requests.** A snapshot's views are keyed by the same keys, a subnet
+  place's ports at its position, and it keeps each subnet place's entry
+  (`_subnet_entry`), whose `count` agrees with the ports as the snapshot shows
+  them. `get_state` writes `{subnet, ports}` for a subnet place. `_place_key` reads
+  `place` and `port` for `get_place_tokens` and `inject`, with the errors of §12.7.
+  `query` without a filter projects each place by its owner's connection filter, a
+  port by its subnet's; `Filter.keeps` gained the key the filter's net names the
+  place by, so that a `places` restriction to a `Port` matches it, and keyed edges
+  pass their own key. A filter's or `distinct`'s `places` entry is a name or an
+  object with a string `place` and a string `port`, other keys ignored (§2, written
+  into §13.2). `get_token` searches the net's own places only: a port's token is
+  read through its subnet.
+- **Versions.** `_cross` carries out §12.7 for every state notification of a net:
+  for each subnet place whose port the change touched it raises that subnet's
+  version and sets `subnet_marking_versions`, and for a change of a net's own port
+  place, when the net is a subnet, it raises the parent's and sets
+  `outer_marking_version`; each net moves once per notification. What a
+  notification changed is `_changed_by` (`launched` from the handover, unfiltered):
+  what it took, put or put back, or the place of an `added`, `removed` or
+  `mutated`, which stand behind a `hidden` and behind the `added` and `removed` a
+  filter sends when a token comes into or goes out of view (written into §12.7).
+  `wire.PortChange` gives the eight notifications that can change a port the two
+  fields, which `Lines.notification` writes before the stamp. The wrapper of a
+  `nested` line carries the loaded net's version as it stands after the change.
+- **Fireable.** The net across a port is touched by the change, so its fireable set
+  is compared too; the touched nets are reported shallower first, so a net's
+  `fireable` precedes those of the nets inside it at any depth.
+- **Reads while a body runs.** `_held` now runs for a firing in any net: the tokens
+  it takes or holds, named by the net whose place holds them, the nets inside them,
+  and the subnet of every subnet place one of whose ports its transition has an
+  edge on, whose reads wait for the landing. A firing of a subnet that takes from
+  or hands over a token of its own port leaves the net around it a snapshot of that
+  port as the firing leaves it (`_lifted`, captured with the same cut as the
+  firing's own), so that a read of that net is answered at once at the version the
+  `launched` gave it (written into §12.3).
+- **The transcripts.** The harness's fold carries `subnet_marking_versions` and
+  `outer_marking_version` from both pieces (§11), and the shared-safe check asks
+  them masked. The recorder masks them, names a subnet's nested id after its subnet
+  place (`level_1`), and names a token the net around a subnet names by the pair in
+  the subnet, where its id was minted, so that the same token has one capture in
+  both views (`level_1_ada`); an `inject` by pair has its answer's id named there
+  too. The new conformance net `levels` (`tests/protocol_nets/levels.py`, fixed in
+  PROTOCOL.md §11) stamps its levels with the template name `Level` without
+  registering it, since the levels example registers a `Level` of its own in the
+  same test process. `tests/protocol/09_subnet_places.json` was recorded over it;
+  every transcript, 09 included, re-records to the same bytes, and none of the
+  others changed.
+
+The levels example gained a factory the runner serves, `levels-world`.
+`tests/test_runner_subnets.py` covers each part at one and two depths, a subnet
+inside a token's net and a token's net inside a port, the versions rule in each
+of its cases, and the reads that wait or are served from a snapshot;
+`tests/test_runner_process.py` serves `levels` as a process.

@@ -29,6 +29,11 @@ it to watch the journey, with the world's log showing each level's firings under
 the path of the level they happened in::
 
     uv run python examples/subnet_places/levels.py
+
+or serve the world as a net process, ``levels-world``, which a viewer can host
+and open each level of (PROTOCOL.md §12.7)::
+
+    python -m petritype.runner --module examples.subnet_places.levels
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from typing import Optional, Union
 
 from pydantic import BaseModel
 
+from petritype import petri_net
 from petritype.core.events import Fired, InnerFiring, Nested, PathStep
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
@@ -120,6 +126,15 @@ def build_world(record_events: bool = True) -> ExecutableGraph:
         ArgumentEdgeToTransition(Port("Level 2", "Exit Hall"), "Leave", "hero"),
         ReturnedEdgeFromTransition("Leave", "Outside"),
     ], record_events=record_events)
+
+
+@petri_net(
+    name="levels-world",
+    description="Heroes clear two levels built from one template, entering by the lobby and leaving by the exit hall",
+)
+def world() -> ExecutableGraph:
+    """The world as the protocol runner serves it, built afresh at each load and reset."""
+    return build_world()
 
 
 # --- stepping ---------------------------------------------------------------------------------

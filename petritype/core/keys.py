@@ -154,10 +154,15 @@ class Filter:
     def accepts(self, keys: Mapping[str, KeyValue], params: Mapping[str, Any]) -> bool:
         return all(clause.accepts(keys, params) for clause in self.clauses)
 
-    def keeps(self, place: ListPlaceNode, token: Any, params: Mapping[str, Any]) -> bool:
+    def keeps(
+        self, place: ListPlaceNode, token: Any, params: Mapping[str, Any], key: Optional[PlaceKey] = None,
+    ) -> bool:
         """Whether ``token``, resting in ``place``, passes the filter, with
-        ``params`` the net's parameters for a clause that names one."""
-        if not self.covers(place.name):
+        ``params`` the net's parameters for a clause that names one. ``key`` is
+        how the net the filter belongs to names the place, when that is not the
+        place's own name: a port of one of its subnet places, by its ``Port``
+        pair, which a ``places`` restriction names it by (PROTOCOL.md §13.2)."""
+        if not self.covers(place.name if key is None else key):
             return False
         if not self.clauses:
             return True
@@ -165,9 +170,9 @@ class Filter:
             return False
         return self.accepts(Keys.of(place, token), params)
 
-    def matches(self, graph: ExecutableGraph, place: ListPlaceNode, token: Any) -> bool:
+    def matches(self, graph: ExecutableGraph, place: ListPlaceNode, token: Any, key: Optional[PlaceKey] = None) -> bool:
         """``keeps`` with the graph's own parameters."""
-        return self.keeps(place, token, graph.params)
+        return self.keeps(place, token, graph.params, key)
 
 
 EVERYTHING = Filter()

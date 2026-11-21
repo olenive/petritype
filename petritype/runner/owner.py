@@ -51,6 +51,28 @@ becomes the wire's through ``Paths.of_steps``. Progress is per net (§5.4): each
 net counts the firings of its own transitions under their own names, and the
 outer net's progress says nothing of the firings inside it.
 
+Subnet places (PROTOCOL.md §12.7)
+---------------------------------
+Since 2026-11-21 a place may hold a net of its own, a subnet, reached through
+its port places. A subnet is one more inner net in the owner's records, with a
+``_Net`` built at the load or reset that builds it and kept until the next,
+whose path ends in the step ``{place}``; that record knows the net around it
+(``_Net.parent``) and the subnet place it stands in (``_Net.subnet_place``). A
+net names its own places by name and the ports of its subnet places by the
+library's ``Port`` pair, which every per-place table of a ``_Net`` is keyed by
+(``place_nodes``, ``type_names``, ``serializable``, ``nested_places``, a
+snapshot's views); a port's node is its subnet's own place, the one list of
+tokens both nets read, and its filter, ids and visible set are the subnet's
+(``_owner_of``). A change of a port place is in the markings of two nets, so
+the state notification that tells it raises the version of the net across the
+port as well and carries that version (``_cross``), and the net across it has
+its ``fireable`` compared too, a net's before the nets inside it. While a
+firing touches a port, the net across the port is read consistently: a firing
+of the outer net leaves the subnet's reads waiting for its landing
+(``_InFlight.held_nets``), and a firing of the subnet that takes from or hands
+over a token of its own port leaves the outer net a snapshot with that port as
+the firing left it (``_lifted``).
+
 Reads while a body runs
 -----------------------
 The live graph is **not** safe to read while a body runs, for the reason the
@@ -105,6 +127,7 @@ from typing import Any, Coroutine, Optional, Union
 from pydantic import TypeAdapter
 
 from petritype.core import events as core_events
+from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
     DrainEdge,
     ExecutableGraph,
@@ -128,7 +151,7 @@ from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
 from petritype.runner.translate import (
-    JSON_SCALARS, Controls, Filters, Paths, Serializable, StrictJson, Tokens, Topologies, TypeNames,
+    JSON_SCALARS, Controls, Filters, Paths, Places, Serializable, StrictJson, Tokens, Topologies, TypeNames,
 )
 from petritype.runtime import (
     ControlSpec, Disable, Enable, Extend, Fire, RunContext, Runner, SetNetParam, SetParam,
@@ -205,7 +228,9 @@ class _PlaceView:
     places render each token's ``nets`` under ``prefix``, the path of the net the
     place belongs to (empty for the loaded net); ``place`` is the node itself, for the keys it derives;
     ``filter`` and ``params`` the connection's projection (§13.4), under which
-    only the kept tokens are listed and ``matching`` counts them."""
+    only the kept tokens are listed and ``matching`` counts them. A port seen
+    from the net around its subnet is viewed as its subnet's place: ``name`` is
+    its own name, and ``prefix``, ``filter`` and ``params`` are the subnet's."""
 
     name: str
     type_name: str
@@ -262,23 +287,30 @@ class _PlaceView:
 
 @dataclass
 class _Snapshot:
+    """A net's marking as of one version. ``places`` is keyed as the net names
+    its places, a port by its ``Port`` pair, in declaration order with a subnet
+    place's ports at its position; ``subnets`` holds each subnet place's entry."""
+
     marking_version: int
     transitions: dict[str, wire.TransitionState]
-    places: dict[str, _PlaceView]
+    places: dict[PlaceKey, _PlaceView]
     progress: wire.Progress
+    subnets: dict[str, wire.SubnetEntry] = field(default_factory=dict)
 
 
 @dataclass
 class _Net:
     """One net, outer or inner, and what the protocol keeps about it. The outer
-    net's ``nested_id`` is ``None``."""
+    net's ``nested_id`` is ``None``. Per-place tables are keyed as the net names
+    its places: its own by name, the ports of its subnet places by ``Port``. A
+    subnet knows the net around it, ``parent``, and its ``subnet_place`` there."""
 
     graph: ExecutableGraph
     ctx: RunContext
     topology: wire.Topology
-    type_names: dict[str, str]
-    serializable: dict[str, bool]
-    nested_places: set[str]
+    type_names: dict[PlaceKey, str]
+    serializable: dict[PlaceKey, bool]
+    nested_places: set[PlaceKey]
     place_nodes: dict
     incoming: dict
     outgoing: dict
@@ -286,6 +318,8 @@ class _Net:
     marking_version: int
     last_fireable: list[str]
     nested_id: Optional[int] = None
+    parent: Optional["_Net"] = None
+    subnet_place: Optional[str] = None
     # The last path this inner net was found at, for a line written while its token is airborne.
     last_path: tuple[wire.PathStep, ...] = ()
     last_fired: Optional[str] = None
@@ -295,17 +329,11 @@ class _Net:
     visible: set[int] = field(default_factory=set)
     # What the last ``launched`` in this net listed under the filter, which its
     # ``failed`` lists too (§13.4).
-    launched_shown: set[tuple[str, int]] = field(default_factory=set)
+    launched_shown: set[tuple[PlaceKey, int]] = field(default_factory=set)
 
     @property
     def is_outer(self) -> bool:
         return self.nested_id is None
-
-    def keeps(self, place_name: str, token: Any) -> bool:
-        """Whether the connection's filter lets a live token through."""
-        if self.filter is None:
-            return True
-        return self.filter.keeps(self.place_nodes[place_name], token, self.graph.params)
 
 
 @dataclass
@@ -319,11 +347,13 @@ class _InFlight:
     # Per net (``None`` for the outer), the marking it is read from while the body runs.
     snapshots: dict[Optional[int], _Snapshot]
     # What ``launched`` said the firing takes, in the order taken.
-    consumed: list[tuple[str, int]] = field(default_factory=list)
-    # Inner nets, at any depth, inside the tokens an outer firing took or holds: read after the landing.
+    consumed: list[tuple[PlaceKey, int]] = field(default_factory=list)
+    # Inner nets, at any depth, inside the tokens the firing took or holds, and the
+    # subnets whose ports it touches: read after the landing.
     held_nets: set[int] = field(default_factory=set)
-    # The tokens an outer firing took or holds, as ``(place, id)``, for a path that names one.
-    held_tokens: set[tuple[str, int]] = field(default_factory=set)
+    # The tokens the firing took or holds, as ``(nested id of the net whose place
+    # holds it, that net's name for the place, id)``, for a path that names one.
+    held_tokens: set[tuple[Optional[int], str, int]] = field(default_factory=set)
     # The ``press`` request waiting for this firing, if a ``fire`` control launched it.
     press_id: Optional[str] = None
 
@@ -334,14 +364,15 @@ class _Handover:
     ``(place, id)`` pairs its argument edges take, in the order taken; ``taken``,
     per place, how many tokens leave from the front; ``mutated``, per place, the
     indices (in the place as it stands) of the tokens handed to the body through
-    mutate edges. Snapshot edges hand over deep copies and appear in none."""
+    mutate edges. Snapshot edges hand over deep copies and appear in none.
+    Places are keyed as the firing net names them, a port by its ``Port`` pair."""
 
-    consumed: list[tuple[str, int]]
-    taken: dict[str, int]
-    mutated: dict[str, set[int]]
+    consumed: list[tuple[PlaceKey, int]]
+    taken: dict[PlaceKey, int]
+    mutated: dict[PlaceKey, set[int]]
     # Per place, the indices (in the place as it stands) a keyed take removes, which
     # need not be at the front.
-    keyed_taken: dict[str, list[int]] = field(default_factory=dict)
+    keyed_taken: dict[PlaceKey, list[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -567,13 +598,6 @@ class Owner:
                 ErrorCode.LOAD_FAILED,
                 f"factory {entry.name!r} returned {type(graph).__name__}, not an ExecutableGraph",
             )
-        holder = _subnet_place_within(graph)
-        if holder is not None:
-            raise ProtocolError(
-                ErrorCode.LOAD_FAILED,
-                f"net {entry.name!r} holds the subnet place {holder!r}: the runner loads nets without subnet "
-                f"places only, until it serves PROTOCOL.md §12.7",
-            )
         try:
             ExecutableGraphCheck.ensure_all_token_types_match_place_types(graph)
             outer = self._new_net(graph, self.marking_version)
@@ -592,29 +616,35 @@ class Owner:
         self.generation += 1
         # Recorded silently: ``reloaded`` already means "refetch".
         outer.last_fireable = self._fireable_names(outer)
-        # The inner nets the factory seeded are known from the load: their baselines too.
+        # The inner nets the factory seeded, and every subnet, are known from the
+        # load: their baselines too.
         self._know_new()
         out.lines.append(wire.Reloaded(
             generation=self.generation, reason=reason,
             marking_version=outer.marking_version, running=False,
         ).line())
 
-    def _new_net(self, graph: ExecutableGraph, marking_version: int, nested_id: Optional[int] = None) -> _Net:
-        """What the protocol keeps about a net, outer or inner. Every synchronous
+    def _new_net(
+        self, graph: ExecutableGraph, marking_version: int, nested_id: Optional[int] = None, subnet: bool = False,
+    ) -> _Net:
+        """What the protocol keeps about a net, outer or inner; ``subnet`` for the
+        subnet of a subnet place, whose topology shows its ports. Every synchronous
         body is moved to a thread here, so user code never blocks the loop the
         owner is driven from."""
-        topology = Topologies.of(graph)
+        topology = Topologies.of(graph, subnet=subnet)
         for transition in graph.transitions:
             if not inspect.iscoroutinefunction(transition.function):
                 transition.execution = "thread"
+        # Every place the net's transitions reach, its subnets' ports by their pairs.
+        place_nodes = MapPlaceNames.to_list_place_nodes(graph)
         return _Net(
             graph=graph,
             ctx=RunContext(graph=graph, inbox=asyncio.Queue(), strict=True),
             topology=topology,
-            type_names={place.name: place.type_name for place in topology.places},
-            serializable={place.name: place.serializable for place in topology.places},
-            nested_places={place.name for place in graph.places if place.nested},
-            place_nodes=MapPlaceNames.to_list_place_nodes(graph),
+            type_names={key: TypeNames.of(node.type) for key, node in place_nodes.items()},
+            serializable={key: Serializable.place_type(node.type) for key, node in place_nodes.items()},
+            nested_places={key for key, node in place_nodes.items() if node.nested},
+            place_nodes=place_nodes,
             incoming=MapTransitionNames.to_incoming_edges(graph),
             outgoing=MapTransitionNames.to_outgoing_edges(graph),
             read=MapTransitionNames.to_read_edges(graph),
@@ -627,18 +657,93 @@ class Owner:
 
     def _net_for(self, graph: ExecutableGraph, path: tuple[wire.PathStep, ...] = ()) -> _Net:
         """The ``_Net`` of a graph found inside the outer net, built on first sight;
-        ``path`` is where it was found, kept as its last known path."""
+        ``path`` is where it was found, kept as its last known path. A net whose
+        path ends in a subnet step is a subnet: its record is linked to the net
+        around it, which holds its subnet place for as long as both live."""
         loaded = self._loaded
         if graph is loaded.outer.graph:
             return loaded.outer
         net = loaded.inner.get(graph.net_id)
         if net is None:
-            net = self._new_net(graph, 0, nested_id=graph.net_id)
-            net.last_fireable = self._fireable_names(net)
+            if not path:
+                found = NestedNets.find(loaded.outer.graph, graph.net_id)
+                path = Paths.of_steps(found[0]) if found is not None else ()
+            subnet = bool(path) and path[-1].token is None
+            net = self._new_net(graph, 0, nested_id=graph.net_id, subnet=subnet)
             loaded.inner[graph.net_id] = net
+            if subnet:
+                net.parent = self._net_for(self._graph_at(path[:-1]), path[:-1])
+                net.subnet_place = path[-1].place
+            net.last_fireable = self._fireable_names(net)
         if path:
             net.last_path = path
         return net
+
+    def _graph_at(self, steps: tuple[wire.PathStep, ...]) -> ExecutableGraph:
+        """The net a path names, from the loaded net down; ``LookupError`` if a
+        step names none."""
+        graph = self._loaded.outer.graph
+        for step in steps:
+            graph = _descend(graph, step)
+        return graph
+
+    def _subnet_of(self, net: _Net, place: str) -> _Net:
+        """The record of the subnet that ``net``'s subnet place ``place`` holds."""
+        graph = net.graph.subnet(place)
+        if graph is None:
+            raise KeyError(f"no subnet place {place!r}")
+        known = self._loaded.inner.get(graph.net_id)
+        if known is not None:
+            return known
+        return self._net_for(graph, (*self._path_of(net), Paths.subnet_step(place)))
+
+    def _owner_of(self, net: _Net, key: PlaceKey) -> tuple[_Net, str]:
+        """The net whose own place ``key`` names, and its name there: ``net`` and
+        the name for a place of its own; for a port, the subnet that holds it,
+        whose ids, filter and keys the port has, and the port's own name."""
+        if isinstance(key, Port):
+            return self._subnet_of(net, key.place), key.port
+        return net, key
+
+    def _keeps(self, net: _Net, key: PlaceKey, token: Any) -> bool:
+        """Whether the connection's filter lets a live token of the place ``net``
+        names ``key`` through: a port is filtered in its subnet (§12.7)."""
+        owner, own = self._owner_of(net, key)
+        if owner.filter is None:
+            return True
+        return owner.filter.keeps(owner.place_nodes[own], token, owner.graph.params)
+
+    def _place_key(self, net: _Net, place: str, port: Optional[str]) -> PlaceKey:
+        """The place a request names by ``place`` and ``port`` (§12.7): a place of
+        ``net`` by its name, or a port of one of its subnet places by the pair. A
+        subnet place named without a ``port`` is ``invalid_params``, since it holds
+        no tokens of its own; a place the net does not have, a ``port`` its subnet
+        place does not have, and a ``port`` beside a place that is not a subnet
+        place are ``unknown_place``."""
+        node = net.graph.place_named(place)
+        if port is None:
+            if isinstance(node, SubnetPlaceNode):
+                raise ProtocolError(
+                    ErrorCode.INVALID_PARAMS,
+                    f"{place!r} is a subnet place, which holds no tokens of its own: name one of its ports as "
+                    f'"port"',
+                )
+            if place not in net.place_nodes:
+                raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {place!r}")
+            return place
+        if node is None:
+            raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {place!r}")
+        if not isinstance(node, SubnetPlaceNode):
+            raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"{place!r} is not a subnet place, so it has no port {port!r}")
+        key = Port(place, port)
+        if key not in net.place_nodes:
+            raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"subnet place {place!r} has no port {port!r}")
+        return key
+
+    def _place_names(self, net: _Net) -> set[PlaceKey]:
+        """What a filter's or ``distinct``'s ``places`` may name in ``net``: its
+        places, subnet places among them, and the ports of its subnet places."""
+        return set(net.place_nodes) | {place.name for place in net.graph.places}
 
     def _know_new(self) -> None:
         """Take the ``fireable`` baseline of every inner net, at any depth, that the
@@ -722,9 +827,18 @@ class Owner:
             steps = Paths.parse(params["path"]) if "path" in params else ()
         except ProtocolError:
             steps = ()
-        if steps and steps[0].token is not None and (token_id := _token_id(steps[0].token)) is not None:
-            if (steps[0].place, token_id) in flight.held_tokens:
-                return _HELD
+        # A path that no longer resolves may pass through a token the firing took:
+        # it waits, to be answered as the landing leaves the marking.
+        graph, net_id = self._loaded.outer.graph, None
+        for step in steps:
+            if step.token is not None and (token_id := _token_id(step.token)) is not None:
+                if (net_id, step.place, token_id) in flight.held_tokens:
+                    return _HELD
+            try:
+                graph = _descend(graph, step)
+            except LookupError:
+                break
+            net_id = graph.net_id
         return None
 
     def _path_of(self, net: _Net) -> tuple[wire.PathStep, ...]:
@@ -739,9 +853,12 @@ class Owner:
 
     def _net_name(self, net: _Net) -> str:
         """The name a state names: the loaded net's for the outer net, the net's
-        name within its token for an inner one."""
+        name within its token for an inner one, and its subnet place's for a
+        subnet (§12.3)."""
         if net.is_outer:
             return self._loaded.entry.name
+        if net.subnet_place is not None:
+            return net.subnet_place
         return (net.last_path[-1].net or "") if net.last_path else ""
 
     def _stamp(self, net: _Net, model: wire.Wire) -> wire.Wire:
@@ -757,6 +874,20 @@ class Owner:
         limit = _page_limit(params, "token_limit")
         net = self._target(params)
         snapshot = self._snapshot_of(net) or self._capture(net)
+
+        def marking_of(view: _PlaceView) -> wire.PlaceMarking:
+            return wire.PlaceMarking(count=view.count, matching=view.matching, tokens=view.entries(0, limit))
+
+        places: dict[str, Union[wire.PlaceMarking, wire.SubnetMarking]] = {}
+        for place in net.graph.places:
+            if isinstance(place, SubnetPlaceNode):
+                # The place holds no tokens of its own: its subnet, and its ports (§12.7).
+                places[place.name] = wire.SubnetMarking(
+                    subnet=snapshot.subnets[place.name],
+                    ports={port.name: marking_of(snapshot.places[Port(place.name, port.name)]) for port in place.ports},
+                )
+            else:
+                places[place.name] = marking_of(snapshot.places[place.name])
         state = wire.State(
             net=self._net_name(net),
             generation=self.generation if net.is_outer else 1,
@@ -764,10 +895,7 @@ class Owner:
             running=self._loaded.running,
             topology=net.topology,
             transitions=snapshot.transitions,
-            marking=wire.Marking(places={
-                name: wire.PlaceMarking(count=view.count, matching=view.matching, tokens=view.entries(0, limit))
-                for name, view in snapshot.places.items()
-            }),
+            marking=wire.Marking(places=places),
             progress=snapshot.progress,
             template=net.graph.template if not net.is_outer else None,
         )
@@ -775,20 +903,20 @@ class Owner:
 
     def _get_place_tokens(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
         place = _string(params, "place")
+        port = _optional_string(params, "port")
         offset = _count(params, "offset") or 0
         limit = _page_limit(params, "limit")
         net = self._target(params)
-        if place not in net.place_nodes:
-            raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {place!r}")
+        key = self._place_key(net, place, port)
         snapshot = self._snapshot_of(net)
         if snapshot is not None:
-            view, version = snapshot.places[place], snapshot.marking_version
+            view, version = snapshot.places[key], snapshot.marking_version
         else:
-            view, version = self._view(net, net.place_nodes[place]), net.marking_version
+            view, version = self._view(net, key), net.marking_version
         tokens = view.entries(offset, limit)
         out.lines.append(Lines.result(request_id, self._stamp(net, wire.PlaceTokens(
-            place=place, marking_version=version, count=view.count, matching=view.matching, offset=offset,
-            limit=limit, tokens=tokens, has_more=offset + len(tokens) < view.total(),
+            place=place, port=port, marking_version=version, count=view.count, matching=view.matching,
+            offset=offset, limit=limit, tokens=tokens, has_more=offset + len(tokens) < view.total(),
         ))))
 
     def _get_token(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
@@ -803,7 +931,9 @@ class Owner:
             else:
                 found = TokenIds.locate(net.graph, token_id)
                 self._flush(now, out)  # locate resyncs: report any repair first
-        if found is None or not net.keeps(found[0], found[1]):
+        # A port's tokens carry their subnet's ids, so only the net's own places
+        # are searched (``_find``, ``TokenIds.locate``): one is read through its subnet.
+        if found is None or not self._keeps(net, found[0], found[1]):
             raise ProtocolError(ErrorCode.UNKNOWN_TOKEN, f"no live token {wanted!r}")
         place, token = found
         common = {"id": wanted, "place": place, "type_name": type(token).__name__}
@@ -832,26 +962,35 @@ class Owner:
 
     def _query(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
         """``query`` (§13.3): the tokens a filter keeps, from the same marking
-        ``get_state`` reads, in place order then token order."""
+        ``get_state`` reads, in place order then token order, a subnet place's
+        ports at its position. Without a ``filter`` each place is projected by its
+        connection filter, a port by its subnet's (§12.7); a ``filter`` of the
+        request's own applies to every place, ports included."""
         limit = _page_limit(params, "token_limit")
         net = self._target(params)
+        chosen: Optional[Filter] = None
         if "filter" in params:
-            chosen: Optional[Filter] = Filters.from_wire(params["filter"], set(net.place_nodes))
-        else:
-            chosen = net.filter
+            chosen = Filters.from_wire(params["filter"], self._place_names(net))
         snapshot = self._snapshot_of(net) or self._capture(net)
         matches: list[dict] = []
-        for name, view in snapshot.places.items():
-            if chosen is not None and not chosen.covers(name):
+        for key, view in snapshot.places.items():
+            if chosen is not None and not chosen.covers(key):
                 continue
-            place = net.place_nodes[name]
+            place = net.place_nodes[key]
             for index in range(min(len(view.ids), len(view.tokens))):
                 token = view.tokens[index]
-                if chosen is not None and not chosen.keeps(place, token, net.graph.params):
+                if chosen is not None:
+                    if not chosen.keeps(place, token, net.graph.params, key):
+                        continue
+                elif not view.keeps(index):
                     continue
                 if len(matches) < limit:
-                    match: dict = {"place": name, "token": view.entry(index).wire()}
-                    if net.serializable[name]:
+                    where, port = Places.split(key)
+                    match: dict = {"place": where}
+                    if port is not None:
+                        match["port"] = port
+                    match["token"] = view.entry(index).wire()
+                    if net.serializable[key]:
                         try:
                             match["json"] = Tokens.json_value(token)
                         except Exception:
@@ -870,11 +1009,9 @@ class Owner:
         net = self._target(params)
         places = params.get("places")
         if places is not None:
-            if not isinstance(places, list) or not all(isinstance(name, str) for name in places):
-                raise ProtocolError(ErrorCode.INVALID_PARAMS, '"places" is a list of place names')
-            for name in places:
-                if name not in net.place_nodes:
-                    raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {name!r}")
+            # A place by name or a port by {"place", "port"}; a subnet place named
+            # alone selects nothing, since it holds no tokens (§12.7).
+            places = Filters.places(places, self._place_names(net), '"places"')
         snapshot = self._snapshot_of(net)
         if snapshot is None:
             values = Query.distinct(net.graph, key, places)
@@ -900,7 +1037,7 @@ class Owner:
         ``filter`` it is cleared."""
         net = self._target(params)
         if "filter" in params and params["filter"] is not None:
-            net.filter = Filters.from_wire(params["filter"], set(net.place_nodes))
+            net.filter = Filters.from_wire(params["filter"], self._place_names(net))
         else:
             net.filter = None
         self._sync_visible(net)
@@ -912,13 +1049,14 @@ class Owner:
         ``added`` for a token now kept that it did not have, ``removed`` for one
         it had that is kept no more. The token events of a batch keep ``visible``
         in step as they go, so what is left here is what no token event told of:
-        a net parameter a clause names has changed (§13.4)."""
+        a net parameter a clause names has changed (§13.4). Only the net's own
+        places, its ports among them: a subnet's ports are its subnet's to project."""
         if net.filter is None:
             net.visible = set()
             return
         visible: dict[int, tuple[str, Any]] = {}
         for place in net.graph.places:
-            if not net.filter.covers(place.name):
+            if isinstance(place, SubnetPlaceNode) or not net.filter.covers(place.name):
                 continue
             ids = place.token_ids
             for index, token in enumerate(place.tokens):
@@ -929,10 +1067,10 @@ class Owner:
             for token_id in sorted(net.visible - set(visible)):
                 found = TokenIds.locate(net.graph, token_id)
                 if found is not None:  # still live, just no longer kept
-                    self._emit(net, wire.Removed(place=found[0], id=str(token_id), **stamp), out)
+                    self._emit(net, wire.Removed(place=found[0], id=str(token_id), **stamp), out, (found[0],))
             for token_id in sorted(set(visible) - net.visible):
                 place_name, token = visible[token_id]
-                self._emit(net, self._added(net, place_name, token_id, token, stamp), out)
+                self._emit(net, self._added(net, place_name, token_id, token, stamp), out, (place_name,))
         net.visible = set(visible)
 
     def _snapshot_of(self, net: _Net) -> Optional[_Snapshot]:
@@ -950,23 +1088,42 @@ class Owner:
         snapshot = self._loaded.in_flight.snapshots.get(net_id)
         if token_id is None or snapshot is None:
             return False
-        for view in snapshot.places.values():
+        for key, view in snapshot.places.items():
+            if isinstance(key, Port):
+                continue  # its subnet's ids: read through the subnet
             for index, candidate in enumerate(view.ids):
                 if candidate == token_id:
                     return index in view.eager
         return False
 
-    def _view(self, net: _Net, place) -> _PlaceView:
+    def _view(self, net: _Net, key: PlaceKey) -> _PlaceView:
+        """The place ``net`` names ``key`` as it stands, seen as its owner sees it:
+        a port as a place of its subnet (``_owner_of``)."""
+        place = net.place_nodes[key]
+        owner, own = self._owner_of(net, key)
+        nested = own in owner.nested_places
         return _PlaceView(
-            name=place.name,
-            type_name=net.type_names[place.name],
+            name=own,
+            type_name=owner.type_names[own],
             ids=list(place.token_ids),
             tokens=list(place.tokens),
-            nested=place.name in net.nested_places,
-            prefix=self._path_of(net) if place.name in net.nested_places else (),
+            nested=nested,
+            prefix=self._path_of(owner) if nested else (),
             place=place,
-            filter=net.filter,
-            params=dict(net.graph.params),
+            filter=owner.filter,
+            params=dict(owner.graph.params),
+        )
+
+    def _subnet_entry(self, net: _Net, place: SubnetPlaceNode, views: dict[PlaceKey, _PlaceView]) -> wire.SubnetEntry:
+        """A subnet place's ``subnet`` entry (§12.7). ``count`` is the tokens in the
+        subnet's own places, its ports counted as ``views`` show them, so that a
+        snapshot's count agrees with its ports."""
+        subnet = self._subnet_of(net, place.name)
+        inside = sum(len(node.tokens) for node in subnet.graph.places if isinstance(node, ListPlaceNode) and not node.port)
+        at_ports = sum(views[Port(place.name, port.name)].count for port in place.ports)
+        return wire.SubnetEntry(
+            nested_id=str(subnet.nested_id), path=list(self._path_of(subnet)), template=subnet.graph.template,
+            count=inside + at_ports,
         )
 
     def _capture(
@@ -974,24 +1131,27 @@ class Owner:
         eager: Optional[dict[str, set[int]]] = None,
     ) -> _Snapshot:
         """The marking, transition states and progress of ``net`` as of now. With
-        ``airborne``, the transition about to fire in it, and its ``handover``:
-        the tokens it takes are left out (and the transition states are those of
-        the marking without them), the tokens its mutate edges hand over are
-        rendered at once, and it is shown ``in_flight``. ``eager`` names further
-        tokens (per place, by index) to render at once: those holding a net an
-        airborne body is changing. Progress counts the firings of the net's own
-        transitions (§5.4), under their names: a body that steps an inner net of
-        its own through the library's deep step leaves counts under an
-        ``InnerFiring`` on that net's graph, which are not the net's own."""
+        ``handover``, what a firing about to start will take and hand over: the
+        tokens it takes are left out (and the transition states are those of the
+        marking without them) and the tokens its mutate edges hand over are
+        rendered at once; with ``airborne`` too, the firing is ``net``'s and its
+        transition is shown ``in_flight``, and without, the firing is in a subnet
+        of ``net`` and ``handover`` names that subnet's ports by their pairs.
+        ``eager`` names further tokens (per place, by index) to render at once:
+        those holding a net an airborne body is changing. Progress counts the
+        firings of the net's own transitions (§5.4), under their names: a body
+        that steps an inner net of its own through the library's deep step leaves
+        counts under an ``InnerFiring`` on that net's graph, which are not the
+        net's own."""
         graph = net.graph
         own = {name: count for name, count in graph.fired_counts.items() if isinstance(name, str)}
-        places = {place.name: self._view(net, place) for place in graph.places}
+        places = {key: self._view(net, key) for key in net.place_nodes}
         for place_name, indices in (eager or {}).items():
             view = places[place_name]
             for index in indices:
                 if index < view.count:
                     view.eager[index] = view.entry(index)
-        if airborne is None:
+        if handover is None:
             transitions = self._transition_states(net)
         else:
             for place_name, indices in handover.mutated.items():
@@ -1011,9 +1171,10 @@ class Owner:
                 view.eager = {}
                 view._kept = None
             transitions = self._states_without(net, handover)
-            transitions[airborne.name] = transitions[airborne.name].model_copy(
-                update={"in_flight": True, "fireable": False}
-            )
+            if airborne is not None:
+                transitions[airborne.name] = transitions[airborne.name].model_copy(
+                    update={"in_flight": True, "fireable": False}
+                )
         return _Snapshot(
             marking_version=net.marking_version,
             transitions=transitions,
@@ -1024,6 +1185,10 @@ class Owner:
                 fired_counts=own,
                 last_progress_at=_iso(net.last_progress_at) if net.last_progress_at else None,
             ),
+            subnets={
+                place.name: self._subnet_entry(net, place, places)
+                for place in graph.places if isinstance(place, SubnetPlaceNode)
+            },
         )
 
     def _handed_over(self, net: _Net, transition: FunctionTransitionNode) -> _Handover:
@@ -1031,59 +1196,70 @@ class Owner:
         rules: argument edges in order, each taking the oldest remaining token of
         its place, or every remaining one for a ``list[...]`` argument or a drain
         (possibly none); then the mutate edges, which take nothing and hand over the
-        oldest remaining token (or all of them) where they are."""
-        consumed: list[tuple[str, int]] = []
-        taken: dict[str, int] = {}
-        keyed_taken: dict[str, list[int]] = {}  # per place, the indices a keyed take removes
+        oldest remaining token (or all of them) where they are. Places are keyed
+        as the edges name them, so a port by its ``Port`` pair."""
+        consumed: list[tuple[PlaceKey, int]] = []
+        taken: dict[PlaceKey, int] = {}
+        keyed_taken: dict[PlaceKey, list[int]] = {}  # per place, the indices a keyed take removes
         params = net.graph.params
         for edge in net.incoming.get(transition.name, ()):
-            place = net.place_nodes[edge.place_node_name]
+            key = edge.place_node_name
+            place = net.place_nodes[key]
             ids = place.token_ids
             if isinstance(edge, TakeWhereEdge):
                 index = KeyedEdges.first_kept(edge, place, params)
                 if index is not None:
-                    consumed.append((place.name, ids[index]))
-                    keyed_taken.setdefault(place.name, []).append(index)
+                    consumed.append((key, ids[index]))
+                    keyed_taken.setdefault(key, []).append(index)
                 continue
-            start = taken.get(place.name, 0)
+            start = taken.get(key, 0)
             takes_all = isinstance(edge, DrainEdge) or Topologies.takes_all(transition.function, edge.argument, place)
             end = len(ids) if takes_all else min(start + 1, len(ids))
-            consumed.extend((place.name, token_id) for token_id in ids[start:end])
-            taken[place.name] = max(start, end)
-        mutated: dict[str, set[int]] = {}
+            consumed.extend((key, token_id) for token_id in ids[start:end])
+            taken[key] = max(start, end)
+        mutated: dict[PlaceKey, set[int]] = {}
         for edge in net.graph.mutate_edges:
             if edge.transition_node_name != transition.name:
                 continue
-            place = net.place_nodes[edge.place_node_name]
+            key = edge.place_node_name
+            place = net.place_nodes[key]
             if isinstance(edge, MutateWhereEdge):
                 index = KeyedEdges.first_kept(edge, place, params)
                 if index is not None:
-                    mutated.setdefault(place.name, set()).add(index)
+                    mutated.setdefault(key, set()).add(index)
                 continue
             count = len(place.token_ids)
-            start = taken.get(place.name, 0)
+            start = taken.get(key, 0)
             takes_all = Topologies.takes_all(transition.function, edge.argument, place)
             end = count if takes_all else min(start + 1, count)
-            mutated.setdefault(place.name, set()).update(range(start, end))
+            mutated.setdefault(key, set()).update(range(start, end))
         return _Handover(consumed=consumed, taken=taken, mutated=mutated, keyed_taken=keyed_taken)
 
-    def _held(self, net: _Net, handover: _Handover) -> tuple[set[int], set[tuple[str, int]]]:
-        """The inner nets (at any depth) and the tokens an outer firing takes or
-        holds through mutate edges: read after the landing."""
+    def _held(
+        self, net: _Net, transition: FunctionTransitionNode, handover: _Handover,
+    ) -> tuple[set[int], set[tuple[Optional[int], str, int]]]:
+        """What a firing of ``transition`` in ``net`` holds until it lands, for the
+        reads that wait (§12.3): the tokens it takes or holds through mutate edges,
+        each named by the net whose place holds it, and the inner nets inside
+        them, at any depth; and the subnet of every subnet place one of whose
+        ports the transition has an edge on, any edge (§12.7)."""
         nets: set[int] = set()
-        tokens: set[tuple[str, int]] = set()
-        for place_name, token_id in handover.consumed:
-            tokens.add((place_name, token_id))
-        for place_name, indices in handover.mutated.items():
-            ids = net.place_nodes[place_name].token_ids
-            tokens.update((place_name, ids[index]) for index in indices if index < len(ids))
-        for place_name, token_id in tokens:
-            if place_name not in net.nested_places:
+        tokens: set[tuple[Optional[int], str, int]] = set()
+        pairs: list[tuple[PlaceKey, int]] = list(handover.consumed)
+        for key, indices in handover.mutated.items():
+            ids = net.place_nodes[key].token_ids
+            pairs.extend((key, ids[index]) for index in indices if index < len(ids))
+        for key, token_id in pairs:
+            owner, own = self._owner_of(net, key)
+            tokens.add((owner.nested_id, own, token_id))
+            if key not in net.nested_places:
                 continue
-            place = net.place_nodes[place_name]
+            place = net.place_nodes[key]
             ids = place.token_ids
             if token_id in ids:
                 nets.update(_nets_within(place.tokens[ids.index(token_id)]))
+        for place in _subnets_reached(net, transition.name):
+            nets.add(self._subnet_of(net, place).nested_id)
         return nets, tokens
 
     def _states_without(self, net: _Net, handover: _Handover) -> dict[str, wire.TransitionState]:
@@ -1245,17 +1421,26 @@ class Owner:
             transition=transition.name, consumed=_pairs(shown),
             marking_version=net.marking_version, running=loaded.running,
         )
-        net.visible.difference_update(token_id for _place, token_id in handover.consumed)
+        # What it takes from a port moves the version of the net across the port too.
+        self._cross(net, launched, [key for key, _token_id in handover.consumed])
+        for key, token_id in handover.consumed:
+            owner, _own = self._owner_of(net, key)
+            owner.visible.discard(token_id)
         out.lines.append(self._wrap(net, launched.line()))
         snapshots = {net.nested_id: self._capture(net, airborne=transition, handover=handover)}
-        held_nets: set[int] = set()
-        held_tokens: set[tuple[str, int]] = set()
-        if net.is_outer:
-            held_nets, held_tokens = self._held(net, handover)
-        else:
+        held_nets, held_tokens = self._held(net, transition, handover)
+        if net.parent is not None:
+            # A subnet's firing that takes from or hands over a token of its own
+            # port changes what the net around it reads there: that net is read
+            # from a snapshot of the port as the firing leaves it.
+            lifted = _lifted(net, handover)
+            if lifted is not None:
+                snapshots[net.parent.nested_id] = self._capture(net.parent, handover=lifted)
+        if not net.is_outer:
             # The tokens holding this net, up to the outer net, render it in their labels.
             for ancestor, place_name, index in self._chain(net):
-                snapshots[ancestor.nested_id] = self._capture(ancestor, eager={place_name: {index}})
+                if ancestor.nested_id not in snapshots:
+                    snapshots[ancestor.nested_id] = self._capture(ancestor, eager={place_name: {index}})
         loaded.in_flight = _InFlight(
             net.nested_id, transition.name, now, step_id, snapshots, handover.consumed, held_nets, held_tokens,
             press_id=press_id,
@@ -1263,21 +1448,24 @@ class Owner:
         loaded.idle = False
         out.launch = Launch(transition.name, _fire(net, transition, self.generation))
 
-    def _shown(self, net: _Net, pairs: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    def _shown(self, net: _Net, pairs: list[tuple[PlaceKey, int]]) -> list[tuple[PlaceKey, int]]:
         """The ``(place, id)`` pairs of live tokens the connection's filter keeps
-        (all of them without a filter)."""
-        if net.filter is None:
-            return pairs
+        (all of them without a filter), a port's by its subnet's filter."""
         kept = []
-        for place_name, token_id in pairs:
-            token = self._live(net, place_name, token_id)
-            if token is not _MISSING and net.keeps(place_name, token):
-                kept.append((place_name, token_id))
+        for key, token_id in pairs:
+            owner, _own = self._owner_of(net, key)
+            if owner.filter is None:
+                kept.append((key, token_id))
+                continue
+            token = self._live(net, key, token_id)
+            if token is not _MISSING and self._keeps(net, key, token):
+                kept.append((key, token_id))
         return kept
 
     def _chain(self, net: _Net) -> list[tuple[_Net, str, int]]:
         """From the outer net down to the parent of ``net``: each ancestor with
-        the place and index of the token that holds the next level."""
+        the place and index of the token that holds the next level. A step into
+        a subnet has no token, so it adds nothing and the chain goes on below it."""
         loaded = self._loaded
         found = NestedNets.find(loaded.outer.graph, net.nested_id)
         steps = Paths.of_steps(found[0]) if found is not None else net.last_path
@@ -1285,6 +1473,11 @@ class Owner:
         graph = loaded.outer.graph
         for level, step in enumerate(steps):
             ancestor = self._net_for(graph, steps[:level])
+            if step.token is None:
+                graph = graph.subnet(step.place)
+                if graph is None:
+                    break
+                continue
             place = ancestor.place_nodes.get(step.place)
             token_id = _token_id(step.token) if step.token is not None else None
             if place is None or token_id is None:
@@ -1314,7 +1507,7 @@ class Owner:
         self._know_new()
         fired, failed, path = self._firing_of(events, flight)
         if fired is not None or failed is not None:
-            announced, landed = _pairs(flight.consumed), _pairs((fired or failed).consumed)
+            announced, landed = list(flight.consumed), list((fired or failed).consumed)
             if announced != landed:
                 print(
                     f"petritype runner: {flight.name} was launched as consuming {announced} "
@@ -1435,9 +1628,10 @@ class Owner:
             f"{type(landing.error).__name__}: {landing.error}" if landing.error is not None
             else f"{flight.name} was no longer fireable when its firing ran"
         )
-        self._emit(net, self._notification(net, core_events.Failed(
+        failed = core_events.Failed(
             transition=flight.name, consumed=tuple(flight.consumed), restored=restored, error=error,
-        )), out)
+        )
+        self._emit(net, self._notification(net, failed), out, _changed_by(failed))
         if not restored:
             self._emit(net, wire.Reloaded(
                 generation=self.generation if net.is_outer else 1, reason="resync",
@@ -1478,28 +1672,32 @@ class Owner:
     # --- input ---
 
     def _inject(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
+        """``inject {place, port?, token}``: a port by its pair on the net around
+        its subnet, which tells the change, or by its own name on the subnet,
+        which does (§12.7); the port's subnet mints the id either way."""
         place = _string(params, "place")
+        port = _optional_string(params, "port")
         if "token" not in params:
             raise ProtocolError(ErrorCode.INVALID_PARAMS, 'inject needs a "token"')
         net = self._target(params)
-        node = net.place_nodes.get(place)
-        if node is None:
-            raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {place!r}")
-        if not net.serializable[place]:
+        key = self._place_key(net, place, port)
+        node = net.place_nodes[key]
+        if not net.serializable[key]:
             raise ProtocolError(
-                ErrorCode.NOT_SERIALIZABLE, f"place {place!r} ({net.type_names[place]}) has no JSON form",
+                ErrorCode.NOT_SERIALIZABLE,
+                f"{'' if isinstance(key, Port) else 'place '}{Places.words(key)} ({net.type_names[key]}) has no JSON form",
             )
         try:
             token = Serializable.decode(node.type, params["token"])
         except ValueError as error:
-            raise ProtocolError(ErrorCode.INVALID_TOKEN, f"not a {net.type_names[place]}: {error}") from error
+            raise ProtocolError(ErrorCode.INVALID_TOKEN, f"not a {net.type_names[key]}: {error}") from error
         try:
-            self._apply(net, Extend(place=place, tokens=[token]))
+            self._apply(net, Extend(place=key, tokens=[token]))
         except ValueError as error:  # the strict context's own type check
             raise ProtocolError(ErrorCode.INVALID_TOKEN, str(error)) from error
         events = self._flush(now, out)
         added = next((
-            e for e in _events_in(events, net) if isinstance(e, core_events.Added) and e.place == place
+            e for e in _events_in(events, net) if isinstance(e, core_events.Added) and e.place == key
         ), None)
         if added is None:
             raise ProtocolError(ErrorCode.INTERNAL, "the token was added without an event")
@@ -1692,11 +1890,19 @@ class Owner:
         ``Nested``) and write one notification per event, each state
         notification raising its net's ``marking_version`` by one; then
         ``fireable`` for the outer net and for each inner net touched, if
-        anything happened and the set changed. Returns the events."""
+        anything happened and the set changed. A change of a port place raises
+        the version of the net across the port too (``_cross``), and touches it,
+        so that its ``fireable`` is compared as well; a net's ``fireable`` comes
+        before those of the nets inside it (§12.4, §12.7). Returns the events."""
         loaded = self._loaded
         outer = loaded.outer
         events = outer.graph.drain_events()
         touched: list[_Net] = []
+
+        def touch(net: _Net) -> None:
+            if net is not outer and net not in touched:
+                touched.append(net)
+
         for event in events:
             if isinstance(event, core_events.Nested):
                 inner = self._net_by_id(event.nested_id)
@@ -1706,9 +1912,12 @@ class Owner:
                     inner.last_path = path
                     if notification.moves_version:
                         inner.marking_version += 1
+                        for across in self._cross(inner, notification, _changed_by(event.event)):
+                            touch(across)
                     notification.marking_version = inner.marking_version
-                    if inner not in touched:
-                        touched.append(inner)
+                    touch(inner)
+                # The wrapper carries the loaded net's version, moved when the event
+                # changed one of its port places.
                 out.lines.append(wire.NestedEvent(
                     path=list(path), nested_id=str(event.nested_id), event=notification.line(),
                     marking_version=outer.marking_version, running=loaded.running,
@@ -1718,8 +1927,12 @@ class Owner:
                 if notification.moves_version:
                     outer.marking_version += 1
                     notification.marking_version = outer.marking_version
+                    for across in self._cross(outer, notification, _changed_by(event)):
+                        touch(across)
                 out.lines.append(notification.line())
         if events:
+            # Shallower nets first, so a net's ``fireable`` precedes those inside it.
+            touched.sort(key=lambda net: len(self._path_of(net)))
             for net in (outer, *touched):
                 if net.filter is not None:
                     self._sync_visible(net, out)
@@ -1727,6 +1940,38 @@ class Owner:
             for inner in touched:
                 self._report_fireable(inner, out)
         return events
+
+    def _cross(self, net: _Net, notification: wire.Notification, changed) -> list[_Net]:
+        """A state notification of ``net`` that changed the places ``changed``
+        (keyed as ``net`` names them), whose own version the caller has raised: a
+        port place is in the markings of two nets, so for each port it changed the
+        version of the net across the port rises by one too, and the notification
+        carries it (§12.7). A port of one of ``net``'s subnet places, named by its
+        pair, moves that subnet, given as ``subnet_marking_versions``; a port place
+        of ``net``'s own, when ``net`` is a subnet, moves the net around it, given
+        as ``outer_marking_version``. Each net moves once per notification, however
+        many of its tokens changed. Returns the nets moved, the net around first."""
+        across: list[_Net] = []
+        versions: dict[str, int] = {}
+        outer_version: Optional[int] = None
+        for key in changed:
+            if isinstance(key, Port):
+                if key.place not in versions:
+                    subnet = self._subnet_of(net, key.place)
+                    subnet.marking_version += 1
+                    versions[key.place] = subnet.marking_version
+                    across.append(subnet)
+            elif outer_version is None and net.parent is not None:
+                node = net.place_nodes.get(key)
+                if node is not None and node.port:
+                    net.parent.marking_version += 1
+                    outer_version = net.parent.marking_version
+                    across.insert(0, net.parent)
+        if versions:
+            notification.subnet_marking_versions = versions
+        if outer_version is not None:
+            notification.outer_marking_version = outer_version
+        return across
 
     def _report_fireable(self, net: _Net, out: Outgoing) -> None:
         fireable = self._fireable_names(net)
@@ -1736,12 +1981,14 @@ class Owner:
                 transitions=fireable, marking_version=net.marking_version, running=self._loaded.running,
             ), out)
 
-    def _emit(self, net: _Net, notification: wire.Notification, out: Outgoing) -> None:
+    def _emit(self, net: _Net, notification: wire.Notification, out: Outgoing, changed=()) -> None:
         """Write a notification of ``net``, raising its version if the
-        notification moves one, wrapped in ``nested`` for an inner net."""
+        notification moves one, and the versions across the ports among the
+        places ``changed`` (``_cross``), wrapped in ``nested`` for an inner net."""
         if notification.moves_version:
             net.marking_version += 1
             notification.marking_version = net.marking_version
+            self._cross(net, notification, changed)
         out.lines.append(self._wrap(net, notification.line()))
 
     def _wrap(self, net: _Net, line: dict) -> dict:
@@ -1757,14 +2004,23 @@ class Owner:
     def _notification(self, net: Optional[_Net], event) -> wire.Notification:
         """One event as its notification, stamped with the net's current version
         (the caller raises it for a state notification). ``net`` is ``None`` for
-        an inner net that no longer exists, whose tokens cannot be rendered."""
+        an inner net that no longer exists, whose tokens cannot be rendered. A
+        place the event names by a ``Port`` pair is told with ``port`` beside
+        ``place``, and a port's token is projected by its subnet's filter and
+        counted in its subnet's visible set (§12.7)."""
         version = net.marking_version if net is not None else 0
         stamp = {"marking_version": version, "running": self._loaded.running}
+
+        def owner(key: PlaceKey) -> _Net:
+            return self._owner_of(net, key)[0]
+
         if isinstance(event, core_events.Fired):
             # The second piece: ``launched`` already named what it consumed.
             produced = event.produced if net is None else self._shown(net, list(event.produced))
-            if net is not None and net.filter is not None:
-                net.visible.update(token_id for _place, token_id in produced)
+            if net is not None:
+                for key, token_id in produced:
+                    if owner(key).filter is not None:
+                        owner(key).visible.add(token_id)
             return wire.Distributed(
                 transition=event.transition,
                 produced=[self._produced(net, place, token_id) for place, token_id in produced],
@@ -1773,46 +2029,49 @@ class Owner:
             )
         if isinstance(event, core_events.Failed):
             consumed = list(event.consumed)
-            if net is not None and net.filter is not None:
+            if net is not None:
                 # Projected as its ``launched`` was: the tokens it showed (§13.4).
-                consumed = [(place, token_id) for place, token_id in consumed
-                            if (place, token_id) in net.launched_shown]
+                consumed = [(key, token_id) for key, token_id in consumed
+                            if owner(key).filter is None or (key, token_id) in net.launched_shown]
                 if event.restored:
                     # Back where they were, ids and all: shown again, and no ``added`` for them.
-                    net.visible.update(token_id for _place, token_id in consumed)
+                    for key, token_id in consumed:
+                        if owner(key).filter is not None:
+                            owner(key).visible.add(token_id)
             return wire.Failed(
                 transition=event.transition, error=event.error, restored=event.restored,
                 consumed=_pairs(consumed), **stamp,
             )
         if isinstance(event, core_events.Added):
             token = self._live(net, event.place, event.token_id)
-            if net is not None and net.filter is not None:
-                if token is _MISSING or not net.keeps(event.place, token):
-                    return wire.Hidden(kind="added", place=event.place, **stamp)
-                net.visible.add(event.token_id)
+            if net is not None and owner(event.place).filter is not None:
+                if token is _MISSING or not self._keeps(net, event.place, token):
+                    return wire.Hidden(kind="added", **_where(event.place), **stamp)
+                owner(event.place).visible.add(event.token_id)
             return self._added(net, event.place, event.token_id, token, stamp)
         if isinstance(event, core_events.Removed):
-            if net is not None and net.filter is not None:
-                if event.token_id not in net.visible:
-                    return wire.Hidden(kind="removed", place=event.place, **stamp)
-                net.visible.discard(event.token_id)
-            return wire.Removed(place=event.place, id=str(event.token_id), **stamp)
+            if net is not None and owner(event.place).filter is not None:
+                if event.token_id not in owner(event.place).visible:
+                    return wire.Hidden(kind="removed", **_where(event.place), **stamp)
+                owner(event.place).visible.discard(event.token_id)
+            return wire.Removed(**_where(event.place), id=str(event.token_id), **stamp)
         if isinstance(event, core_events.Mutated):
             token = self._live(net, event.place, event.token_id)
-            if net is not None and net.filter is not None:
-                kept = token is not _MISSING and net.keeps(event.place, token)
-                was_shown = event.token_id in net.visible
+            if net is not None and owner(event.place).filter is not None:
+                visible = owner(event.place).visible
+                kept = token is not _MISSING and self._keeps(net, event.place, token)
+                was_shown = event.token_id in visible
                 if kept and not was_shown:
-                    net.visible.add(event.token_id)
+                    visible.add(event.token_id)
                     return self._added(net, event.place, event.token_id, token, stamp)
                 if not kept and was_shown:
-                    net.visible.discard(event.token_id)
-                    return wire.Removed(place=event.place, id=str(event.token_id), **stamp)
+                    visible.discard(event.token_id)
+                    return wire.Removed(**_where(event.place), id=str(event.token_id), **stamp)
                 if not kept:
-                    return wire.Hidden(kind="mutated", place=event.place, **stamp)
+                    return wire.Hidden(kind="mutated", **_where(event.place), **stamp)
             label = Tokens.entry(event.token_id, token, "").label if token is not _MISSING else None
             keys = self._keys(net, event.place, token)
-            return wire.Mutated(place=event.place, id=str(event.token_id), label=label, keys=keys, **stamp)
+            return wire.Mutated(**_where(event.place), id=str(event.token_id), label=label, keys=keys, **stamp)
         if isinstance(event, core_events.Toggled):
             return wire.Toggled(transition=event.transition, enabled=event.enabled, **stamp)
         if isinstance(event, core_events.ParamChanged):
@@ -1822,28 +2081,28 @@ class Owner:
         generation = self.generation if net is None or net.is_outer else 1
         return wire.Reloaded(generation=generation, reason="resync", **stamp)
 
-    def _added(self, net: Optional[_Net], place: str, token_id: int, token: Any, stamp: dict) -> wire.Added:
+    def _added(self, net: Optional[_Net], place: PlaceKey, token_id: int, token: Any, stamp: dict) -> wire.Added:
         entry = Tokens.entry(token_id, token, "") if token is not _MISSING else None
         return wire.Added(
-            place=place, id=str(token_id),
+            **_where(place), id=str(token_id),
             label=entry.label if entry else "", color=entry.color if entry else None,
             keys=self._keys(net, place, token), **stamp,
         )
 
-    def _keys(self, net: Optional[_Net], place: str, token: Any) -> Optional[dict]:
+    def _keys(self, net: Optional[_Net], place: PlaceKey, token: Any) -> Optional[dict]:
         """A live token's keys when its place declares some."""
         if net is None or token is _MISSING:
             return None
         node = net.place_nodes.get(place)
         return Tokens.keys(node, token) if node is not None else None
 
-    def _produced(self, net: Optional[_Net], place: str, token_id: int) -> list[Any]:
+    def _produced(self, net: Optional[_Net], place: PlaceKey, token_id: int) -> list[Any]:
         token = self._live(net, place, token_id)
         if token is _MISSING:
-            return [place, str(token_id), ""]
+            return [Places.ref(place), str(token_id), ""]
         return Tokens.produced(place, token_id, token, keys=self._keys(net, place, token))
 
-    def _live(self, net: Optional[_Net], place: str, token_id: int) -> Any:
+    def _live(self, net: Optional[_Net], place: PlaceKey, token_id: int) -> Any:
         node = net.place_nodes.get(place) if net is not None else None
         if node is None:
             return _MISSING
@@ -1901,14 +2160,17 @@ def _descend(graph: ExecutableGraph, step: wire.PathStep) -> ExecutableGraph:
     """The net one step of a path below ``graph`` (§12.1), or ``LookupError``
     saying why the step names none. A step of the form ``{place, token, net}``
     names the net ``net`` in the token ``token`` of the nested place ``place``; a
-    step of the form ``{place}`` names the subnet of a subnet place, which this
-    runner does not have yet, so such a step names no net. Names are compared
-    exactly as given."""
-    if step.token is None:
-        raise LookupError(f"no subnet place named {step.place!r}")
+    step of the form ``{place}`` names the subnet of the subnet place ``place``.
+    Names are compared exactly as given."""
     place = graph.place_named(step.place)
     if place is None:
         raise LookupError(f"no place named {step.place!r}")
+    if step.token is None:
+        if not isinstance(place, SubnetPlaceNode):
+            raise LookupError(f"place {step.place!r} is not a subnet place")
+        return place.graph
+    if isinstance(place, SubnetPlaceNode):
+        raise LookupError(f"place {step.place!r} is a subnet place, whose step names the place alone")
     if not place.nested:
         raise LookupError(f"place {step.place!r} holds no nets")
     TokenIds.resync(graph)
@@ -1922,25 +2184,70 @@ def _descend(graph: ExecutableGraph, step: wire.PathStep) -> ExecutableGraph:
     return nets[step.net]
 
 
-def _subnet_place_within(graph: ExecutableGraph) -> Optional[str]:
-    """The name of the first subnet place in ``graph`` or in a net inside its
-    tokens, at any depth, or ``None``."""
-    for place in graph.places:
-        if isinstance(place, SubnetPlaceNode):
-            return place.name
-    for _step, inner in NestedNets.walk(graph):
-        found = _subnet_place_within(inner)
-        if found is not None:
-            return found
-    return None
-
-
 def _find(snapshot: _Snapshot, token_id: int) -> Optional[tuple[str, Any]]:
-    for view in snapshot.places.values():
+    """The live token with this id in a snapshot's own places; a port's tokens
+    carry their subnet's ids and are found through the subnet."""
+    for key, view in snapshot.places.items():
+        if isinstance(key, Port):
+            continue
         for index, candidate in enumerate(view.ids):
             if candidate == token_id and index < len(view.tokens):
                 return view.name, view.tokens[index]
     return None
+
+
+def _where(key: PlaceKey) -> dict:
+    """The fields that name a place in an object (§7.1, §12.7): ``place``, and
+    ``port`` beside it for a port of one of the net's subnet places."""
+    place, port = Places.split(key)
+    return {"place": place} if port is None else {"place": place, "port": port}
+
+
+def _changed_by(event) -> tuple[PlaceKey, ...]:
+    """The places a state notification made of ``event`` changes, keyed as the
+    event's net names them: a ``Fired``, told as ``distributed``, the places it
+    produced into (its ``launched`` told what it took); a ``Failed`` the places it
+    put back, when it restored; an ``Added``, ``Removed`` or ``Mutated`` its place."""
+    if isinstance(event, core_events.Fired):
+        return tuple(place for place, _token_id in event.produced)
+    if isinstance(event, core_events.Failed):
+        return tuple(place for place, _token_id in event.consumed) if event.restored else ()
+    if isinstance(event, (core_events.Added, core_events.Removed, core_events.Mutated)):
+        return (event.place,)
+    return ()
+
+
+def _subnets_reached(net: _Net, transition: str) -> list[str]:
+    """The subnet places one of whose ports ``transition`` of ``net`` has an edge
+    on, of any kind, in the order its edges name them."""
+    places: list[str] = []
+    graph = net.graph
+    for edge in (*graph.argument_edges, *graph.return_edges, *graph.snapshot_edges, *graph.mutate_edges):
+        key = edge.place_node_name
+        if edge.transition_node_name == transition and isinstance(key, Port) and key.place not in places:
+            places.append(key.place)
+    return places
+
+
+def _lifted(net: _Net, handover: _Handover) -> Optional[_Handover]:
+    """A subnet's handover as the net around it names the same tokens: what it
+    takes from and hands over in the subnet's port places, each by its pair;
+    ``None`` when it takes and hands over nothing there."""
+    place = net.subnet_place
+
+    def at_port(key: PlaceKey) -> bool:
+        node = net.place_nodes.get(key)
+        return isinstance(key, str) and node is not None and node.port
+
+    lifted = _Handover(
+        consumed=[(Port(place, key), token_id) for key, token_id in handover.consumed if at_port(key)],
+        taken={Port(place, key): count for key, count in handover.taken.items() if at_port(key) and count},
+        mutated={Port(place, key): indices for key, indices in handover.mutated.items() if at_port(key) and indices},
+        keyed_taken={Port(place, key): indices for key, indices in handover.keyed_taken.items() if at_port(key)},
+    )
+    if not (lifted.consumed or lifted.taken or lifted.mutated or lifted.keyed_taken):
+        return None
+    return lifted
 
 
 def _events_in(events: list, net: _Net):
@@ -1959,11 +2266,20 @@ def _nets_within(token: Any) -> set[int]:
     except TypeError:
         return ids
     for inner in nets.values():
-        ids.add(inner.net_id)
-        for place in inner.places:
-            if place.nested:
-                for held in place.tokens:
-                    ids |= _nets_within(held)
+        ids |= _nets_of(inner)
+    return ids
+
+
+def _nets_of(graph: ExecutableGraph) -> set[int]:
+    """The id of ``graph`` and of every net inside it, at any depth: the nets of
+    its tokens and its subnets."""
+    ids = {graph.net_id}
+    for place in graph.places:
+        if isinstance(place, SubnetPlaceNode):
+            ids |= _nets_of(place.graph)
+        elif place.nested:
+            for held in place.tokens:
+                ids |= _nets_within(held)
     return ids
 
 
@@ -1974,8 +2290,10 @@ def _repr(token: Any) -> str:
         return f"<{type(token).__name__}: repr raised {type(error).__name__}>"
 
 
-def _pairs(pairs) -> list[list[str]]:
-    return [[place, str(token_id)] for place, token_id in pairs]
+def _pairs(pairs) -> list[list[Any]]:
+    """``(place, id)`` pairs as the wire names them by position, a port by
+    ``{"place", "port"}`` (§7.1, §8, §12.7)."""
+    return [[Places.ref(place), str(token_id)] for place, token_id in pairs]
 
 
 def _iso(moment: datetime) -> str:
@@ -2002,6 +2320,14 @@ def _string(params: dict, key: str) -> str:
     if not isinstance(value, str):
         raise ProtocolError(ErrorCode.INVALID_PARAMS, f"needs a string {key!r}")
     return value
+
+
+def _optional_string(params: dict, key: str) -> Optional[str]:
+    """A string field a request may leave out (``None`` then); anything else is
+    ``invalid_params``."""
+    if key not in params:
+        return None
+    return _string(params, key)
 
 
 def _object(params: dict, key: str) -> dict:

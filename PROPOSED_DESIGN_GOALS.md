@@ -628,8 +628,8 @@ around it, beside the nets tokens carry.
 Example: `examples/subnet_places/levels.py`, a world of two levels built from one template
 `Level`, heroes entering through `Lobby` and leaving through `Exit Hall`, with its notebook
 `levels_journey.py` (21 firings, pinned by `tests/test_notebooks.py`). Tests:
-`tests/test_subnet_places.py`. The protocol runner refuses to load a net with a subnet place
-until it serves them (PROTOCOL.md §12.7).
+`tests/test_subnet_places.py`. The protocol runner serves a net with subnet places since the
+same day (PROTOCOL.md §12.7, `DESIGN_RUNNER.md`), the example as `levels-world`.
 
 ---
 

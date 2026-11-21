@@ -20,7 +20,11 @@ the same to both:
 - A ``launched`` and the next ``distributed`` of the same transition are folded
   into one ``fired {transition, consumed, produced, duration_ms}`` stamped with
   the ``distributed``'s ``marking_version`` and ``running``, standing where the
-  ``distributed`` stood, before comparing. Both runners split every firing (the
+  ``distributed`` stood, before comparing; the versions of the nets across a
+  port (PROTOCOL.md §12.7) come from both pieces, ``subnet_marking_versions``
+  holding the subnet places either names, the ``distributed``'s value for one
+  both name, and ``outer_marking_version`` the ``distributed``'s, else the
+  ``launched``'s. Both runners split every firing (the
   Python one since 2026-10-04); the fold is what lets a transcript read the same
   for any runtime, one-piece ones included. Only the firing's own lines may stand
   between the two pieces (``BETWEEN_PIECES``), and they keep their places before
@@ -88,14 +92,15 @@ NET_MODULES = {
     "shop": "tests.protocol_nets.shop",
     "traffic-light": "tests.protocol_nets.traffic_light",
     "stepping-rules": "tests.protocol_nets.stepping_rules",
+    "levels": "tests.protocol_nets.levels",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
 # the nested-net one, whose example module and templates must import in the process; the
-# two over the edges that accept an empty place, whose example modules must too; and the
-# stepping rules, whose net runs and whose templates must import.
+# two over the edges that accept an empty place, whose example modules must too; the
+# stepping rules, whose net runs and whose templates must import; and the subnet places.
 OVER_PIPES = (
     "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
-    "10_stepping_rules.json",
+    "09_subnet_places.json", "10_stepping_rules.json",
 )
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
@@ -211,14 +216,25 @@ def substitute(value, bindings: dict, where: str):
 
 
 def _fired(launched: dict, distributed: dict) -> dict:
-    return {"method": "fired", "params": {
+    """The two pieces of a firing as one (PROTOCOL.md §11): the versions of the nets
+    across a port from both pieces, each present when a piece has it (§12.7)."""
+    params = {
         "transition": distributed.get("transition"),
         "consumed": launched.get("consumed"),
         "produced": distributed.get("produced"),
         "duration_ms": distributed.get("duration_ms"),
-        "marking_version": distributed.get("marking_version"),
-        "running": distributed.get("running"),
-    }}
+    }
+    if "subnet_marking_versions" in launched or "subnet_marking_versions" in distributed:
+        params["subnet_marking_versions"] = {
+            **launched.get("subnet_marking_versions", {}), **distributed.get("subnet_marking_versions", {}),
+        }
+    if "outer_marking_version" in distributed:
+        params["outer_marking_version"] = distributed["outer_marking_version"]
+    elif "outer_marking_version" in launched:
+        params["outer_marking_version"] = launched["outer_marking_version"]
+    params["marking_version"] = distributed.get("marking_version")
+    params["running"] = distributed.get("running")
+    return {"method": "fired", "params": params}
 
 
 def _same_inner_net(a: dict, b: dict) -> bool:
@@ -388,6 +404,7 @@ async def test_transcript_holds(path: Path):
 # Keys whose value is the runtime's own and so must be masked in a shared transcript.
 MASKED_KEYS = {
     "marking_version": NUMBER_MASKS,
+    "outer_marking_version": NUMBER_MASKS,
     "duration_ms": NUMBER_MASKS,
     "type_name": STRING_MASKS,
     "label": STRING_MASKS,
@@ -437,6 +454,10 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
                 continue  # what the net declares (§5.1), labels included: the same in both
             if key == "path":
                 problems.extend(_unsafe_path(item, here))
+            elif key == "subnet_marking_versions":
+                # Subnet place names, the net's own, each to a version, the runtime's (§12.7).
+                if not isinstance(item, dict) or any(version not in NUMBER_MASKS for version in item.values()):
+                    problems.append(f"{here}: every version in it must be one of {sorted(NUMBER_MASKS)}")
             elif key == "color":
                 if not _hex(item):
                     problems.append(f"{here}: a shared transcript carries a colour only as #rrggbb")
@@ -642,6 +663,72 @@ def test_the_recorder_masks_a_path_step_by_step_and_keeps_the_names_it_re_record
                                                          "running": False}},
                         old={"method": "removed", "params": {"place": "Receiving", "id": "<id>"}})
     assert plain["params"]["id"] == "<id>", "and so is a plain mask"
+
+
+def test_the_fold_carries_the_versions_across_a_port_from_both_pieces():
+    """§11, §12.7: ``subnet_marking_versions`` holds the subnet places either piece
+    names, the ``distributed``'s value for one both name; ``outer_marking_version``
+    is the ``distributed``'s, else the ``launched``'s; each only when a piece has it."""
+    lobby, hall = {"place": "Level 1", "port": "Lobby"}, {"place": "Level 1", "port": "Exit Hall"}
+    launched = {"method": "launched", "params": {"transition": "Climb", "consumed": [[hall, "4"]],
+                                                 "subnet_marking_versions": {"Level 1": 8, "Level 2": 3},
+                                                 "outer_marking_version": 20, "marking_version": 5, "running": False}}
+    distributed = {"method": "distributed", "params": {"transition": "Climb", "produced": [[lobby, "1", "x"]],
+                                                       "duration_ms": 0.1, "subnet_marking_versions": {"Level 2": 4},
+                                                       "marking_version": 6, "running": False}}
+    [fired] = fold([launched, distributed])
+    assert fired["params"]["subnet_marking_versions"] == {"Level 1": 8, "Level 2": 4}
+    assert fired["params"]["outer_marking_version"] == 20
+    assert list(fired["params"])[-2:] == ["marking_version", "running"]
+    distributed["params"]["outer_marking_version"] = 21
+    assert fold([launched, distributed])[0]["params"]["outer_marking_version"] == 21
+    plain = fold([{"method": "launched", "params": {"transition": "T", "consumed": [], "marking_version": 1,
+                                                    "running": False}},
+                  {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 0.1,
+                                                       "marking_version": 2, "running": False}}])
+    assert set(plain[0]["params"]) == {"transition", "consumed", "produced", "duration_ms", "marking_version", "running"}
+
+
+def test_a_shared_transcript_masks_the_versions_across_a_port():
+    masked = {"subnet_marking_versions": {"Level 1": "<version>"}, "outer_marking_version": "<version>"}
+    assert not _unsafe(masked, "x")
+    assert _unsafe({"subnet_marking_versions": {"Level 1": 8}}, "x")
+    assert _unsafe({"outer_marking_version": 8}, "x")
+
+
+def test_the_recorder_names_a_ports_tokens_in_their_subnet():
+    """A port's ids are its subnet's (§12.7): the net around it names a token there
+    by the pair, and the recorder names that token in the subnet, so the same token
+    has one capture in both views and a token of the outer net with the same id
+    has another; a subnet's nested id is named after its subnet place."""
+    from tests.record_transcript import Masker
+
+    masker = Masker()
+    state = masker.line({"id": "3", "result": {"marking": {"places": {
+        "Door": {"count": 1, "tokens": [{"id": "1", "label": '{"name": "Ada"}'}]},
+        "Level 1": {"subnet": {"nested_id": "7", "path": [{"place": "Level 1"}], "count": 1},
+                    "ports": {"Lobby": {"count": 1, "tokens": [{"id": "1", "label": '{"name": "Bo"}'}]}}},
+    }}}})
+    places = state["result"]["marking"]["places"]
+    assert places["Door"]["tokens"][0]["id"] == "<id:ada>"
+    assert places["Level 1"]["subnet"]["nested_id"] == "<id:level_1>"
+    assert places["Level 1"]["ports"]["Lobby"]["tokens"][0]["id"] == "<id:level_1_bo>"
+    told = masker.line({"method": "launched", "params": {
+        "transition": "Climb", "consumed": [[{"place": "Level 1", "port": "Lobby"}, "1"]],
+        "subnet_marking_versions": {"Level 1": 3}, "marking_version": 4, "running": False}})
+    assert told["params"]["consumed"] == [[{"place": "Level 1", "port": "Lobby"}, "<id:level_1_bo>"]]
+    assert told["params"]["subnet_marking_versions"] == {"Level 1": "<version>"}
+    added = masker.line({"method": "added", "params": {"place": "Level 1", "port": "Lobby", "id": "2",
+                                                       "label": '{"name": "Cy"}', "marking_version": 5,
+                                                       "running": False}})
+    assert added["params"]["id"] == "<id:level_1_cy>"
+    inside = masker.line({"method": "nested", "params": {
+        "path": [{"place": "Level 1"}], "nested_id": "7",
+        "event": {"method": "added", "params": {"place": "Lobby", "id": "2", "label": "x", "outer_marking_version": 6,
+                                                "marking_version": 3, "running": False}},
+        "marking_version": 6, "running": False}})
+    assert inside["params"]["event"]["params"]["id"] == "<id:level_1_cy>", "the same token, told by the subnet"
+    assert inside["params"]["event"]["params"]["outer_marking_version"] == "<version>"
 
 
 def test_the_fold():

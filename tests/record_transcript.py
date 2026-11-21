@@ -27,10 +27,16 @@ the bus's cabin, ``bus_ada_seats``, ``ada_arrived``; ``bus``, ``bus_in_transit``
 ``bus_central``); a token of an inner net is named after the vehicle, or
 whatever token, holding it. The first occurrence binds; later ones reuse. A
 nested id is a capture named after its holder and its name there
-(``bus_cabin``). A path is kept as the list of steps it is, its place and net
+(``bus_cabin``), and a subnet's after its subnet place (``level_1``, PROTOCOL.md
+§12.7). A port place's tokens carry their subnet's ids, so a token the net around
+the subnet names by ``port`` beside ``place``, or by ``{"place", "port"}`` in a
+``consumed`` or ``produced`` entry, is named in the subnet, where its id was
+minted (``level_1_ada``): the same token has the same capture in both views. A
+path is kept as the list of steps it is, its place and net
 names as they stand and each step's token id the capture of that token, or
 ``"<id>"`` where the token has not been named yet (a path is no place to name
-one: the token is named where its label is seen). Every ``marking_version`` is
+one: the token is named where its label is seen). Every ``marking_version`` and
+``outer_marking_version``, and every version in ``subnet_marking_versions``, is
 ``"<version>"``; every ``label``, ``type_name``, ``message``, ``runtime`` and
 ``runtime_version`` ``"<label>"``; every ``duration_ms`` ``"<ms>"``; every time
 ``"<time>"``; every ``detail`` ``"<any>"``; ``topology.edges`` is
@@ -84,6 +90,20 @@ def slug(text: str) -> str:
     ``"Platform@Depot"`` to ``"platform_depot"``."""
     words = re.sub(r"[^0-9a-z]+", "_", text.lower()).strip("_")
     return re.sub(r"_\d+$", "", words)[:32] or "token"
+
+
+def place_slug(text: str) -> str:
+    """A place's name as a capture name, its number kept: ``"Level 1"`` to
+    ``"level_1"``, so that two subnet places of one template stay apart."""
+    return re.sub(r"[^0-9a-z]+", "_", text.lower()).strip("_")[:32] or "net"
+
+
+def _port(value) -> tuple[str, str] | None:
+    """``(place, port)`` when ``value`` names a port place by its pair: an object
+    with a string ``place`` and a string ``port`` (§12.7)."""
+    if isinstance(value, dict) and isinstance(value.get("place"), str) and isinstance(value.get("port"), str):
+        return value["place"], value["port"]
+    return None
 
 
 def readable(label) -> str | None:
@@ -141,6 +161,7 @@ class Masker:
         self.nets: dict[str, str] = {}                 # nested id -> name
         self.owners: dict[str, str] = {}               # nested id -> stem of the token holding it
         self.reached: dict[str, str] = {}              # a path, as JSON -> the nested id of the net it names
+        self.paths: dict[str, list] = {}               # nested id -> the path it was seen at
 
     def _new_name(self, base: str, place: str | None) -> str:
         candidates = [base]
@@ -178,6 +199,11 @@ class Masker:
         if old == "<id>":
             return "<id>"
         if nested_id not in self.nets:
+            last = path[-1] if isinstance(path, list) and path else None
+            if holder is None and isinstance(last, dict) and isinstance(last.get("place"), str) \
+                    and "token" not in last:
+                # A subnet, named after its subnet place (§12.7).
+                holder, net_name = place_slug(last["place"]), None
             if holder is None and isinstance(path, list) and len(path) == 1 and isinstance(path[0], dict) \
                     and isinstance(path[0].get("token"), str):
                 holder = self.stems.get(("", path[0]["token"]))
@@ -217,6 +243,19 @@ class Masker:
         self.bindings[name] = token_id
         return f"<id:{name}>"
 
+    def seen_at(self, nested_id: str, path) -> None:
+        """A net with this nested id stands at ``path`` (as the runtime spelt it)."""
+        if isinstance(path, list):
+            self.reached[json.dumps(path, sort_keys=True)] = nested_id
+            self.paths[nested_id] = path
+
+    def subnet(self, net: str, place: str) -> str:
+        """The nested id of the subnet that ``net``'s subnet place ``place`` holds,
+        as a path seen so far names it; a stand-in of its own until one has, so
+        that its tokens are still named apart from ``net``'s."""
+        prefix = self.paths.get(net, []) if net else []
+        return self.reached.get(json.dumps([*prefix, {"place": place}], sort_keys=True), f"{net}>{place}")
+
     # --- walking a line ---
 
     def line(self, line: dict, net: str = "", old=None) -> dict:
@@ -241,10 +280,12 @@ class Masker:
         if isinstance(value.get("nested_id"), str):
             net = value["nested_id"]
             self.nested(net, value.get("path"), old=_get(old, "nested_id"))
-            if isinstance(value.get("path"), list):
-                self.reached[json.dumps(value["path"], sort_keys=True)] = net
+            self.seen_at(net, value.get("path"))
         if isinstance(value.get("place"), str):
             place = value["place"]
+        if _port(value) is not None:
+            # A port named by the net around its subnet: its tokens are the subnet's.
+            net, place = self.subnet(net, value["place"]), value["port"]
         masked = {}
         # The token's own id first, so that the nets it holds are named after it.
         for key in sorted(value, key=lambda k: k != "id"):
@@ -266,8 +307,10 @@ class Masker:
             return self.path(item, old)
         if key in LABEL_KEYS and isinstance(item, str):
             return "<label>"
-        if key == "marking_version":
+        if key in ("marking_version", "outer_marking_version"):
             return "<version>"
+        if key == "subnet_marking_versions" and isinstance(item, dict):
+            return {name: "<version>" for name in item}
         if key == "duration_ms":
             return "<ms>"
         if (key in TIME_KEYS or key.endswith("_at")) and isinstance(item, str):
@@ -283,7 +326,7 @@ class Masker:
                 edges = kept  # the same edges: in the order the re-recorded transcript lists them
             return {UNORDERED: edges}
         if key == "places" and isinstance(item, dict):  # a marking, by place name
-            return {name: self.walk(entry, net, name, _get(old, name)) for name, entry in item.items()}
+            return {name: self.place_entry(entry, net, name, _get(old, name)) for name, entry in item.items()}
         if key == "nets" and isinstance(item, list):
             holder = self.stems.get((net, parent.get("id"))) if isinstance(parent.get("id"), str) else None
             return [self.nets_entry(entry, holder, net, place, _at(old, index)) for index, entry in enumerate(item)]
@@ -302,17 +345,35 @@ class Masker:
         masked["nested_id"] = self.nested(entry["nested_id"], entry.get("path"), holder=holder,
                                           net_name=entry.get("name") or None, old=_get(old, "nested_id"))
         if isinstance(entry.get("path"), list):
-            self.reached[json.dumps(entry["path"], sort_keys=True)] = entry["nested_id"]
+            self.seen_at(entry["nested_id"], entry["path"])
             masked["path"] = self.path(entry["path"], _get(old, "path"))
         return masked
 
+    def place_entry(self, entry, net: str, name: str, old=None):
+        """One place's entry in a marking. A subnet place's is ``{subnet, ports}``
+        (§12.7): its subnet is named first, then each port's tokens are named in it."""
+        if not (isinstance(entry, dict) and isinstance(entry.get("subnet"), dict)
+                and isinstance(entry.get("ports"), dict)):
+            return self.walk(entry, net, name, old)
+        subnet = self.walk(entry["subnet"], net, name, _get(old, "subnet"))
+        inside = entry["subnet"].get("nested_id")
+        inside = inside if isinstance(inside, str) else self.subnet(net, name)
+        old_ports = _get(old, "ports")
+        ports = {port: self.walk(tokens, inside, port, _get(old_ports, port)) for port, tokens in entry["ports"].items()}
+        masked = {"subnet": subnet, "ports": ports}
+        return {key: masked.get(key, entry[key]) for key in entry}
+
     def pair(self, entry, net: str, old=None):
-        """``[place, id, label?, color?, keys?]`` of a firing or a log entry."""
+        """``[place, id, label?, color?, keys?]`` of a firing or a log entry; a port
+        is ``{"place", "port"}`` there, its token named in its subnet."""
         if not (isinstance(entry, list) and len(entry) >= 2 and isinstance(entry[1], str)):
             return entry
         place, token_id, *rest = entry
         label = rest[0] if rest else None
-        masked = [place, self.token(net, token_id, place, label, _at(old, 1))]
+        where, port = net, place
+        if _port(place) is not None:
+            where, port = self.subnet(net, place["place"]), place["port"]
+        masked = [place, self.token(where, token_id, port, label, _at(old, 1))]
         if rest:
             masked.append("<label>")
         if len(rest) >= 2:
@@ -373,13 +434,19 @@ def record(scenario: dict, settle: float = SETTLE_SECONDS) -> dict:
             process.send(request)
             lines = fold(collect(process, request_id, settle))
             old_lines = fold(olds[index]) if index < len(olds) else []
-            addressed = request["params"].get("nested_id") if isinstance(request["params"], dict) else None
+            params = request["params"] if isinstance(request["params"], dict) else {}
+            addressed = params.get("nested_id")
+            by_pair = send["method"] == "inject" and _port(params) is not None and "path" not in params
+            if by_pair and addressed is None:
+                # An inject by pair on the loaded net: its answer names the token by id
+                # alone, and the token is the subnet's (§12.7).
+                addressed = masker.subnet("", params["place"])
             try:
                 expect = [
                     masker.line(
                         line,
                         addressed if line.get("id") == request_id and isinstance(addressed, str)
-                        and addressed in masker.nets else "",
+                        and (addressed in masker.nets or by_pair) else "",
                         old_lines[n] if n < len(old_lines) and _same_kind(old_lines[n], line) else None,
                     )
                     for n, line in enumerate(lines)

@@ -19,9 +19,10 @@ from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_a
 from pydantic import BaseModel, TypeAdapter
 
 from petritype.core import serialisation as _serialisation
-from petritype.core.events import PathStep
+from petritype.core.events import PathStep, PlaceKey, Port
 from petritype.core.executable_graph_components import (
-    DrainEdge, ExecutableGraph, ListPlaceNode, MutateWhereEdge, SurveyEdge, TakeWhereEdge,
+    DrainEdge, ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, NestedNets, SubnetPlaceNode,
+    SurveyEdge, TakeWhereEdge,
 )
 from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
@@ -132,6 +133,39 @@ class Colors:
         return COLOR_NAMES.get(raw.lower())
 
 
+class Places:
+    """Functions that name a place on the wire. A net names a place of its own
+    by its name, and a port place of one of its subnet places by the pair, which
+    the library spells ``Port(subnet place, port)`` and the wire as ``port``
+    beside ``place`` (PROTOCOL.md §12.7)."""
+
+    def ref(key: PlaceKey) -> Union[str, dict]:
+        """A place where the wire names it by position, in a ``consumed`` or
+        ``produced`` entry: its name, or ``{"place", "port"}`` for a port."""
+        return {"place": key.place, "port": key.port} if isinstance(key, Port) else key
+
+    def split(key: PlaceKey) -> tuple[str, Optional[str]]:
+        """``(place, port)`` for an object that names a place: the port ``None``
+        for a place of the net's own."""
+        return (key.place, key.port) if isinstance(key, Port) else (key, None)
+
+    def from_wire(raw: Any, what: str) -> PlaceKey:
+        """A place a request names in a list (a filter's ``places``, ``distinct``'s
+        ``places``): a name, or ``{"place", "port"}`` for a port, other keys of the
+        object ignored as everywhere (§2); ``invalid_params`` for anything else."""
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, dict) and isinstance(raw.get("place"), str) and isinstance(raw.get("port"), str):
+            return Port(raw["place"], raw["port"])
+        raise ProtocolError(
+            ErrorCode.INVALID_PARAMS, f'{what} is a list of place names and {{"place", "port"}} objects',
+        )
+
+    def words(key: PlaceKey) -> str:
+        """A place for a message: ``'Door'``, or ``port 'Lobby' of 'Level 1'``."""
+        return f"port {key.port!r} of {key.place!r}" if isinstance(key, Port) else repr(key)
+
+
 class Tokens:
     """Functions that put a token on the wire."""
 
@@ -165,8 +199,8 @@ class Tokens:
     def nets(token: Any, prefix: tuple[wire.PathStep, ...], place: str, token_id: int) -> list[wire.NestedNet]:
         """The ``nets`` of a nested token: one entry per inner net, its path the
         path of the net the token is in (``prefix``, empty for the loaded net)
-        and one step more."""
-        from petritype.core.executable_graph_components import NestedNets
+        and one step more. ``count`` is the tokens in the net's own places, its
+        ports included; a subnet place holds none of its own."""
         entries = []
         for name, inner in NestedNets.of(token).items():
             entries.append(wire.NestedNet(
@@ -174,14 +208,15 @@ class Tokens:
                 nested_id=str(inner.net_id),
                 path=[*prefix, Paths.step(place, token_id, name)],
                 template=inner.template,
-                count=sum(len(node.tokens) for node in inner.places),
+                count=NestedNets.token_count(inner),
             ))
         return entries
 
-    def produced(place: str, token_id: int, token: Any, keys: Optional[dict] = None) -> list[Any]:
+    def produced(place: PlaceKey, token_id: int, token: Any, keys: Optional[dict] = None) -> list[Any]:
         """A ``fired.produced`` element: ``[place, id, label, color?]``, or with
-        ``keys`` ``[place, id, label, color | null, keys]`` (§7.1)."""
-        element: list[Any] = [place, str(token_id), Labels.of(token)]
+        ``keys`` ``[place, id, label, color | null, keys]`` (§7.1); a port's
+        ``place`` is ``{"place", "port"}`` (§12.7)."""
+        element: list[Any] = [Places.ref(place), str(token_id), Labels.of(token)]
         color = Colors.of(token)
         if keys is not None:
             element.extend([color, keys])
@@ -204,6 +239,10 @@ class Paths:
     def step(place: str, token_id: int, net: str) -> wire.PathStep:
         """The step to the net named ``net`` in the token ``token_id`` of ``place``."""
         return wire.PathStep(place=place, token=str(token_id), net=net)
+
+    def subnet_step(place: str) -> wire.PathStep:
+        """The step to the subnet of the subnet place ``place``: the place alone."""
+        return wire.PathStep(place=place)
 
     def parse(raw: Any) -> tuple[wire.PathStep, ...]:
         """A request's ``path`` as steps, or ``invalid_params`` for a shape that is
@@ -238,7 +277,10 @@ class Paths:
     def of_step(step: PathStep) -> wire.PathStep:
         """A step of the library's own path (``NestedNets.walk``, ``find``, the
         ``Nested`` records and an ``InnerFiring``) as the wire spells it: the same
-        place and net names, taken whole, and the token's id as a string."""
+        place and net names, taken whole, and the token's id as a string; a step
+        into a subnet the place alone."""
+        if step.is_subnet:
+            return Paths.subnet_step(step.place)
         return Paths.step(step.place, step.token, step.net)
 
     def of_steps(steps: tuple[PathStep, ...]) -> tuple[wire.PathStep, ...]:
@@ -274,9 +316,12 @@ class Serializable:
 class Filters:
     """Functions that read a filter off the wire and write one (§13.2)."""
 
-    def from_wire(raw: Any, place_names: Optional[set[str]] = None) -> Filter:
+    def from_wire(raw: Any, place_names: Optional[set[PlaceKey]] = None) -> Filter:
         """A ``Filter`` from ``{clauses?, places?, prefix?}``; ``invalid_params``
-        for a shape that is not one, ``unknown_place`` for a place not of the net."""
+        for a shape that is not one, ``unknown_place`` for a place not of the net.
+        A ``places`` entry is a place's name or ``{"place", "port"}`` for a port
+        place of one of the net's subnet places (§13.2); ``place_names`` holds
+        what the net can name, ports by their ``Port`` pairs."""
         if not isinstance(raw, dict):
             raise ProtocolError(ErrorCode.INVALID_PARAMS, "a filter is an object")
         unknown = set(raw) - {"clauses", "places", "prefix"}
@@ -299,17 +344,26 @@ class Filters:
             clauses.append(Clause(clause["key"], tuple(values)))
         places = raw.get("places")
         if places is not None:
-            if not isinstance(places, list) or not all(isinstance(name, str) for name in places):
-                raise ProtocolError(ErrorCode.INVALID_PARAMS, '"places" is a list of place names')
-            if place_names is not None:
-                missing = [name for name in places if name not in place_names]
-                if missing:
-                    raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {missing[0]!r}")
-            places = tuple(places)
+            places = Filters.places(places, place_names, '"places"')
         prefix = raw.get("prefix")
         if prefix is not None and not isinstance(prefix, str):
             raise ProtocolError(ErrorCode.INVALID_PARAMS, '"prefix" is a string')
         return Filter(tuple(clauses), places, prefix)
+
+    def places(raw: Any, place_names: Optional[set[PlaceKey]], what: str) -> tuple[PlaceKey, ...]:
+        """A list of places a request names, each a name or ``{"place", "port"}``
+        (``Places.from_wire``), checked against ``place_names`` when given:
+        ``unknown_place`` names the first the net does not have."""
+        if not isinstance(raw, list):
+            raise ProtocolError(
+                ErrorCode.INVALID_PARAMS, f'{what} is a list of place names and {{"place", "port"}} objects',
+            )
+        keys = tuple(Places.from_wire(entry, what) for entry in raw)
+        if place_names is not None:
+            missing = [key for key in keys if key not in place_names]
+            if missing:
+                raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {Places.words(missing[0])}")
+        return keys
 
     def to_wire(filter: Filter) -> dict:
         out: dict = {"clauses": [
@@ -317,7 +371,7 @@ class Filters:
             for c in filter.clauses
         ]}
         if filter.places is not None:
-            out["places"] = list(filter.places)
+            out["places"] = [Places.ref(key) for key in filter.places]
         if filter.prefix is not None:
             out["prefix"] = filter.prefix
         return out
@@ -444,6 +498,8 @@ class Topologies:
             for name, style in place_styles.items():
                 if name not in places:
                     raise ValueError(f"a place style names {name!r}, no place of the net")
+                if isinstance(places[name], wire.SubnetPlace):
+                    raise ValueError(f"a place style names {name!r}, a subnet place, which holds no tokens to fill it")
                 places[name].style = wire.PlaceStyle(fill=getattr(style, "fill", None))
         topology.controls = controls or None
 
@@ -459,70 +515,74 @@ class Topologies:
             annotation_maybe_in_list=argument_type,
         )
 
-    def of(graph: ExecutableGraph) -> wire.Topology:
+    def place(place: ListPlaceNode, port: bool = False) -> wire.Place:
+        """One place as the topology lists it; ``port`` for a port place in its
+        subnet's own topology."""
+        return wire.Place(
+            name=place.name,
+            type_name=TypeNames.of(place.type),
+            serializable=Serializable.place_type(place.type),
+            nested=True if place.nested else None,
+            stepping=place.stepping if place.nested else None,
+            port=True if port else None,
+            key_names=list(place.key_names) if place.keys else None,
+        )
+
+    def of(graph: ExecutableGraph, subnet: bool = False) -> wire.Topology:
         """The net's shape. A place whose tokens hold nets carries ``nested`` and its
-        ``stepping`` rule, the default included (§12.3). An input edge's ``kind`` is
+        ``stepping`` rule, the default included (§12.3). A subnet place is listed
+        with its template's name as ``type_name`` (``""`` when its subnet was built
+        without one), its ``ports`` in the subnet's order, as the subnet's own
+        topology lists them without ``port``, and its ``stepping`` (§12.7). With
+        ``subnet``, the net is the subnet of a subnet place, and each of its port
+        places carries ``port``; a net that is no subnet has no net around it to
+        reach its ports, so it shows none. An edge on a port names the subnet place
+        as its ``place`` and the port as its ``port``. An input edge's ``kind`` is
         its class's (``take_where``, ``drain``, ``snapshot``, ``survey``, ``mutate``,
         ``mutate_where``), or for a plain argument edge ``take_all`` when its argument
         takes every token as a list and ``take`` otherwise."""
-        places = {place.name: place for place in graph.places}
+        places = MapPlaceNames.to_list_place_nodes(graph)
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
+
+        def edge_on(edge, direction: str, **rest) -> wire.Edge:
+            place, port = Places.split(edge.place_node_name)
+            return wire.Edge(place=place, port=port, transition=edge.transition_node_name, direction=direction, **rest)
+
         for edge in graph.argument_edges:
             if isinstance(edge, TakeWhereEdge):
-                edges.append(wire.Edge(
-                    place=edge.place_node_name, transition=edge.transition_node_name,
-                    direction="in", kind="take_where", filter=Filters.to_wire(edge.where),
-                ))
+                edges.append(edge_on(edge, "in", kind="take_where", filter=Filters.to_wire(edge.where)))
                 continue
             if isinstance(edge, DrainEdge):
-                edges.append(wire.Edge(
-                    place=edge.place_node_name, transition=edge.transition_node_name,
-                    direction="in", kind="drain",
-                ))
+                edges.append(edge_on(edge, "in", kind="drain"))
                 continue
             takes_all = Topologies.takes_all(
                 functions[edge.transition_node_name], edge.argument, places[edge.place_node_name]
             )
-            edges.append(wire.Edge(
-                place=edge.place_node_name, transition=edge.transition_node_name,
-                direction="in", kind="take_all" if takes_all else "take",
-            ))
+            edges.append(edge_on(edge, "in", kind="take_all" if takes_all else "take"))
         for edge in graph.snapshot_edges:
-            edges.append(wire.Edge(
-                place=edge.place_node_name, transition=edge.transition_node_name,
-                direction="in", kind="survey" if isinstance(edge, SurveyEdge) else "snapshot",
-            ))
+            edges.append(edge_on(edge, "in", kind="survey" if isinstance(edge, SurveyEdge) else "snapshot"))
         for edge in graph.mutate_edges:
             if isinstance(edge, MutateWhereEdge):
-                edges.append(wire.Edge(
-                    place=edge.place_node_name, transition=edge.transition_node_name,
-                    direction="in", kind="mutate_where", filter=Filters.to_wire(edge.where),
-                ))
+                edges.append(edge_on(edge, "in", kind="mutate_where", filter=Filters.to_wire(edge.where)))
                 continue
-            edges.append(wire.Edge(
-                place=edge.place_node_name, transition=edge.transition_node_name,
-                direction="in", kind="mutate",
-            ))
+            edges.append(edge_on(edge, "in", kind="mutate"))
         outputs: dict[str, int] = {}
         for edge in graph.return_edges:
             outputs[edge.transition_node_name] = outputs.get(edge.transition_node_name, 0) + 1
         for edge in graph.return_edges:
             several = outputs[edge.transition_node_name] > 1
-            edges.append(wire.Edge(
-                place=edge.place_node_name, transition=edge.transition_node_name,
-                direction="out", slot=edge.return_index if several else None,
-            ))
+            edges.append(edge_on(edge, "out", slot=edge.return_index if several else None))
         return wire.Topology(
             places=[
-                wire.Place(
+                wire.SubnetPlace(
                     name=place.name,
-                    type_name=TypeNames.of(place.type),
-                    serializable=Serializable.place_type(place.type),
-                    nested=True if place.nested else None,
-                    stepping=place.stepping if place.nested else None,
-                    key_names=list(place.key_names) if place.keys else None,
+                    type_name=place.graph.template or "",
+                    ports=[Topologies.place(port) for port in place.ports],
+                    stepping=place.stepping,
                 )
+                if isinstance(place, SubnetPlaceNode)
+                else Topologies.place(place, port=subnet and place.port)
                 for place in graph.places
             ],
             transitions=[

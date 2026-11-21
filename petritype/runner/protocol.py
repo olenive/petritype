@@ -14,7 +14,10 @@ no default at all.
 
 Token ids are strings on the wire; the runner converts at the boundary. The
 address of an inner net, its ``path``, is a list of ``PathStep``s, one per
-level from the loaded net down (§12.1), never text.
+level from the loaded net down (§12.1), never text. A port place of one of a
+net's subnet places is named by the net around it with ``port`` beside
+``place`` in an object, and by the object ``{"place", "port"}`` where a place
+is named by position, in the ``consumed`` and ``produced`` entries (§12.7).
 """
 
 from __future__ import annotations
@@ -156,9 +159,11 @@ class Lines:
 
     def notification(notification: "Notification") -> dict:
         params = notification.wire()
-        # The stamp every notification carries goes last, as the protocol writes it.
-        for key in ("marking_version", "running"):
-            params[key] = params.pop(key)
+        # The stamp every notification carries goes last, as the protocol writes it,
+        # after the versions of the nets across a port (§12.7) when it has them.
+        for key in ("subnet_marking_versions", "outer_marking_version", "marking_version", "running"):
+            if key in params:
+                params[key] = params.pop(key)
         return {"method": notification.method, "params": params}
 
 
@@ -199,17 +204,35 @@ class PlaceStyle(Wire):
     fill: Literal["token"]
 
 
+SteppingName = Literal["inner_first", "take_turns", "outer_first", "passive"]
+
+
 class Place(Wire):
     """``stepping`` is present exactly on a place that holds nets, its stepping
-    rule (§5.1, §12.3)."""
+    rule (§5.1, §12.3); ``port`` on a port place in its subnet's own topology
+    (§12.7)."""
 
     name: str
     type_name: str
     serializable: bool
     nested: Optional[bool] = None
-    stepping: Optional[Literal["inner_first", "take_turns", "outer_first", "passive"]] = None
+    stepping: Optional[SteppingName] = None
+    port: Optional[bool] = None
     key_names: Optional[list[str]] = None
     style: Optional[PlaceStyle] = None
+
+
+class SubnetPlace(Wire):
+    """A subnet place in the topology of the net around it (§5.1, §12.7):
+    ``type_name`` the template that built its subnet (``""`` for none), ``ports``
+    its port places in the subnet's declaration order, each as a ``Place`` of the
+    subnet's own topology without ``port``, and its stepping rule."""
+
+    name: str
+    type_name: str
+    subnet: Literal[True] = True
+    ports: list[Place]
+    stepping: SteppingName
 
 
 class Transition(Wire):
@@ -218,7 +241,11 @@ class Transition(Wire):
 
 
 class Edge(Wire):
+    """``port`` names one of the ports of ``place`` when ``place`` is a subnet
+    place (§12.7)."""
+
     place: str
+    port: Optional[str] = None
     transition: str
     direction: Literal["in", "out"]
     kind: Optional[Literal[
@@ -242,7 +269,7 @@ class Control(Wire):
 
 
 class Topology(Wire):
-    places: list[Place]
+    places: list[Union[Place, SubnetPlace]]
     transitions: list[Transition]
     edges: list[Edge]
     hints: Optional[dict[str, Any]] = None
@@ -301,8 +328,27 @@ class PlaceMarking(Wire):
     tokens: list[Token]
 
 
+class SubnetEntry(Wire):
+    """The subnet a subnet place holds, as the net around it sees it (§12.7): the
+    fields of a token's ``nets[]`` entry without ``name``. ``count`` is the
+    number of tokens in the subnet's own places, its ports included."""
+
+    nested_id: str
+    path: list[PathStep]
+    template: Optional[str] = None
+    count: int
+
+
+class SubnetMarking(Wire):
+    """A subnet place's entry in ``marking.places`` (§5.3, §12.7): its subnet,
+    and each port's ``count``, ``matching`` and ``tokens`` as a place has them."""
+
+    subnet: SubnetEntry
+    ports: dict[str, PlaceMarking]
+
+
 class Marking(Wire):
-    places: dict[str, PlaceMarking]
+    places: dict[str, Union[PlaceMarking, SubnetMarking]]
 
 
 class Progress(Wire):
@@ -337,6 +383,7 @@ class State(Wire):
 
 class PlaceTokens(Wire):
     place: str
+    port: Optional[str] = None
     marking_version: int
     count: int
     matching: Optional[int] = None
@@ -366,9 +413,10 @@ class TokenValue(Wire):
 
 
 class QueryResult(Wire):
-    """``query`` (§13.3): ``matches`` are ``{place, token, json?}`` objects, the
-    token a full entry and ``json`` its JSON value where its place has one
-    (built as plain dicts, since ``json`` is a name pydantic reserves)."""
+    """``query`` (§13.3): ``matches`` are ``{place, port?, token, json?}``
+    objects, ``port`` for a match in a port place (§12.7), the token a full
+    entry and ``json`` its JSON value where its place has one (built as plain
+    dicts, since ``json`` is a name pydantic reserves)."""
 
     marking_version: int
     count: int
@@ -403,15 +451,16 @@ class StepResult(Wire):
 
 
 class LogEntry(Wire):
-    """One ``get_log`` entry (§8), keyed by place names and protocol token ids."""
+    """One ``get_log`` entry (§8), keyed by place names and protocol token ids,
+    a port place by the object ``{"place", "port"}`` (§12.7)."""
 
     seq: int
     transition: str
     started_at: str
     duration_ms: float
     outcome: Literal["fired", "failed"]
-    consumed: list[list[str]]
-    produced: list[list[str]]
+    consumed: list[list[Any]]
+    produced: list[list[Any]]
     error: Optional[str] = None
     restored: Optional[bool] = None
     path: Optional[list[PathStep]] = None
@@ -436,7 +485,19 @@ class Notification(Wire):
         return Lines.notification(self)
 
 
-class Fired(Notification):
+class PortChange(Notification):
+    """A state notification that may change a port place, which is in the
+    markings of two nets (§12.7). Told by the net around the port's subnet, it
+    carries ``subnet_marking_versions``, each subnet place whose ports it
+    changed mapped to its subnet's new version; told by the subnet,
+    ``outer_marking_version``, the new version of the net around it. Each is
+    present only when the change touched a port it covers."""
+
+    subnet_marking_versions: Optional[dict[str, int]] = None
+    outer_marking_version: Optional[int] = None
+
+
+class Fired(PortChange):
     """A firing in one piece: legal for a runtime that cannot observe a body
     part-way. Neither runner sends it; the Python runner sent it until
     2026-10-04 and now sends ``Launched`` then ``Distributed``."""
@@ -445,22 +506,22 @@ class Fired(Notification):
     moves_version: ClassVar[bool] = True
 
     transition: str
-    consumed: list[list[str]]
+    consumed: list[list[Any]]
     produced: list[list[Any]]
     duration_ms: float
 
 
-class Launched(Notification):
+class Launched(PortChange):
     """The first piece of a firing: inputs taken, body started."""
 
     method: ClassVar[str] = "launched"
     moves_version: ClassVar[bool] = True
 
     transition: str
-    consumed: list[list[str]]
+    consumed: list[list[Any]]
 
 
-class Distributed(Notification):
+class Distributed(PortChange):
     """The second piece of a firing: body returned, outputs placed."""
 
     method: ClassVar[str] = "distributed"
@@ -471,46 +532,49 @@ class Distributed(Notification):
     duration_ms: float
 
 
-class Failed(Notification):
+class Failed(PortChange):
     method: ClassVar[str] = "failed"
     moves_version: ClassVar[bool] = True
 
     transition: str
     error: str
     restored: bool
-    consumed: list[list[str]]
+    consumed: list[list[Any]]
 
 
-class Added(Notification):
+class Added(PortChange):
     method: ClassVar[str] = "added"
     moves_version: ClassVar[bool] = True
 
     place: str
+    port: Optional[str] = None
     id: str
     label: str
     color: Optional[str] = None
     keys: Optional[dict[str, Union[str, int, bool]]] = None
 
 
-class Removed(Notification):
+class Removed(PortChange):
     method: ClassVar[str] = "removed"
     moves_version: ClassVar[bool] = True
 
     place: str
+    port: Optional[str] = None
     id: str
 
 
-class Mutated(Notification):
+class Mutated(PortChange):
     method: ClassVar[str] = "mutated"
     moves_version: ClassVar[bool] = True
 
     place: str
+    port: Optional[str] = None
     id: str
     label: Optional[str] = None
     keys: Optional[dict[str, Union[str, int, bool]]] = None
 
 
-class Hidden(Notification):
+class Hidden(PortChange):
     """Stands in for an ``added``, ``removed`` or ``mutated`` about a token the
     connection's filter hides (§13.4): the version moves, the place is named,
     nothing of the token is told."""
@@ -520,6 +584,7 @@ class Hidden(Notification):
 
     kind: Literal["added", "removed", "mutated"]
     place: str
+    port: Optional[str] = None
 
 
 class Toggled(Notification):

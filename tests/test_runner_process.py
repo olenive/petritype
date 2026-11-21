@@ -4,7 +4,8 @@ pure pieces in process.
 The process tests spawn the runner with a 100 ms heartbeat and read its stdout
 on a thread, line by line, waiting for an expected line with a generous timeout
 rather than sleeping. The nets are in ``tests/runner_nets``, which is put
-on the child's ``PYTHONPATH``.
+on the child's ``PYTHONPATH``, and the repository root goes there too, for a
+conformance net of ``tests/protocol_nets``.
 """
 
 import io
@@ -35,6 +36,7 @@ from petritype.runner.protocol import Malformed, Request
 from petritype.runner.registry import Registry
 
 NETS = Path(__file__).parent / "runner_nets"
+ROOT = Path(__file__).resolve().parent.parent  # for the conformance nets, ``tests.protocol_nets``
 TIMEOUT = 30.0
 
 
@@ -43,7 +45,7 @@ TIMEOUT = 30.0
 
 def child_env(heartbeat_ms: int = 100) -> dict:
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(NETS), env.get("PYTHONPATH")]))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(NETS), str(ROOT), env.get("PYTHONPATH")]))
     env["PETRITYPE_RUNNER_HEARTBEAT_MS"] = str(heartbeat_ms)
     env["PYTHONUNBUFFERED"] = "1"
     return env
@@ -200,6 +202,30 @@ def test_a_session_answers_in_order_with_notifications_first(spawn):
     for raw in runner.raw:
         assert raw.endswith(b"\n")
         json.loads(raw)
+
+
+def test_a_net_with_subnet_places_is_served_by_the_process(spawn):
+    """The conformance net ``levels`` (PROTOCOL.md §11, §12.7): a world whose two
+    levels are subnet places, a hero entering level 1 by its lobby port."""
+    runner = spawn("--module", "tests.protocol_nets.levels")
+    assert kinds(runner.request("load", {"net": "levels"})) == ["load_progress", "reloaded", "result"]
+    enter = runner.request("step")
+    distributed = next(line for line in enter if line.get("method") == "distributed")["params"]
+    assert distributed["produced"][0][0] == {"place": "Level 1", "port": "Lobby"}
+    assert set(distributed["subnet_marking_versions"]) == {"Level 1"}
+    walk_in = runner.request("step")
+    assert walk_in[-1]["result"]["path"] == [{"place": "Level 1"}]
+    launched = next(line for line in walk_in if line.get("method") == "nested")["params"]
+    assert launched["event"]["method"] == "launched" and "outer_marking_version" in launched["event"]["params"]
+    state = runner.request("get_state")[-1]["result"]
+    level = state["marking"]["places"]["Level 1"]
+    assert level["subnet"]["path"] == [{"place": "Level 1"}] and level["subnet"]["count"] == 1
+    assert level["ports"]["Lobby"]["count"] == 0, "the hero is in the arena, which the world cannot see"
+    inside = runner.request("get_state", {"nested_id": level["subnet"]["nested_id"]})[-1]["result"]
+    assert inside["marking"]["places"]["Arena"]["count"] == 1
+    runner.request("shutdown")
+    runner.process.stdin.close()
+    assert runner.finish() == 0
 
 
 def test_a_continuous_net_runs_idles_and_keeps_beating(spawn):

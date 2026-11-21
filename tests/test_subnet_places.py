@@ -11,10 +11,10 @@ on a port; ids and keys across the border both ways; failure; the in-flight rule
 stepping under each rule, two subnets with different rules and a subnet in a
 subnet; tokens that carry nets in a port; outside input; the events; naming and the
 program's reading and changing; saving, restoring and copying at one and two depths;
-the build errors; the concurrent runtime; the Graphviz symbol; the example; and the
-runner's refusal, until it serves subnet places. They follow the Rust core's
-``tests/subnet.rs`` where the two cover the same ground, so the two runtimes behave
-alike.
+the build errors; the concurrent runtime; the Graphviz symbol; and the example. They
+follow the Rust core's ``tests/subnet.rs`` where the two cover the same ground, so the
+two runtimes behave alike. The protocol runner's service of subnet places is
+``tests/test_runner_subnets.py``.
 """
 
 import asyncio
@@ -27,7 +27,6 @@ from typing import Optional, Union
 import pytest
 from pydantic import BaseModel
 
-from petritype import petri_net
 from petritype.core.events import Added, Failed, Fired, InnerFiring, Mutated, Nested, PathStep, Port, Removed
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
@@ -1101,23 +1100,3 @@ def test_the_levels_example_runs_its_own_journey():
     again = NetJson.load_into(build_world(), json.loads(json.dumps(NetJson.save(w))))
     assert again.subnet("Level 2").params == {"reward": 2}
     assert [h.name for h in again.place_named("Outside").tokens] == ["Ada", "Bram", "Cato"]
-
-
-# --- the runner, until it serves subnet places -------------------------------------------------
-
-
-@petri_net(name="subnet-world")
-def subnet_world() -> ExecutableGraph:
-    return world()
-
-
-def test_the_runner_refuses_to_load_a_net_with_a_subnet_place_for_now():
-    from petritype.runner.owner import Owner
-    from petritype.runner.registry import Registry
-    owner = Owner(Registry.from_factories([subnet_world]))
-    now = __import__("datetime").datetime(2026, 11, 21, tzinfo=__import__("datetime").timezone.utc)
-    out = run(owner.handle({"id": "1", "method": "load", "params": {"net": "subnet-world"}}, now))
-    error = out.lines[-1]["error"]
-    assert error["code"] == "load_failed"
-    assert "subnet place 'Level 3'" in error["message"]
-    assert not owner.loaded
