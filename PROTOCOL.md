@@ -1,6 +1,6 @@
 # The petritype net protocol
 
-Status: **protocol version 1.** Written 2026-10-03 and amended the same day
+Status: **protocol version 2.** Written 2026-10-03 and amended the same day
 after the first implementation (§2, §4, §5.3, §6.1, §6.3, §6.5, §11), on
 2026-10-04 when the Python runner moved to two-piece firings (§6.3, §7.1), and
 on 2026-10-09 for nested nets (§12) and token keys, queries and filters (§13),
@@ -14,7 +14,14 @@ on 2026-10-14 it gained two input edge kinds that accept an empty place
 (§5.1, §5.2, from `../petritype-rs/dev-docs/EDGES_ON_EMPTY_PLACES.md`), with
 a conformance net and a transcript for them (§11). On 2026-10-16 it gained
 the controls and place styles a net declares beside it, and `press`, which
-runs a control (§3, §5.1, §5.3, §6.6, §7, §11, §12.3). Both
+runs a control (§3, §5.1, §5.3, §6.6, §7, §11, §12.3). On 2026-11-21 it
+became **version 2** (§10): the address of an inner net became a list of
+steps (§12.1); a place may hold a net of its own, a subnet place, which the
+net around it reaches through port places (§12.7); and each place that holds
+nets has a stepping rule of its own (§12.3), which replaced the deep-step
+policy of a whole net and the passive setting; with what they change in §2,
+§4, §5, §6, §7, §8, §11 and §13, written before either runtime implemented
+them, from `../petritype-rs/dev-docs/subnet-place-spec.md`. Both
 runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
@@ -57,6 +64,10 @@ are out of scope.
 - **Places and transitions are addressed by name.** Names are unique within a
   net (both libraries enforce it at build time). Names are what a user, a
   saved file and a URL know, and they survive a change of declaration order.
+  A name may hold any character, and none has a special meaning: a reference
+  to something inside another thing is structured, a port place by the pair
+  of its subnet place and its own name (§12.7), an inner net by a list of
+  steps (§12.1).
 - **Token ids are strings holding a decimal integer**, for example `"17"`.
   Within one generation of a net (§4) an id is handed out once and never
   reused, so a viewer may key animations, caches and selections by it. The
@@ -66,11 +77,12 @@ are out of scope.
   above 2^53 and a Rust `TokenId` is a `u64`; the runner converts at the
   boundary. A reader must treat the id as opaque and compare it as a string;
   ordering by numeric value is allowed (ids increase) but nothing should
-  depend on it.
+  depend on it. Ids are per net: a port place's tokens carry the ids of its
+  subnet, which mints them (§12.7).
 - **Times** are ISO 8601 strings in UTC (`"2026-10-03T09:15:02.413Z"`);
   durations are `duration_ms` as a JSON number.
 - **Unknown fields are ignored and unknown notifications are skipped.** That
-  is what lets version 1 grow without a bump (§10).
+  is what lets a version grow without a bump (§10).
 - Optional fields are marked `?` below and are omitted, never `null`, unless
   stated otherwise. That is what a runtime writes; what it reads is more
   forgiving: `null` for an optional field of a request counts as the field's
@@ -141,7 +153,10 @@ without parsing `message`:
   current value and always means "refetch". A firing moves it once per
   state notification, so by one where a runtime reports `fired` and by two
   where it reports `launched` then `distributed` (§6.3); nothing may
-  compare version numbers across runtimes.
+  compare version numbers across runtimes. A port place is in the markings
+  of two nets, its subnet and the net around it, so a change of it raises
+  both nets' versions by one and is told by one notification that carries
+  both new values (§12.7).
 - **`running`** (boolean) says whether the net process is executing on its
   own (after `start`, until `stop` or quiescence).
 
@@ -151,7 +166,7 @@ without parsing `message`:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "runtime": "python",
   "net": "parcel-distribution",
   "generation": 1,
@@ -189,8 +204,11 @@ once per generation and lays it out.
   type, for display only; `serializable`, whether tokens of this place have a
   JSON form (decides whether `inject` and `get_token` with `kind: "json"` can
   work); `nested?`, `true` when tokens of this place may hold nets of their
-  own (§12), and `passive?`, `true` when such a place's inner nets are
-  stepped only by an outer body (§12.3); `key_names?`, the names of the keys
+  own (§12); `stepping?`, present exactly on a place that holds nets (a
+  nested place or a subnet place), the rule by which deep stepping fires the
+  nets in it, one of `"inner_first"`, `"take_turns"`, `"outer_first"` and
+  `"passive"` (§12.3); `port?`, `true` on a place of a subnet that the net
+  around the subnet can reach (§12.7); `key_names?`, the names of the keys
   the place derives from its tokens, in declaration order, present only when
   the place declares keys (§13.1); `style?`, how a viewer draws the place,
   present only when the net declares one (since 2026-10-16). The one style so
@@ -198,12 +216,15 @@ once per generation and lays it out.
   holds exactly one token and that token has a `color` (§5.3), the place is
   filled with that colour; a firing's input or output highlight wins while it
   lasts; otherwise the theme's fill. No notification carries a style: the
-  viewer already has the token's colour.
+  viewer already has the token's colour. A subnet place, which holds a net
+  of its own and no tokens, is `{name, type_name, subnet: true, ports,
+  stepping}`, with its port places listed in `ports` (§12.7).
 - `transitions[]`: `name`; `detail?`, a free object of runtime-specific
   introspection (Python: `function_name`, `signature`, `docstring`; Rust:
   `params`, the parameter type names, and `detachable`). A viewer may show
   `detail`; it must not depend on any key in it.
-- `edges[]`: `place`, `transition`, `direction` (`"in"` place to transition,
+- `edges[]`: `place`, `port?` (one of the place's ports, when `place` is a
+  subnet place, §12.7), `transition`, `direction` (`"in"` place to transition,
   `"out"` transition to place); `kind?` for input edges, one of `"take"`,
   `"take_all"`, `"snapshot"`, `"mutate"`, `"take_where"`, `"mutate_where"`,
   `"drain"`, `"survey"` (a reader that meets another value draws a plain
@@ -216,7 +237,8 @@ once per generation and lays it out.
   more, consuming none, and likewise never holds its transition back (since
   2026-10-14). Read edges (`snapshot`, `survey`, `mutate`) are listed: they
   move no tokens but they are part of the net. The order of `edges[]` is not
-  significant; a reader keys an edge by its endpoints.
+  significant; a reader keys an edge by its endpoints: its place, its port
+  if it has one, its transition and its direction.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
@@ -272,7 +294,9 @@ and `tokens`, the oldest tokens first, **capped** (default 200 per place;
 `get_state {token_limit}` changes it, `get_place_tokens` pages the rest). A
 viewer reads sizes from `count`, never from `tokens.length`. Under a
 connection filter (§13.4) a place also reports `matching`, the number of its
-tokens the filter lets through, and `tokens` holds only those.
+tokens the filter lets through, and `tokens` holds only those. A subnet
+place maps to `{subnet, ports}` instead: its subnet's entry, and each port's
+`count` and `tokens` as a place has them (§12.7).
 
 A token is `{id, label, color?, type_name?, keys?, nets?}`:
 
@@ -303,7 +327,9 @@ A token is `{id, label, color?, type_name?, keys?, nets?}`:
 `step_count` (completed firings since load or reset), `last_fired` (name or
 `null`), `fired_counts` (name to count), `last_progress_at` (time of the last
 completed firing, or `null`). Kept by the runner where the core does not keep
-it.
+it. Progress is per net: a net's progress counts the firings of its own
+transitions and names them by their own names, and a firing in an inner net
+is counted in that net's progress, read by addressing it (§12.3).
 
 ## 6. Methods
 
@@ -312,13 +338,13 @@ it.
 | `describe` | `{}` | Describe (§6.1) | allowed before `load` |
 | `load` | `{net, params?}` | `{status: "loaded", generation, marking_version}` | emits `load_progress`; `reloaded` |
 | `get_state` | `{token_limit?, path?, nested_id?}` | State (§5), plus `path`, `nested_id`, `template?` for an inner net | never waits for a running body |
-| `get_place_tokens` | `{place, offset?, limit?, path?, nested_id?}` | `{place, marking_version, count, matching?, offset, limit, tokens, has_more, path?, nested_id?}` | `limit` clamped to 1..1000, default 200 |
+| `get_place_tokens` | `{place, port?, offset?, limit?, path?, nested_id?}` | `{place, port?, marking_version, count, matching?, offset, limit, tokens, has_more, path?, nested_id?}` | `limit` clamped to 1..1000, default 200 |
 | `get_token` | `{id, path?, nested_id?}` | `{id, place, type_name, kind: "json", value, path?, nested_id?, nets?}` or `{..., kind: "text", text, ...}` | live tokens only |
 | `step` | `{}` | `{fired: bool, transition?, failed?, path?, nested_id?, marking_version, running}` | one firing, sequential semantics (§6.3); `path` when it was in an inner net (§12.3) |
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
-| `inject` | `{place, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `path` and `nested_id` for an inner net (§12.3) |
+| `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3) |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
 | `press` | `{control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}` | runs a control the net declares (§6.6); emits the events of whatever it did |
@@ -330,13 +356,14 @@ it.
 
 `path` and `nested_id` name an inner net (§12.1); a method that takes them
 acts on that net instead of the outer one. Without either, a method acts on
-the outer net, as before.
+the outer net, as before. `port` beside `place` names a port place of the
+subnet place `place` (§12.7).
 
 ### 6.1 `describe`
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "runtime": "rust",
   "runtime_version": "0.2.0",
   "nets": [
@@ -373,8 +400,9 @@ before it moves to `describe`.
 ### 6.3 Execution
 
 - `step` drains pending input, then fires at most one transition, chosen by
-  the net's own selector. `fired: false` with no `transition` means nothing
-  was fireable. `fired: true` with `transition` means a transition was
+  the net's own selector, or, where places hold nets, by one deep step
+  (§12.3). `fired: false` with no `transition` means nothing was
+  fireable. `fired: true` with `transition` means a transition was
   chosen and its firing landed, successfully or not: when the body failed
   the response also carries `failed: true`, and follows the `failed`
   notification. Its response is written when the firing is complete (after
@@ -398,10 +426,14 @@ before it moves to `describe`.
   policy and is reported by `execution_stopped` when it stops, with
   `reason: "transition_failed"` and the failure's `error_type` and `message`
   (both runners stop).
-- When tokens hold nets, "one firing" may be a firing inside one of them:
-  `step` and a running net fire, by default, the outer net's choice first and
-  an inner net's only when the outer net has nothing fireable (§12.3), and
-  `no_fireable_transitions` means nothing fireable anywhere.
+- When places hold nets, the nets of their tokens or a subnet, "one firing"
+  may be a firing inside one of them: `step` and each firing of a running
+  net make one deep step of the outer net, which tries the nets in each such
+  place before the outer net's own choice, in turn with it, or after it, as
+  that place's stepping rule says (inner first unless the net's definition
+  gives the place another rule, §12.3). `no_fireable_transitions` means
+  that nothing is fireable in the outer net or in any net that deep
+  stepping reaches.
 
 ### 6.4 Input
 
@@ -415,7 +447,9 @@ before it moves to `describe`.
   float field and an ISO 8601 string for a date-time are accepted, since
   JSON has no other way to carry them. Parameter values (`load`,
   `set_param`) follow the same rule, answering `invalid_params`. The shared
-  transcripts check it.
+  transcripts check it. A port place takes `inject {place, port, token}` on
+  the net around its subnet, or `inject {place, token}` addressed to the
+  subnet (§12.7).
 - A parameter value decodes by its declared type: Rust's by the type
   registered for the parameter's wire name, Python's by the annotation of the
   factory parameter of that name, or, for one the factory does not annotate,
@@ -482,10 +516,10 @@ effects arrive as the usual notifications, and its answer carries the
 | `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (both runners, which run every body off their request thread): inputs taken, body started |
 | `distributed` | `{transition, produced: [[place, id, label, color?]], duration_ms}` | the second piece: body returned, outputs placed |
 | `failed` | `{transition, error, restored, consumed: [[place, id]]}` | a body failed; `restored` says whether the consumed tokens went back (same ids, front of their places) |
-| `added` | `{place, id, label, color?, keys?}` | a token arrived from outside (`inject`, a command) |
-| `removed` | `{place, id}` | a token was removed from outside (replacing a place's tokens) |
-| `mutated` | `{place, id, label?, keys?}` | a token changed in place (a mutate edge) |
-| `hidden` | `{kind: "added" \| "removed" \| "mutated", place}` | stands in for an `added`, `removed` or `mutated` about a token the connection's filter hides (§13.4) |
+| `added` | `{place, port?, id, label, color?, keys?}` | a token arrived from outside (`inject`, a command) |
+| `removed` | `{place, port?, id}` | a token was removed from outside (replacing a place's tokens) |
+| `mutated` | `{place, port?, id, label?, keys?}` | a token changed in place (a mutate edge) |
+| `hidden` | `{kind: "added" \| "removed" \| "mutated", place, port?}` | stands in for an `added`, `removed` or `mutated` about a token the connection's filter hides (§13.4) |
 | `toggled` | `{transition, enabled}` | the switch changed |
 | `param_changed` | `{param, transition?}` | `set_param` took effect |
 
@@ -500,6 +534,14 @@ protocol writes `null` for an absent optional, so that the fifth keeps its
 position). `added` and `mutated` carry `keys` under the same condition, the
 keys as they stand after the change.
 
+Where the net names a port place of one of its subnet places (§12.7), the
+first element of a `consumed` or `produced` entry is the object
+`{"place": subnet place, "port": port}` in place of a place name, and
+`added`, `removed`, `mutated` and `hidden` carry `port` beside `place`. A
+notification that changes a port place carries, besides its own net's
+`marking_version`, the new version of the net on the other side of the port:
+`subnet_marking_versions` or `outer_marking_version` (§12.7).
+
 ### 7.2 Other notifications (do not move `marking_version`)
 
 | method | params | meaning |
@@ -510,7 +552,7 @@ keys as they stand after the change.
 | `execution_stopped` | `{reason, error_type?, message?}` | the net stopped running on its own |
 | `heartbeat` | `{step_started_at, executing_transition}` | periodic while loaded; both `null` when no body runs |
 | `load_progress` | `{step, message}` | during `load` |
-| `nested` | `{path, nested_id, event: {method, params}}` | an event in an inner net, wrapping the notification that net would send (§12.4); moves the inner net's version, carried inside `event`, not the outer net's |
+| `nested` | `{path, nested_id, event: {method, params}}` | an event in an inner net, wrapping the notification that net would send (§12.4); moves the inner net's version, carried inside `event`, and moves the outer net's, carried by the wrapper, only when the event changed one of the outer net's port places (§12.7) |
 
 A net's first `fireable` is compared with its baseline, the set as it stood
 when the runtime first knew of the net: for the outer net at `load` or
@@ -529,15 +571,22 @@ runner keeps (at least the last 1000 firings). An entry is:
 
 `outcome` is `"fired"` or `"failed"` (with `error` and `restored`). Entries
 are keyed by **place names** and protocol token ids: no argument names, no
-runtime-specific id spellings. `after` returns entries with `seq` greater
-than it.
+runtime-specific id spellings. A port place of one of the net's subnet
+places is named by the object `{"place": subnet place, "port": port}`, as in
+§7.1. `after` returns entries with `seq` greater than it.
 
 The ring is one for the process: a firing inside an inner net (§12) is an
 entry too, in order with the outer firings, carrying `path` and `nested_id`
 (the path as it stood when the firing happened: the place the token stood in
 at the time) and the inner net's place names and token ids; `seq` is shared.
 `get_log` with a `path` or `nested_id` returns only the entries of that net
-and of nets inside it.
+and of nets inside it. A firing in the bus's cabin:
+
+```json
+{"seq": 13, "transition": "Sit", "started_at": "...", "duration_ms": 0.4,
+ "outcome": "fired", "consumed": [["Door", "1"]], "produced": [["Seats", "2"]],
+ "path": [{"place": "Depot", "token": "17", "net": "cabin"}], "nested_id": "3"}
+```
 
 ## 9. Relayed over HTTP and server-sent events
 
@@ -564,11 +613,22 @@ A host that serves the net to remote viewers relays the same shapes:
 
 ## 10. Versioning
 
-- `protocol_version` is an integer. **Version 1** is this document.
+- `protocol_version` is an integer. **Version 2** is this document, since
+  2026-11-21. **Version 1** is this document as it stood before that day.
   **Version 0** is, retroactively, petritype-server's worker contract as it
   stood on 2026-10-03 (`petritype_server/worker/net_ipc.py` and
   `net_runner.py`); its differences from version 1 are tabulated in the
   server's design doc.
+- Version 2 differs from version 1 in these points. A `path` is a list of
+  steps where it was text joined with `/`, and every name can be spelt in
+  it (§12.1). A place that holds nets carries `stepping` in place of
+  `passive`, and deep stepping follows each place's rule, inner first by
+  default, where version 1's runtimes fired the outer net's choice first
+  (§12.3). A place may be a subnet place, named with `port` beside `place`
+  wherever the net around it names one of its port places, and a change of a
+  port place moves the versions of both nets that see it (§12.7). A net's
+  progress counts only its own firings (§5.4). A reader of version 2 does
+  not read version 1.
 - Adding an optional field, a notification, a method or an error code does
   not change the version; readers ignore what they do not know. Removing
   anything, renaming anything, or changing what a field means does.
@@ -589,7 +649,7 @@ dated where the net is described.
   "params": {"trucks": 2},
   "exchanges": [
     {"send": {"method": "describe", "params": {}},
-     "expect": [{"id": "1", "result": {"protocol_version": 1, "runtime": "<label>", "..." : "..."}}]},
+     "expect": [{"id": "1", "result": {"protocol_version": 2, "runtime": "<label>", "..." : "..."}}]},
     {"send": {"method": "step", "params": {}},
      "expect": [
        {"method": "fired", "params": {"transition": "Sort", "consumed": [["Receiving", "<id>"]],
@@ -604,21 +664,25 @@ dated where the net is described.
 - `send` is a request without its `id`; the harness assigns `"1"`, `"2"`,
   ... in order. `expect` is every line the runner must write for that
   request, responses and notifications alike, in order.
-- Masks stand in any value position: `"<label>"`, `"<time>"`, `"<id>"` and
-  `"<path>"` match any string; `"<ms>"` and `"<version>"` match any number
+- Masks stand in any value position: `"<label>"`, `"<time>"` and `"<id>"`
+  match any string; `"<ms>"` and `"<version>"` match any number
   (a boolean is not a number); `"<any>"` matches any value, objects and
   arrays included; `{"<unordered>": [...]}` matches an array holding the
   same elements in any order (for `edges[]`, §5.1); `"<id:NAME>"` matches
   any string and binds it for the rest of the transcript, so a later
-  `expect` must show the same string and a later `send` has it substituted,
-  whole or inside a longer string (`"transit/Depot/#<id:bus>/cabin"`),
-  which is how a transcript names a runtime-assigned token id or nested id
-  and spells a path (§12.1). Numbers compare by value (`0` matches `0.0`);
-  an object must have exactly the expected keys; arrays must have the same
-  length and match element by element.
-- A transcript shared across runtimes masks every token id, nested id and
-  path, and every `marking_version` (§2, §4, §12.1), every `type_name` and
-  `label`, `runtime` and `runtime_version`, every `duration_ms` and time,
+  `expect` must show the same string and a later `send` has it substituted
+  whole, which is how a transcript names a runtime-assigned token id or
+  nested id, a token id in a step of a path included
+  (`{"place": "Depot", "token": "<id:bus>", "net": "cabin"}`, §12.1).
+  Numbers compare by value (`0` matches `0.0`); an object must have exactly
+  the expected keys; arrays must have the same length and match element by
+  element. (Until 2026-11-21 a path was text, masked whole as `"<path>"`,
+  and a `send` substituted a capture inside a longer string to spell one.)
+- A transcript shared across runtimes masks every token id, those in the
+  steps of a path included, every nested id, every `marking_version` and
+  `outer_marking_version` and the values of `subnet_marking_versions` (§2,
+  §4, §12.1, §12.7), every `type_name` and `label`, `runtime` and
+  `runtime_version`, every `duration_ms` and time,
   and sets every `detail` to `"<any>"`. It carries `color` only where both
   runtimes give the token the same colour, which the conformance nets do by
   giving hex values (`"#rrggbb"`, lowercase), never names (until 2026-10-16 a
@@ -630,8 +694,13 @@ dated where the net is described.
   the same level become one `fired {transition, consumed, produced,
   duration_ms}` that stands where the `distributed` stood, carrying
   `consumed` from the `launched` and `marking_version` and `running` from
-  the `distributed`. The lines between the two pieces keep their places
-  before it, and only the firing's own may stand there: its inner effects
+  the `distributed`, and the versions of §12.7 from both:
+  `subnet_marking_versions` holds the subnet places either piece names, with
+  the `distributed`'s value for one that both name, and
+  `outer_marking_version` is the `distributed`'s when it has one, else the
+  `launched`'s; each is present on the `fired` when a piece has it. The
+  lines between the two pieces keep their places before it, and only the
+  firing's own may stand there: its inner effects
   (`nested` around `added`, `removed`, `mutated`, `param_changed` or
   `fireable`), its own `mutated`s, and, under a connection's filter, the
   `hidden`, `added` or `removed` that stand in for a mutation (§13.4).
@@ -672,11 +741,12 @@ dated where the net is described.
   journey under plain stepping: each vehicle's state is where the door tokens
   in its cabin are, read by the outer guards and moved by an inner transition
   and by `Arrive`. Places, in this order: `Depot`, `Central`, `Harbour`,
-  `Airport` (type `Vehicle`, nested, serializable), `Platform@Depot`,
-  `Platform@Central`, `Platform@Harbour`, `Platform@Airport` (type `str`,
-  passengers waiting to board), `In Transit` (type `Vehicle`, nested,
-  serializable), `Arrived` (type `str`, passengers who have alighted,
-  anywhere; an alighted passenger never goes back onto a platform, where it
+  `Airport` (type `Vehicle`, nested, serializable, stepping `outer_first`),
+  `Platform@Depot`, `Platform@Central`, `Platform@Harbour`,
+  `Platform@Airport` (type `str`, passengers waiting to board), `In Transit`
+  (type `Vehicle`, nested, serializable, stepping `outer_first`), `Arrived`
+  (type `str`, passengers who have alighted, anywhere; an alighted
+  passenger never goes back onto a platform, where it
   would board again). `Vehicle` is `{name, kind, destination, cabin}` with
   `kind` one of `"Bus"`, `"Tram"`, `"Ferry"`, `"Shuttle"`, `destination` a
   place name while in transit and `null` otherwise, and `cabin` its one inner
@@ -758,18 +828,21 @@ dated where the net is described.
   the net's one load parameter, which sets where it starts: `describe` lists
   it as not required, with default `null` (since 2026-10-12, when the Python
   factory came to declare its type by annotating it). Driven by the order of
-  §12.3 (the outer net first, the first declared fireable transition by
-  default), the seed tells this story: `Board Depot` three times, `Board
-  Harbour` twice, the bus's `Sit`, `Sit`, `Stand` and `Close Doors`, `Depart
+  §12.3, under which, with every place that holds nets stepping outer
+  first, the outer net's choice comes first (the first declared fireable
+  transition by default), the seed tells this story: `Board Depot` three
+  times, `Board Harbour` twice, the bus's `Sit`, `Sit`, `Stand` and `Close Doors`, `Depart
   Depot`, `Arrive` at Central, then for each passenger `Go To Door` (or `Go
   To Door From Standing`) and `Alight Central`, the bus's `Clear
   Announcement`, `Board Central` twice, and so on round the loop, the ferry's
   deck likewise, closing its two doors with two firings of `Close Doors`:
   after 45 firings all seven passengers are in `Arrived`, and the vehicles
   keep going round, empty. The story holds whatever the tie-break within each
-  net as long as the outer net fires first; a driver that gave the cabins the
-  first turn would close every vehicle's doors before anyone boarded. The
-  transit transcript holds nothing back: it steps that journey from the seed
+  net as long as the outer net fires first, which is why the net states
+  outer first on every place that holds nets (since 2026-11-21, when inner
+  first became the default): under inner first the cabins would close every
+  vehicle's doors before anyone boarded. The transit transcript holds
+  nothing back: it steps that journey from the seed
   with every transition enabled (until 2026-10-10 it held `Alight`, `Depart`
   and `Arrive` back with `disable` and fired them as the design's script
   did).
@@ -939,6 +1012,16 @@ dated where the net is described.
   to one place (with three transitions: `Turn Green`, `Pass on Green`,
   `Change`) to these two transitions, and then gained its controls and its
   colours.
+- Version 2 (2026-11-21) re-records the shared set: every transcript that
+  carries the version pins `protocol_version` 2, and `05_nested_nets.json`
+  is recorded afresh, its paths spelt as lists of steps (§12.1) and the
+  `stepping` of the transit net's places pinned, so that the story above
+  still holds. Two transcripts join the set, each over a conformance net that
+  is fixed here when the transcript is recorded, as the nets above are:
+  `09_subnet_places.json`, over a small world with two levels built from one
+  template, heroes entering a level through one port place and leaving
+  through another (§12.7); and `10_stepping_rules.json`, over a net whose
+  places hold nets under the stepping rules of §12.3.
 
 ## 12. Nested nets
 
@@ -947,7 +1030,10 @@ A token may hold Petri nets of its own: *inner nets*, held by a token of the
 other. The net process hosts the outer net; inner nets live inside its
 tokens and are reached through them, so a viewer can open a token and watch
 the net inside it. This is the wire side of `NETS_AS_TOKENS.md` (R8); both
-runners implement it.
+runners implement it. A place may hold a net too: a *subnet place* holds one
+*subnet*, an inner net that lives as long as the outer net and is reached
+from it through its *port places* (§12.7). What §12.1 to §12.6 say of inner
+nets holds for subnets too, except where they say otherwise.
 
 ### 12.1 Addressing: paths and nested ids
 
@@ -955,17 +1041,31 @@ An inner net is named in two ways. Every method that takes one accepts
 either, as `path` or as `nested_id`; giving both is `invalid_params`;
 giving neither names the outer net.
 
-- A **path** is a string: the outer net's name, then, per level of nesting,
-  the place, the token (its id with `#` in front) and the inner net's name
-  within the token, joined by `/`: `City/Depot/#17/cabin`, and
-  `City/Depot/#17/cabin/Door/#3/luggage` one level further down. The first
-  segment must be the loaded net's name. A token that is itself a net holds
-  one inner net whose name is the empty string, so its path ends in `/`. A
-  place or net name containing `/`, or a place name beginning with `#`,
-  cannot be spelt in a path; such a net is reached by its nested id. A path
-  names a net *as the marking stands*: an outer token that is taken and put
-  back gets a new token id (§2), so the paths to its inner nets change,
-  while their nested ids do not.
+- A **path** is a list of steps, one per level of nesting, from the loaded
+  net down; the empty list names the loaded net itself, as leaving `path`
+  out does. A step is an object of one of two forms:
+
+  | the net at this level | step |
+  |---|---|
+  | a net carried by a token | `{"place": "Depot", "token": "17", "net": "cabin"}`: the place that holds the token, the token's id (a string, §2) and the net's name within the token |
+  | a subnet | `{"place": "Level 3"}`: the subnet place |
+
+  Each step names a place of the net that the steps before it reach. The
+  bus's cabin is `[{"place": "Depot", "token": "17", "net": "cabin"}]`, and
+  a net one level further down is `[{"place": "Depot", "token": "17", "net":
+  "cabin"}, {"place": "Door", "token": "3", "net": "luggage"}]`. A port
+  place is a place of its subnet, so the net of a token in a port is reached
+  through the subnet: `[{"place": "Level 3"}, {"place": "Lobby", "token":
+  "4", "net": "metabolism"}]`. A token that is itself a net holds one inner
+  net whose name is the empty string, so its step has `"net": ""`. Names in
+  a step are compared exactly as given, whatever characters they hold. A
+  `path` that is not a list, a step without `place`, a step that has one of
+  `token` and `net` without the other, and a step value that is not a string
+  are `invalid_params`. A path names a net *as the marking stands*: an
+  outer token that is taken and put back gets a new token id (§2), so the
+  paths to its inner nets change, while their nested ids do not. A subnet's
+  path stays the same for as long as the subnet lives. A viewer that shows a
+  path as text, a breadcrumb, builds that text itself.
 - A **nested id** is a string the runtime mints for each inner net when it
   comes into being, unique within a generation of the outer net and never
   reused in it, opaque to a reader (the runtimes spell it differently;
@@ -973,15 +1073,18 @@ giving neither names the outer net.
   net: it survives every move of the token that holds it. It stops resolving
   when that token is consumed without being put back (§12.6), and when the
   outer net is reloaded or reset, which mints new ids for every inner net.
+  A subnet's nested id resolves from the `load` or `reset` that built it
+  until the next of either.
 
 A `path` or `nested_id` that names no live inner net is answered
-`unknown_net`, and the message says which segment failed.
+`unknown_net`, and the message says which step failed, by its position in
+the list counted from 0.
 
 ### 12.2 Discovering inner nets
 
 - `topology.places[]` carries `nested: true` on a place whose tokens may hold
-  nets, and `passive: true` on such a place whose inner nets are stepped only
-  by an outer body (§12.3).
+  nets and `subnet: true` on a subnet place (§12.7), and on both `stepping`,
+  the place's stepping rule (§12.3).
 - A token that holds nets carries `nets` wherever a token entry is given in
   full (`get_state`, `get_place_tokens`, `get_token`, `query`): a list, in
   the token's own order, of `{name, nested_id, path, template?, count}`: the
@@ -991,6 +1094,8 @@ A `path` or `nested_id` that names no live inner net is answered
   without a further read. A token without nets has no `nets` field. The
   positional `produced` entries and the `added` and `mutated` notifications
   carry no `nets`: a viewer that wants them reads the token.
+- A subnet place's entry in `marking.places` carries its subnet's
+  `{nested_id, path, template?, count}` as `subnet` (§12.7).
 - `describe` stays top level: it lists the nets a process can load, never
   their inner nets, which exist only once a net is built.
 
@@ -1004,56 +1109,97 @@ A `path` or `nested_id` that names no live inner net is answered
   and log. A result about an inner net carries `path` and `nested_id`
   (absent for the outer net), `inject`'s included: `{status, id,
   marking_version, path, nested_id}`, with the inner net's version (since
-  2026-10-12); the `net` of an inner `get_state` is the net's
-  name within its token, `template?` the template that built it, and
-  `generation` the inner net's own, `1` for as long as it exists.
+  2026-10-12); the `net` of an inner `get_state` is the net's name within
+  its token, or for a subnet the name of its subnet place, `template?` the
+  template that built it, and `generation` the inner net's own, `1` for as
+  long as it exists.
 - **Versions are per net.** Each inner net has its own `marking_version`,
   stamped on its reads and raised by exactly one for each of its state
-  notifications, under §4's rules. An event inside an inner net does not
-  move the outer net's version; the outer `nets[].count` of a token is a
-  hint read with the outer state, not a versioned value.
-- **Driving.** Inner nets are live. Quiescence of the outer net means no
-  fireable transition in it *and none in any inner net* of a non-passive
-  place; `execution_stopped {reason: "no_fireable_transitions"}` means that.
-  Both runners' sequential drivers fire, at each `step` and at each firing of
-  a running net, one transition chosen in this order: the outer net's own
-  selector among the outer net's fireable transitions; if it picks none, the
-  inner nets in place order, then token order within a place, then net order
-  within a token, each by its own selector, descending into a net's own
-  inner nets before moving to the next token. The `step` result and the log
-  entry of an inner firing carry its `path` and `nested_id`; the
-  `marking_version` of a `step` result is the outer net's. An inner net in a
-  `passive` place is never fired by the driver; only an outer body steps it.
-  That order is the default. A net built with the interleaved deep-step
-  policy (Python `deep_policy="interleaved"`, Rust `DeepPolicy::Interleaved`,
-  since 2026-10-12) is driven round a cycle instead, the outer net and then
-  the inner nets in that same order: each firing goes to the first net with
-  something to fire, counting from the net after the one the last firing was
-  in, so that an outer net that can always fire does not starve the inner
-  ones; the policy, like the tie-break within each net, is the runtime's own
-  and nothing on the wire changes (`DESIGN_RUNNER.md`, Rust `DESIGN.md`
-  §6.6).
+  notifications, under §4's rules. An event inside an inner net moves the
+  version of the net around it only when it changes a port place, which
+  that net sees too, by the rule of §12.7. The outer `nets[].count` of a
+  token, like the `count` of a subnet, is a hint read with the outer state,
+  not a versioned value.
+- **Stepping rules.** Every place that holds nets, a nested place or a
+  subnet place, has one stepping rule. The net's definition gives it, the
+  topology shows it as the place's `stepping` (§5.1), and nothing on the
+  wire changes it. The rule says when the nets in the place fire, measured
+  against the net around them:
+
+  | `stepping` | the nets in this place |
+  |---|---|
+  | `inner_first` (the default) | fire until they are at rest before the net around them fires |
+  | `take_turns` | fire in turn with the net around them and with the nets of its other take-turns places |
+  | `outer_first` | fire only when the net around them and its turn-takers have nothing to fire |
+  | `passive` | are never entered by deep stepping; the program or a body steps them |
+
+- **One deep step.** A deep step of a net `N` fires at most one transition,
+  in `N` or in a net below it. It tries, in this order, and stops at the
+  first that fires:
+
+  1. every net in a place of `N` whose rule is `inner_first`, in walk
+     order: a deep step of that net;
+  2. the ring of `N`: `N` itself, then every net in a place of `N` whose
+     rule is `take_turns`, in walk order. The ring starts after the member
+     that fired last and goes round once. `N`'s turn is one firing chosen by
+     `N`'s own selector among its fireable transitions; another member's
+     turn is a deep step of that net;
+  3. every net in a place of `N` whose rule is `outer_first`, in walk
+     order: a deep step of that net.
+
+  Nets in a `passive` place are never tried. **Walk order** is places in
+  declaration order, a place's tokens oldest first, and a token's nets in
+  their declared order; a subnet place counts as one net, its subnet, at its
+  place's position. A port place is a place of its subnet, so the nets of
+  its tokens are reached by the subnet's deep step, under the rule the
+  subnet gives that place. **The ring's cursor** is kept by each net, in
+  memory only: the member that fired last is the member whose turn last
+  fired something. When no member has fired yet, or that member is no longer
+  in the ring (its token was taken), the ring starts at `N`. `load` and
+  `reset` start every ring afresh. Since the rule belongs to a place, it
+  applies at every level: when a net's deep step comes, it follows the rules
+  of that net's own places.
+- **Driving.** Inner nets are live. Both runners' drivers make one deep step
+  of the outer net at each `step` and at each firing of a running net. The
+  stepping rule decides only which net fires next; within a net the
+  selector, the tie-break included, is the runtime's own (`DESIGN_RUNNER.md`,
+  Rust `DESIGN.md` §6.6). The `step` result and the log entry of a firing in
+  an inner net carry its `path` and `nested_id`; the `marking_version` of a
+  `step` result is the outer net's. A net is **quiescent deep** when it and
+  every net in its places whose rule is not `passive` are at rest, at every
+  depth; the outer net's quiescence is that, and `execution_stopped {reason:
+  "no_fireable_transitions"}` means it. A net in a `passive` place fires only
+  when the program, or an outer body holding its token, steps it.
+- **A firing in flight at a port.** While an outer firing that touches a
+  port place (its transition has an edge on it, input or output) is in
+  flight, launched and not yet `distributed` or `failed`, the subnet behind
+  that port takes no turn: deep stepping skips it wherever its turn would
+  come. Firing in parallel across levels is not part of this version: one
+  firing at a time across the tree, except that an outer body may still be
+  running on its own thread, where a runtime's driver lets it.
 - **Baselines.** An inner net's `fireable` baseline (§7.2) is taken when the
   runtime first knows of the net: at `load` for the inner nets the factory
-  seeded, at the `inject` that carried the token, or at the landing of the
-  outer firing that produced the token. No `fireable` is sent for the
-  baseline itself; the first `nested` `fireable` for that net reports the
-  first change from it. `reset` and `load` retake every baseline, the nets
-  being new (since 2026-10-12).
+  seeded and for every subnet, at the `inject` that carried the token, or at
+  the landing of the outer firing that produced the token. No `fireable` is
+  sent for the baseline itself; the first `nested` `fireable` for that net
+  reports the first change from it. `reset` and `load` retake every
+  baseline, the nets being new (since 2026-10-12).
 - **Reads during a firing.** While an outer body runs, a read addressed to
   an inner net of a token that firing took, or holds through a mutate edge,
   is answered after the landing (it may wait, as `get_token` on such a token
-  does, §6.5); every other inner net is unchanged by that body, since an
-  outer body reaches only the tokens it holds and an inner body only its own
-  net, and is answered at once. While an inner body runs, reads of that inner
-  net follow §6.3 as for the outer net.
+  does, §6.5), and so is a read addressed to a subnet one of whose port
+  places that firing touches; every other inner net is unchanged by that
+  body, since an outer body reaches only the tokens it holds and an inner
+  body only its own net, and is answered at once. While an inner body runs,
+  reads of that inner net follow §6.3 as for the outer net.
 - `enable`, `disable`, `set_param`, `start`, `stop`, `reset`, `step` and
   `press` act on the outer net only; any of them given `path` or `nested_id`
   is `invalid_params` (`step` named here since 2026-10-12: its result names
   the net a firing was in, its request names none; `press` since 2026-10-16,
   the controls being the outer net's). An inner net's switches and
   parameters are set by the template that builds it or by an outer body
-  reaching inside.
+  reaching inside, and a subnet's by the template or by the program
+  (§12.6).
 
 ### 12.4 Inner events
 
@@ -1062,7 +1208,7 @@ An event inside an inner net reaches the host as one `nested` notification
 
 ```json
 {"method": "nested", "params": {
-  "path": "City/Depot/#17/cabin", "nested_id": "3",
+  "path": [{"place": "Depot", "token": "17", "net": "cabin"}], "nested_id": "3",
   "event": {"method": "launched", "params": {"transition": "Sit", "consumed": [["Door", "1"]],
                                              "marking_version": 4, "running": false}},
   "marking_version": 42, "running": false}}
@@ -1072,12 +1218,16 @@ An event inside an inner net reaches the host as one `nested` notification
 `marking_version` and the process's `running` in its `params`: a firing in
 an inner net is `nested` around `launched` then `nested` around
 `distributed` (or `failed`), and a harness folds the pair as it folds the
-outer one (§11). The wrapper carries the outer net's `marking_version`,
-which the inner event does not move, and `running`. Whatever the depth
+outer one (§11). The wrapper carries the outer net's `marking_version` and
+`running`. The inner event leaves the outer net's version as it was, unless
+it changed a port place of one of the outer net's subnet places; then the
+wrapper carries the outer net's new version (§12.7). Whatever the depth
 there is one wrapper, and `path` is the full path. A reader that does not
-know `nested` skips it and is untouched by nesting. Before each outer firing
-that consumes a nested token, the driver drains the inner net's events into
-the outer log, so none are lost when the token is dropped (§12.6).
+know `nested` skips it, and sees a change of one of its port places told by
+a subnet as a gap in its version, which it meets as any gap (§4). Before
+each outer firing that consumes a nested token, the driver drains the inner
+net's events into the outer log, so none are lost when the token is dropped
+(§12.6).
 
 Order within an outer firing: what its body did inside the tokens it holds
 (the `nested` lines for the inner `added`, `removed` and `param_changed`)
@@ -1085,7 +1235,8 @@ comes after its `launched` and before its own `mutated`s and `distributed`
 (or `failed`); the path on those lines is the token's place once the firing
 has placed it (`In Transit` for a `Depart`), since that is where the net is
 when the lines are written. The `fireable` of the outer net, if it changed,
-precedes the `nested` `fireable` of each inner net the firing touched.
+precedes the `nested` `fireable` of each inner net the firing touched, and
+in general the `fireable` of a net precedes those of the nets inside it.
 
 ### 12.5 Nested tokens as JSON
 
@@ -1120,6 +1271,12 @@ each inner net, that net's state:
   baselines). An `inject` addressed to an inner net, of this form or any
   other, is answered with that net's `path`, `nested_id` and version
   (§12.3).
+- An inner net may hold subnet places of its own (§12.7). In its `marking`,
+  a subnet place's entry is a list of one: its subnet in this same form,
+  `{template, marking, params, enabled}`. A port place's tokens are written
+  once, in the subnet's `marking`. A subnet built without a template has no
+  such form, so a net that holds one has none either, and a nested place
+  whose tokens hold such nets is not `serializable`.
 
 ### 12.6 Lifetime
 
@@ -1129,9 +1286,199 @@ events are gone: `launched.consumed` names the token, its nested ids stop
 resolving (`unknown_net`), and a viewer attached to one detaches. An outer
 firing that takes the token and puts it back, the common move, keeps the
 inner net and its nested id and gives the token a new id. `reset` and `load`
-drop every inner net with the marking. No runtime changes an inner net's
-topology once built; no inner transition reads or writes the outer net; the
-outer net reaches inside only through its own bodies.
+drop every inner net with the marking. A subnet exists as long as the outer
+net: from the `load` or `reset` that builds it until the next of either. No
+runtime changes an inner net's topology once built; no inner transition
+reads or writes the net around it. That net reaches a token's nets only
+through its own bodies, and a subnet of its own only through the edges on
+that subnet's port places. The program that holds the nets may also read a
+subnet, and step or change it, as it may a token's net; what it changes is
+told by the subnet.
+
+### 12.7 Subnet places and port places
+
+A **subnet place** holds exactly one **subnet**, a net given when the outer
+net is built, and holds no tokens of its own. The subnet is a separate net,
+with its own marking, token ids, version, progress and log entries, and it
+lives as long as the outer net (§12.6). The net around it reaches it only
+through its **port places**: places of the subnet that the subnet's
+definition marks as ports, each an ordinary place or a nested place, never a
+subnet place. The outer net's edges use a port place as they use a place of
+its own, with every input edge kind and every way of choosing an output, and
+nothing else of the subnet can be named by the outer net. A port is named
+from outside by a pair, its subnet place and its own name, never by a
+combined name: place names are unique within a net, and port names within a
+subnet. A token crosses between a subnet and the net around it only by a
+firing of an outer transition, which consumes it and produces a new token
+with a new id, as every firing does. A subnet may hold subnet places of its
+own, at any depth; each level hands tokens inward by a transition of its
+own. In this section the outer net is the net that holds the subnet place,
+at whatever depth, and the loaded net is the one the process loaded.
+
+- **Topology.** In the outer net's `topology.places[]`, a subnet place is
+  `{name, type_name, subnet: true, ports, stepping}`. `type_name` is the
+  name of the template that built the subnet, or `""` when it was built
+  without one. `ports` lists its port places in the subnet's declaration
+  order, each with the fields that place has in the subnet's own topology
+  (`name`, `type_name`, `serializable`, `nested?`, `stepping?`,
+  `key_names?`, `style?`) apart from `port`. `stepping` is the place's
+  stepping rule (§12.3). In the subnet's own topology, which `get_state`
+  addressed to the subnet returns, each port place carries `port: true`. The
+  outer topology lists no other place of the subnet, and an edge of the
+  outer net names a port with `port` beside `place`:
+
+  ```json
+  {"places": [{"name": "Door", "type_name": "Hero", "serializable": true},
+              {"name": "Level 3", "type_name": "Level", "subnet": true, "stepping": "inner_first",
+               "ports": [{"name": "Lobby", "type_name": "Hero", "serializable": true},
+                         {"name": "Exit Hall", "type_name": "Hero", "serializable": true}]}],
+   "transitions": [{"name": "Enter"}],
+   "edges": [{"place": "Door", "transition": "Enter", "direction": "in", "kind": "take"},
+             {"place": "Level 3", "port": "Lobby", "transition": "Enter", "direction": "out"}]}
+  ```
+
+- **References.** Wherever the outer net names a port, `port` stands beside
+  `place`, which names the subnet place: in an edge, in `added`, `removed`,
+  `mutated` and `hidden`, in `get_place_tokens` and its result, in `inject`,
+  and in a match of `query`. Where a place is named by position, in the
+  `consumed` and `produced` entries of §7.1 and of the log (§8), a port is
+  the object `{"place": "Level 3", "port": "Lobby"}` where a place of the
+  net's own is its name: `[{"place": "Level 3", "port": "Lobby"}, "4",
+  "Hero(name='Ada')"]`. A net names its own places by their names alone,
+  its port places included, so the subnet tells a change of `Lobby` as
+  `["Lobby", "4"]`. `get_place_tokens` or `inject` that names a subnet place
+  without a `port` is `invalid_params`; a `port` that its subnet place does
+  not have, or a `port` beside a place that is not a subnet place, is
+  `unknown_place`.
+- **State.** In the outer net's `get_state`, a subnet place's entry in
+  `marking.places` is `{subnet, ports}`. `subnet` is
+  `{nested_id, path, template?, count}`, the fields of a token's `nets[]`
+  entry (§12.2) apart from `name`, where `count` is the number of tokens in
+  the subnet's places, its ports included; tokens in a subnet of the subnet
+  are counted in that subnet's own entry. `ports` maps each port's name to
+  its `count`, `tokens` and, under a filter, `matching`, as `marking.places`
+  gives them for a place (§5.3), capped by the same `token_limit`. The entry
+  has no `count` or `tokens` of its own, since the place holds no tokens.
+  `subnet.count` is a hint, as `nets[].count` is; the ports' counts and
+  tokens are versioned with the outer net, by the rule on versions below.
+
+  ```json
+  {"places": {
+    "Door": {"count": 1, "tokens": [{"id": "11", "label": "Hero(name='Ada')"}]},
+    "Level 3": {"subnet": {"nested_id": "5", "path": [{"place": "Level 3"}], "template": "Level", "count": 2},
+                "ports": {"Lobby": {"count": 1, "tokens": [{"id": "3", "label": "Hero(name='Bram')"}]},
+                          "Exit Hall": {"count": 0, "tokens": []}}}}}
+  ```
+
+- **Requests.** `get_place_tokens` and `inject` name a port with `port`
+  beside `place` on the outer net, or address the subnet (`path` or
+  `nested_id`) and name the place alone: `get_place_tokens {place: "Level
+  3", port: "Lobby"}` and `get_place_tokens {place: "Lobby", path:
+  [{"place": "Level 3"}]}` read the same tokens, and each is answered with
+  the version of the net it addressed. On the outer net, `query` and
+  `distinct` cover the ports with the places, a subnet place's ports at its
+  position in their `ports` order, and a match in a port is `{place, port,
+  token, json?}`. In a filter's `places` (§13.2) and in `distinct`'s
+  `places`, an entry names a port as `{"place": "Level 3", "port": "Lobby"}`;
+  a subnet place named alone selects no tokens, since it holds none, and a
+  filter's `prefix` is tested against a port's own name. `get_token` names a
+  token by its id alone, and a port place's tokens carry their subnet's ids,
+  which may equal ids of the outer net's own tokens, so the token of a port
+  is read through its subnet: `get_token {id: "3", path: [{"place": "Level
+  3"}]}`.
+- **Filters** apply per net, as everywhere: a port place is filtered in its
+  subnet. The connection filter (§13.4) that projects a port place's tokens
+  is its subnet's, set by `set_filter` addressed to the subnet, in the reads
+  and notifications of both nets; the outer net's connection filter projects
+  the outer net's own places. A `query` on the outer net without a `filter`
+  therefore uses, for a port, the subnet's connection filter. A `query` or
+  `distinct` given a filter of its own applies it to every place it covers,
+  ports included.
+- **One place, two views.** A port place's tokens appear in the states of
+  both nets, with the same ids, minted by the subnet. A change of the place
+  is told once, by the net through which it was made: an outer firing, or an
+  `inject` or other change made through the outer net, is told by the outer
+  net, naming the pair; an inner firing, or a change made through the
+  subnet, is told by the subnet, naming the place alone, in a `nested`
+  wrapper (§12.4). A reader that shows both nets applies a change told by
+  either to both. A failed outer firing restores what it took from a port
+  place as from any place (`restored`, §7.1), and its `failed` names the
+  pair; a failed inner firing is told as any inner failure is. After a
+  change of a port place the runtime compares the
+  fireable sets of both nets with the last it sent for each, and sends a
+  `fireable` for each net whose set differs, the outer net's first (§12.4).
+- **Versions.** A port place is in the markings of two nets, so a change of
+  it raises the `marking_version` of each by exactly one, and the one
+  notification that tells it carries both new values:
+  - Told by the outer net (its `launched`, `distributed`, `fired`,
+    `failed`, `added`, `removed`, `mutated` or `hidden`, in a `nested`
+    wrapper when the outer net is itself an inner net), the notification
+    carries the outer net's new version as `marking_version`, as always, and
+    `subnet_marking_versions`: an object that maps the name of each subnet
+    place whose port places the change touched to its subnet's new version.
+  - Told by the subnet (the same notifications, in a `nested` wrapper), the
+    `event` carries the subnet's new version as `marking_version` and
+    `outer_marking_version`, the outer net's new version. When the outer
+    net is the loaded net, the wrapper's `marking_version` is the same new
+    value; deeper down the wrapper carries the loaded net's version
+    unchanged, since the loaded net does not see the place.
+
+  Each field is present only on a notification that changed a port place
+  the field covers, and one notification may carry both: an inner firing
+  that takes from a port of its own net and puts into a port of a subnet of
+  its own. A version stamped on a read of either net covers every change of
+  the port place told up to that version. A reader that follows both nets
+  moves each version it holds to the value given for that net and sees no
+  version skipped in either. A reader that follows one of the two nets and
+  not the other sees a change told by the other as a gap in its own version
+  (§4), the next value it meets being more than one beyond the one it holds,
+  and refetches, as at any gap.
+
+  For example, the loaded net `world` is at version 42 and holds the subnet
+  place `Level 3`, whose subnet, nested id `"5"`, is at version 7. `Enter`
+  takes a hero from `Door` and puts it into the port place `Lobby`; then the
+  subnet's `Walk In` takes it from `Lobby` into `Arena`. The runtime writes
+  these four lines, shown here as one array, with the `fireable` lines left
+  out:
+
+  ```json
+  [
+    {"method": "launched", "params": {"transition": "Enter", "consumed": [["Door", "11"]],
+                                      "marking_version": 43, "running": false}},
+    {"method": "distributed", "params": {"transition": "Enter",
+                                         "produced": [[{"place": "Level 3", "port": "Lobby"}, "4", "Hero(name='Ada')"]],
+                                         "duration_ms": 0.2, "subnet_marking_versions": {"Level 3": 8},
+                                         "marking_version": 44, "running": false}},
+    {"method": "nested", "params": {
+      "path": [{"place": "Level 3"}], "nested_id": "5",
+      "event": {"method": "launched", "params": {"transition": "Walk In", "consumed": [["Lobby", "4"]],
+                                                 "outer_marking_version": 45,
+                                                 "marking_version": 9, "running": false}},
+      "marking_version": 45, "running": false}},
+    {"method": "nested", "params": {
+      "path": [{"place": "Level 3"}], "nested_id": "5",
+      "event": {"method": "distributed", "params": {"transition": "Walk In",
+                                                    "produced": [["Arena", "5", "Hero(name='Ada')"]],
+                                                    "duration_ms": 0.1, "marking_version": 10, "running": false}},
+      "marking_version": 45, "running": false}}
+  ]
+  ```
+
+  `world` goes 43, 44, 45 and the subnet 8, 9, 10, each without a skip. The
+  `distributed` of `Enter` raised both, `world`'s told as its
+  `marking_version` and the subnet's in `subnet_marking_versions`; the
+  `launched` of `Walk In` raised both, the subnet's told as its
+  `marking_version` and `world`'s as `outer_marking_version` and on the
+  wrapper; the `distributed` of `Walk In` touched no port, so `world` stays
+  at 45. A reader that follows `world` alone and skips `nested` next meets
+  `world` at 46, sees the gap, and refetches.
+- **Reads, events and steps** keep their shape. An event in a subnet arrives
+  as `nested` with the subnet's path, `[{"place": "Level 3"}]`, and its
+  nested id. A `step` that fired inside a subnet answers with that `path`
+  and `nested_id`. A subnet's `fireable` baseline is taken at `load` and at
+  `reset` (§12.3). While an outer firing that touches one of the subnet's
+  port places is in flight, a read addressed to the subnet waits for the
+  landing and the subnet takes no turn (§12.3).
 
 ## 13. Keys, queries and filters
 
@@ -1156,8 +1503,10 @@ side of `TOKEN_QUERYING_AND_FILTERING.md` (R3); both runners implement it.
 
 ### 13.2 Filters
 
-A filter is `{clauses?: [clause], places?: [name], prefix?: string}`; a
-clause is `{key, values: [value]}` or `{key, param}`.
+A filter is `{clauses?: [clause], places?: [place], prefix?: string}`; a
+clause is `{key, values: [value]}` or `{key, param}`. A `places` entry is a
+place name, or `{place, port}` for a port place of one of the net's subnet
+places, which is filtered by its own name (§12.7).
 
 - A token matches a filter when it matches every clause (AND across
   clauses) and lies in a place `places` names, if given, whose name begins
@@ -1175,14 +1524,16 @@ clause is `{key, values: [value]}` or `{key, param}`.
 
 | method | params | result |
 |---|---|---|
-| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches: [{place, token, json?}]}` |
+| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches: [{place, port?, token, json?}]}` |
 | `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values: [value]}` |
 
 - `query` returns the tokens matching `filter` (absent, or `null` as §2
   says: the connection's filter of §13.4, else every token), in place order
-  then token order, each as `{place, token, json?}`: `token` a full token
-  entry (§5.3, keys included) and `json` the token's JSON value where its
-  place is `serializable`. `count` is the number of matches and `matches`
+  then token order, each as `{place, port?, token, json?}`: `token` a full
+  token entry (§5.3, keys included), `json` the token's JSON value where its
+  place is `serializable`, and `port` present for a match in a port place,
+  which the outer net's `query` covers at its subnet place's position
+  (§12.7). `count` is the number of matches and `matches`
   holds the first `token_limit` of them (default 200, clamped to 1..1000, as
   `get_state`). It reflects the marking at `marking_version` and never waits
   for a running body: it is served from the same marking as `get_state`.
@@ -1203,7 +1554,9 @@ notification of that net is projected through; `set_filter` without
 `filter` clears it. A net process has one connection, so one filter per
 net; a relay (§9) that serves several clients keeps a filter per client and
 applies this same projection itself, which tokens carrying `keys` on the
-wire make possible. Under a filter:
+wire make possible. A port place is projected through its subnet's filter,
+in the reads and notifications of both nets that see it (§12.7). Under a
+filter:
 
 - `get_state` and `get_place_tokens` list only matching tokens. Each place
   reports `count`, the true number of tokens, and `matching`, the number the
