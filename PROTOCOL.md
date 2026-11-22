@@ -39,11 +39,11 @@ firing and answers while a body runs (§6, §6.3, §6.5, §7.1, §12.3, §12.4,
 from version 1 (§10), and closes gaps in §5.1, §11, §12.1, §12.3, §12.6 and
 §12.7. Later the same day it came to say that the Rust runner reports the
 real duration of a body it runs inline, from its version 0.2.0 (§6.3,
-§12.4, §12.7), and the shared transcripts came to cover failed firings and a
-subnet's ports seen from outside, each new case over a conformance net of
-its own, with a failure's `error` masked (§11). Both runners implement it,
-the Rust one (`petritype-runner`, in
-`../petritype-rs`) and the Python one (`python -m petritype.runner`,
+§12.4, §12.7), and the shared transcripts came to cover failed firings, a
+subnet's ports seen from outside and a subnet inside a net a token carries,
+each new case over a conformance net of its own, with a failure's `error`
+masked (§11). Both runners implement it, the Rust one (`petritype-runner`,
+in `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
 2026-10-04. This file is the single source of truth for the protocol; the
@@ -892,9 +892,9 @@ described.
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
-  here under `tests/protocol/` (four files as of 2026-10-03, thirteen as of
+  here under `tests/protocol/` (four files as of 2026-10-03, fourteen as of
   2026-11-22, each replayed by `tests/test_protocol_transcripts.py` through
-  the runner's state machine; nine of them, `04`, `05` and `07` to `13`,
+  the runner's state machine; ten of them, `04`, `05` and `07` to `14`,
   are also replayed over pipes against `python -m petritype.runner`, the
   list `OVER_PIPES` there, and `01`, `02`, `03` and `06` in process only).
   They run
@@ -907,8 +907,8 @@ described.
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
   in full; a runner that carries other nets too replays it with a registry
-  reduced to the net the transcript names. Ten of the thirteen, `01` and
-  `05` to `13`, send `describe` and pin it in full, so over pipes they match
+  reduced to the net the transcript names. Eleven of the fourteen, `01` and
+  `05` to `14`, send `describe` and pin it in full, so over pipes they match
   only a binary that serves their one net; the Rust example binary serves
   every conformance net and others besides. The conformance nets live in
   `tests/protocol_nets/`, and four of them (`transit`, `wildlife`, `shop`
@@ -1456,6 +1456,60 @@ described.
   `removed` or `hidden` standing in for it) then `fired`, and the Python
   runner in two, with that line between them; both folds give the same lines
   (above).
+- A subnet inside a net that a token carries got its conformance net and
+  transcript on 2026-11-22, `14_subnet_in_a_token.json` over
+  `tests/protocol_nets/harbour.py`: the subnet's path through the token's
+  step, its nested id, reading and stepping it, its path as the token moves,
+  and its end when the token is consumed (§12.1, §12.6). Its names, places,
+  transitions, templates and seed are fixed here, since the transcript
+  depends on them:
+
+  **`harbour`** ("A ship stows its crate in its hold, sails and is
+  scrapped"), hosted `manual`, with no load parameters and no net
+  parameters. The net's places, in this order: `Quay` and `Sea`, places of
+  nets (nested, serializable, with the default stepping rule,
+  `inner_first`). A place of nets holds tokens that are each a net, so each
+  token holds one inner net, named with the empty string (§12.1). Two
+  templates build its inner nets, `Ship` and `Hold`, each taking no
+  parameters and each net stamped with its template's name; the transcript
+  never asks for a ship's JSON form. `Ship`: places, in this order, `Deck`
+  (strings, serializable), holding `"Crate"`, and `Hold`, a subnet place
+  holding a net the template `Hold` builds, with the default stepping rule,
+  `inner_first`; one transition, `Stow`, which takes the front of `Deck` (a
+  `take` edge) and produces it unchanged into the port `Hatch` of `Hold`.
+  `Hold`: places, in this order, `Hatch`, a port, and `Bay`, both of
+  strings, serializable and empty; one transition, `Settle`, from `Hatch` to
+  `Bay` in the same way. The net's transitions, in this order: `Sail`, which
+  takes the front of `Quay` and produces it unchanged into `Sea`, the ship's
+  nets going with it; and `Scrap`, which takes the front of `Sea` and has no
+  output. Seed: `Quay` one ship, `Sea` nothing. No transition has a guard or
+  a priority, no body fails, and every net chooses by the default selector.
+  From the seed, a deep step a `step` (§12.3), the net fires the ship's
+  `Stow` (path `[{"place": "Quay", "token": s, "net": ""}]`, `s` the ship's
+  token id), its hold being at rest; the hold's `Settle` (path that step
+  then `{"place": "Hold"}`), the hold being inner first in the ship; `Sail`,
+  the ship being at rest; `Scrap`; and then nothing. The transcript reads
+  `describe` and loads the net; reads the state of the net, whose ship's
+  `nets[]` names its one net, template `Ship`, `count` 1; reads the ship by
+  path, whose marking gives `Hold` as `{subnet, ports}` with the subnet's
+  path running through the ship's step; and the hold by that path, whose
+  `net` is `Hold` and `template` `Hold`; steps, `Stow` putting the crate
+  into the port, its `nested` `fired` carrying `subnet_marking_versions` for
+  `Hold` and its wrapper the loaded net's version, unchanged, then the
+  ship's `fireable` before the hold's; reads the net, where the ship's
+  `nets[]` now counts 0, since a net counts the tokens of its own places and
+  the crate is in a port of its hold (§12.2, §12.7), and the ship, whose
+  `Hold` counts 1 with the crate in `Hatch`; steps, `Settle` taking the
+  crate out of the port, its `fired` carrying `outer_marking_version`, the
+  ship's new version, and its wrapper the loaded net's, unchanged; reads the
+  hold by nested id, and the ship's log by path, both inner firings with
+  their paths and nested ids; steps, `Sail` taking the ship and putting it
+  into `Sea` with a new token id; reads the hold's `Bay` by nested id,
+  answered with the hold's new path, through `Sea` and the ship's new id,
+  and the hold by its old path, `unknown_net`; steps, `Scrap` consuming the
+  ship; reads the hold and the ship by nested id, each `unknown_net`; steps,
+  `fired: false`; and reads the whole log, the inner firings' entries
+  keeping their paths as they stood.
 
 ## 12. Nested nets
 
