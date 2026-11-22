@@ -37,7 +37,9 @@ with nothing on the wire changed: it says what each runner writes for a
 firing and answers while a body runs (§6, §6.3, §6.5, §7.1, §12.3, §12.4,
 §12.7), gives a relay its rules (§9), lists every difference of version 2
 from version 1 (§10), and closes gaps in §5.1, §11, §12.1, §12.3, §12.6 and
-§12.7. Both runners implement it, the Rust one (`petritype-runner`, in
+§12.7. Later the same day it came to say that the Rust runner reports the
+real duration of a body it runs inline, from its version 0.2.0 (§6.3,
+§12.4, §12.7). Both runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
@@ -473,8 +475,9 @@ before it moves to `describe`.
   in one piece: an outer body it cannot detach (one with a `mutate` or
   `mutate_where` edge) as its `mutated` lines then one `fired`, and a firing
   inside an inner net as one `nested` around `fired` (§12.4). Both of these
-  carry `duration_ms` 0.0 today, and such a firing that fails is its
-  `failed` with no `launched` before it. The same firing therefore moves a net's
+  carry the body's real `duration_ms`, which Rust builds before 0.2.0 wrote
+  as 0.0, and such a firing that fails is its `failed` with no `launched`
+  before it. The same firing therefore moves a net's
   version by two in one runner and by one in the other (§4), and a host
   and a viewer accept both shapes (until 2026-11-22 this text said that
   neither current runner wrote `fired`).
@@ -1578,7 +1581,8 @@ An event inside an inner net reaches the host as one `nested` notification
 an inner net is, from the Python runner, `nested` around `launched` then
 `nested` around `distributed` (or `failed`), which a harness folds as it
 folds the outer pair (§11), and from the Rust runner one `nested` around
-`fired` (or `failed`), with `duration_ms` 0.0 (§6.3): the inner net's
+`fired` (or `failed`), with the body's real `duration_ms` (§6.3; Rust
+builds before 0.2.0 wrote 0.0): the inner net's
 version moves by two in one and by one in the other for the same firing,
 and a reader accepts both (since 2026-11-22; until then this text gave the
 two-piece form alone). The wrapper carries the outer net's `marking_version`
@@ -1868,7 +1872,8 @@ at whatever depth, and the loaded net is the one the process loaded.
   A Rust process writes three lines for the same two firings (§6.3): the
   same `launched` and `distributed` of `Enter`, then one `nested` around a
   `fired` of `Walk In`, carrying its `consumed` and `produced` together,
-  `duration_ms` 0.0, `outer_marking_version` 45 and the subnet's
+  the body's real `duration_ms` (0.0 from Rust builds before 0.2.0),
+  `outer_marking_version` 45 and the subnet's
   `marking_version` 9, on a wrapper at 45. `world` goes 43, 44, 45 there
   too, and the subnet 8, 9.
 - **Reads, events and steps** keep their shape. An event in a subnet arrives
