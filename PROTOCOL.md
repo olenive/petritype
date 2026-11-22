@@ -42,7 +42,12 @@ real duration of a body it runs inline, from its version 0.2.0 (§6.3,
 §12.4, §12.7), and the shared transcripts came to cover failed firings, a
 subnet's ports seen from outside, a subnet inside a net a token carries and
 names that hold any character, each new case over a conformance net of its
-own, with a failure's `error` masked (§11). Both runners implement it, the
+own, with a failure's `error` masked (§11). Later still that day the
+`heartbeat` gained two optional fields, `path` and `nested_id`, which name
+the inner net a body runs in, and both runners came to write them (Python
+from 0.4.1, Rust from 0.2.1); the text came to say what a host can conclude
+from a heartbeat and how a net is stopped during a body the Rust runner runs
+inline (§3, §6, §6.3, §7.2). Both runners implement it, the
 Rust one (`petritype-runner`, in `../petritype-rs`) and the Python one
 (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
@@ -134,7 +139,8 @@ told apart by their keys:
   `subprocess_output` itself.
 - Lines may be long (a full marking page); a host must accept lines of at
   least 16 MiB. Paged reads (§6) keep single responses well below that.
-- When stdin reaches end of file the net process exits.
+- When stdin reaches end of file the net process exits; §6.3 says when,
+  for a process that is running a body.
 
 ### Error codes
 
@@ -397,7 +403,7 @@ that fails counts in none of the four.
 | `get_token` | `{id, path?, nested_id?}` | `{id, place, type_name, kind: "json", value, path?, nested_id?, nets?}` or `{..., kind: "text", text, ...}` | live tokens only |
 | `step` | `{}` | `{fired: bool, transition?, failed?, path?, nested_id?, marking_version, running}` | one firing, sequential semantics (§6.3); `path` when it was in an inner net (§12.3) |
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
-| `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish |
+| `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish, and the net fires nothing more on its own; a Rust process answers it once a body it runs inline lands (§6.3) |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
 | `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3) |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
@@ -407,7 +413,7 @@ that fails counts in none of the four.
 | `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches}` (§13.3) | answered while a body runs, as §6.3 says |
 | `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values}` (§13.3) | |
 | `set_filter` | `{filter?, path?, nested_id?}` | `{marking_version}` | the connection's projection (§13.4) |
-| `shutdown` | `{}` | `{status: "ok"}` | then the process exits |
+| `shutdown` | `{}` | `{status: "ok"}` | then the process exits, abandoning a body still running; a Rust process answers it once a body it runs inline lands (§6.3) |
 
 `path` and `nested_id` name an inner net (§12.1); a method that takes them
 acts on that net instead of the outer one. Without either, a method acts on
@@ -493,15 +499,38 @@ before it moves to `describe`.
   `distinct` and `stop` are answered at once, a read from the marking as
   the firing's `launched` left it, except the reads that §6.5 and §12.3
   hold for the landing, and so are `describe` and `shutdown`; every other
-  request waits for the landing. While a body runs inside a request or
-  tick, which only the Rust runner does, that runner reads no request until
-  the body lands: every request, reads and `stop` included, is answered
-  after it, and the `heartbeat` (§7.2) names no body while an inner one
-  runs. A host that talks to a Rust process
-  therefore lets a read wait for as long as such a body runs, and takes
-  neither the wait nor a heartbeat that names no body as a sign that the
-  process has stopped (since 2026-11-22; until then this text said that
-  reads were answered while any body ran).
+  request waits for the landing. While a body runs inside the request or
+  tick that fires it, an inline body, which only the Rust runner runs, that
+  runner reads no request until the body lands: every request, reads,
+  `stop` and `shutdown` included, is answered after it. A host that talks
+  to a Rust process therefore lets a read wait for as long as such a body
+  runs (since 2026-11-22; until then this text said that reads were
+  answered while any body ran).
+- **What a heartbeat tells a host.** The `heartbeat` (§7.2) names the body
+  that runs and when it started, and, for a body in an inner net, that
+  net's `path` and `nested_id`. The Python runner names every body it runs,
+  and from its version 0.4.1 gives the net of one in an inner net; before,
+  it named such a body without its net. The Rust runner names a body it
+  detaches and an outer body with a mutate edge, which it runs inline, and
+  from its version 0.2.1 a body in an inner net too, with `path` and
+  `nested_id`; earlier Rust builds named no body while an inner one ran.
+  So a heartbeat that names a body means the process is busy in that body
+  since `step_started_at`, however long a read has waited, and a process
+  whose heartbeats name no body while it answers nothing is the one to
+  suspect. No heartbeat can tell a long body from one that never returns.
+  Two kinds of firing are named by no heartbeat: one that a control's
+  `press` makes in a Rust process, and, in either runner, one that a body
+  makes inside the nets of its own tokens, for which the heartbeat names
+  the body that runs, the enclosing one (stated since 2026-11-22; until
+  then this text said only that a Rust heartbeat named no inner body).
+- **Stopping a net during an inline body.** A `stop` or `shutdown` sent
+  while a Rust process runs an inline body is read when that body lands.
+  From Rust 0.2.1 such a `stop` is answered when that one body lands, and
+  the net fires nothing more before the answer; before 0.2.1 a running net
+  could start further firings before it answered. A host that must stop
+  such a net sooner ends the process. Closing the process's input (§3)
+  ends a Python process at once, abandoning the body that runs, and a Rust
+  process when the inline body lands (stated since 2026-11-22).
 - A failing body emits `failed`; whether execution goes on is the runtime's
   policy and is reported by `execution_stopped` when it stops, with
   `reason: "transition_failed"` and the failure's `error_type` and `message`
@@ -641,7 +670,7 @@ notification that changes a port place carries, besides its own net's
 | `fireable` | `{transitions: [name]}` | the fireable set after a batch of changes, sent only when it differs from the last one sent |
 | `idle` | `{idle_since}` | a `"24/7"` net found nothing fireable; once per idle spell |
 | `execution_stopped` | `{reason, error_type?, message?}` | the net stopped running on its own |
-| `heartbeat` | `{step_started_at, executing_transition}` | periodic while loaded; both `null` when no body runs |
+| `heartbeat` | `{step_started_at, executing_transition, path?, nested_id?}` | periodic while loaded: the body that runs and when it started, both `null` when no body runs; `path` and `nested_id` name the inner net the body runs in, as a `step` result names the net of its firing (§12.1, §12.3), and are absent for a body of the loaded net and when no body runs. Both runners write them, Python from 0.4.1 and Rust from 0.2.1 (since 2026-11-22; before, Python named a body in an inner net without them and Rust named no such body). What a host can conclude from a heartbeat: §6.3 |
 | `load_progress` | `{step, message}` | during `load` |
 | `nested` | `{path, nested_id, event: {method, params}}` | an event in an inner net, wrapping the notification that net would send (§12.4); moves the inner net's version, carried inside `event`, and moves the outer net's, carried by the wrapper, only when the event changed one of the outer net's port places (§12.7) |
 
