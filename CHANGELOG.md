@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0, 2026-11-22
+
+The [`v0.4.0` tag](https://github.com/olenive/petritype/tree/v0.4.0).
 
 - The protocol runner serves groups (PROTOCOL.md §5.1): a net's topology lists its groups as `groups`, in their order, and the `group` of each place, subnet place and transition in one, each left out when absent, for the loaded net and every inner net, each its own; a port listed in a subnet place's `ports` carries no `group`, its group being the subnet's. Nothing else on the wire changes, and the protocol stays version 2. A new shared transcript, `tests/protocol/11_groups.json`, over the conformance net `groups`; every other transcript re-records to the same bytes.
 - Groups: `group=` on `ListPlaceNode`, `SubnetPlaceNode` and `FunctionTransitionNode` names the group the node is in, a label on parts of one net that only drawings read. `ExecutableGraph.groups` lists a net's groups in the order of their first mention, the places read before the transitions. A node is in one group or none, a name may hold any character, and a subnet or a net a token carries has groups of its own. Groups change nothing about how a net runs: it fires, steps, numbers its tokens, records its events and saves exactly as it would with none, and a saved net never mentions them; a copy or a template carries them. The Graphviz drawing frames each group as a dashed cluster titled with its name, in order (`RustworkxToGraphviz.dot_source` and `draw`, which `SimpleGraphvizVisualization` now draws through); a net with no groups draws the source it drew before. The example `examples/groups/hike.py`, with its notebook.
