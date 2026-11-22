@@ -82,7 +82,7 @@ from datetime import UTC, datetime
 from typing import Any, BinaryIO, Callable, Iterator, Optional, Union
 
 from petritype.runner import protocol as wire
-from petritype.runner.owner import Landing, Launch, Owner
+from petritype.runner.owner import Executing, Landing, Launch, Owner
 from petritype.runner.protocol import Malformed, Request, Requests
 from petritype.runner.registry import Registry
 
@@ -209,20 +209,25 @@ class Gauges:
     loaded: bool = False
     marking_version: int = 0
     running: bool = False
-    executing: Optional[tuple[str, datetime]] = None
+    executing: Optional[Executing] = None
 
     @classmethod
     def of(cls, owner: Owner) -> "Gauges":
         return cls(owner.loaded, owner.marking_version, owner.running, owner.status)
 
     def heartbeat(self) -> Optional[dict]:
-        """The ``heartbeat`` line, or ``None`` when no net is loaded."""
+        """The ``heartbeat`` line, or ``None`` when no net is loaded. It names
+        the body that runs, with the ``path`` and ``nested_id`` of its net when
+        that is an inner net (PROTOCOL.md §7.2)."""
         if not self.loaded:
             return None
-        name, started = self.executing if self.executing is not None else (None, None)
+        body = self.executing
+        inner = body is not None and body.nested_id is not None
         return wire.Heartbeat(
-            step_started_at=Frames.iso(started) if started is not None else None,
-            executing_transition=name,
+            step_started_at=Frames.iso(body.started_at) if body is not None else None,
+            executing_transition=body.transition if body is not None else None,
+            path=list(body.path) if inner else None,
+            nested_id=str(body.nested_id) if inner else None,
             marking_version=self.marking_version,
             running=self.running,
         ).line()

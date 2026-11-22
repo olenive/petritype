@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from petritype.runner.owner import Owner
+from petritype.runner import protocol as wire
+from petritype.runner.owner import Executing, Owner
 from petritype.runner.process import (
     Arguments,
     CommandLine,
@@ -289,7 +290,24 @@ def test_heartbeats_name_the_body_and_shutdown_abandons_it(spawn):
     shutdown = runner.answer(runner.send("shutdown"))
     assert shutdown[-1]["result"] == {"status": "ok"}
     assert all(line.get("id") != step_id for line in shutdown)
+    assert "path" not in beat["params"] and "nested_id" not in beat["params"], "a body of the loaded net"
     assert runner.finish() == 0  # well inside the body's minute
+
+
+def test_a_heartbeat_names_the_inner_net_a_body_runs_in(spawn):
+    runner = spawn("--module", "runner_slow_nets")
+    runner.request("load", {"net": "deep-sleeper"})
+    [ship] = runner.request("get_state")[-1]["result"]["marking"]["places"]["Quay"]["tokens"]
+    hold_path = [{"place": "Quay", "token": ship["id"], "net": ""}, {"place": "Hold"}]
+    hold_id = runner.request("get_state", {"path": hold_path})[-1]["result"]["nested_id"]
+    runner.send("step")  # the hold's body sleeps for a minute
+    beat = runner.until(
+        lambda line: line.get("method") == "heartbeat" and line["params"]["executing_transition"]
+    )[-1]
+    assert beat["params"]["executing_transition"] == "Linger"
+    assert (beat["params"]["path"], beat["params"]["nested_id"]) == (hold_path, hold_id)
+    assert runner.request("shutdown")[-1]["result"] == {"status": "ok"}
+    assert runner.finish() == 0
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
@@ -469,17 +487,27 @@ def test_heartbeats_follow_the_gauges_written_with_the_last_batch():
     stream.heartbeat()
     assert sink.getvalue() == b""  # nothing loaded: no heartbeat
     started = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
-    stream.write([], Gauges(loaded=True, marking_version=4, running=True, executing=("Greet", started)))
+    stream.write([], Gauges(loaded=True, marking_version=4, running=True, executing=Executing("Greet", started)))
     stream.heartbeat()
     stream.write([], Gauges(loaded=True, marking_version=5, running=False))
     stream.heartbeat()
-    first, second = (json.loads(raw) for raw in sink.getvalue().splitlines())
+    path = (wire.PathStep(place="Quay", token="1", net=""), wire.PathStep(place="Hold"))
+    stream.write([], Gauges(loaded=True, marking_version=5, running=True,
+                            executing=Executing("Settle", started, path, 3)))
+    stream.heartbeat()
+    first, second, third = (json.loads(raw) for raw in sink.getvalue().splitlines())
     assert first == {"method": "heartbeat", "params": {
         "step_started_at": "2026-10-03T09:15:02.413Z", "executing_transition": "Greet",
         "marking_version": 4, "running": True,
     }}
     assert second == {"method": "heartbeat", "params": {
         "step_started_at": None, "executing_transition": None, "marking_version": 5, "running": False,
+    }}
+    # A body in an inner net: its path and nested id, as a ``step`` result names them.
+    assert third == {"method": "heartbeat", "params": {
+        "step_started_at": "2026-10-03T09:15:02.413Z", "executing_transition": "Settle",
+        "path": [{"place": "Quay", "token": "1", "net": ""}, {"place": "Hold"}], "nested_id": "3",
+        "marking_version": 5, "running": True,
     }}
 
 

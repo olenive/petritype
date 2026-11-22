@@ -30,6 +30,7 @@ from petritype.core.executable_graph_components import (  # noqa: E402
 )
 from petritype.core.serialisation import Templates  # noqa: E402
 from petritype.runner.owner import Owner  # noqa: E402
+from petritype.runner.process import Gauges  # noqa: E402
 from petritype.runner.registry import Registry  # noqa: E402
 from petritype.runtime import ControlSpec, SetTokens  # noqa: E402
 from tests.protocol_nets.levels import Hero, level, levels  # noqa: E402
@@ -112,6 +113,26 @@ async def loaded(*factories, net, params=None):
 
 async def nested_id(harness, path):
     return result(await harness.send("get_state", {"path": path}))["nested_id"]
+
+
+def heartbeat(harness):
+    """The params of the ``heartbeat`` the process would write now (PROTOCOL.md §7.2)."""
+    return Gauges.of(harness.owner).heartbeat()["params"]
+
+
+async def held_step(harness):
+    """One ``step`` held while its body runs: the heartbeat meanwhile, and the
+    ``step`` result once the body lands."""
+    await harness.send("step", land=False)
+    beat = heartbeat(harness)
+    return beat, result(await harness.land())
+
+
+def names_no_body(beat):
+    """Both ``null``, and no ``path`` or ``nested_id``."""
+    return set(beat) == {"step_started_at", "executing_transition", "marking_version", "running"} and (
+        beat["step_started_at"] is None and beat["executing_transition"] is None
+    )
 
 
 # --- a world of knights with keys, a mutate edge on a port and a control that clears it ----------
@@ -509,6 +530,52 @@ class TestAddresses:
         assert worker_state["progress"]["fired_counts"] == {"Work": 1}
         through = result(await h.send("get_token", {"id": token["id"], "path": [{"place": "Yard"}]}))
         assert through["nets"][0]["path"] == worker_path
+
+
+class TestHeartbeat:
+    """While a body runs, the heartbeat names it, and names the inner net it runs
+    in by the ``path`` and ``nested_id`` that its ``step`` result carries."""
+
+    async def test_a_body_in_a_subnet_and_one_in_the_loaded_net(self):
+        h = await loaded(levels, net="levels")
+        assert names_no_body(heartbeat(h))
+        beat, answer = await held_step(h)
+        assert answer["transition"] == beat["executing_transition"] == "Enter"
+        assert beat["step_started_at"] == "2026-11-21T09:00:00.000Z"
+        assert "path" not in beat and "nested_id" not in beat, "a body of the loaded net"
+        assert names_no_body(heartbeat(h))
+        level_1 = await nested_id(h, L1)
+        beat, answer = await held_step(h)
+        assert (beat["executing_transition"], beat["path"], beat["nested_id"]) == ("Walk In", L1, level_1)
+        assert (answer["transition"], answer["path"], answer["nested_id"]) == ("Walk In", L1, level_1)
+        assert names_no_body(heartbeat(h))
+
+    async def test_a_body_in_a_tokens_net_and_in_a_subnet_inside_it(self):
+        h = await loaded(harbour, net="harbour")
+        token = result(await h.send("get_state"))["marking"]["places"]["Harbour"]["tokens"][0]
+        ship_path = [{"place": "Harbour", "token": token["id"], "net": ""}]
+        hold_path = ship_path + [{"place": "Hold"}]
+        ship_id, hold_id = token["nets"][0]["nested_id"], await nested_id(h, hold_path)
+        for transition, path, net_id in [("Load", ship_path, ship_id), ("Stow", hold_path, hold_id)]:
+            beat, answer = await held_step(h)
+            assert (beat["executing_transition"], beat["path"], beat["nested_id"]) == (transition, path, net_id)
+            assert (answer["transition"], answer["path"], answer["nested_id"]) == (transition, path, net_id)
+            assert names_no_body(heartbeat(h))
+        beat, answer = await held_step(h)
+        assert answer["transition"] == beat["executing_transition"] == "Scrap"
+        assert "path" not in beat and "nested_id" not in beat, "a body of the loaded net"
+        assert names_no_body(heartbeat(h))
+
+    async def test_a_body_in_a_tokens_net_inside_a_port(self):
+        h = await loaded(yard_world, net="yard")
+        await h.send("step")  # Hire: the worker onto the yard's bench
+        [token] = result(await h.send("get_place_tokens", {"place": "Yard", "port": "Bench"}))["tokens"]
+        worker_path = [{"place": "Yard"}, {"place": "Bench", "token": token["id"], "net": ""}]
+        beat, answer = await held_step(h)
+        assert (beat["executing_transition"], beat["path"], beat["nested_id"]) == (
+            "Work", worker_path, token["nets"][0]["nested_id"],
+        )
+        assert (answer["path"], answer["nested_id"]) == (beat["path"], beat["nested_id"])
 
 
 class TestReferences:

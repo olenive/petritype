@@ -642,7 +642,10 @@ class ExecutionStopped(Notification):
 
 
 class Heartbeat(Notification):
-    """Both fields ``null`` when no body runs: pass them explicitly."""
+    """``step_started_at`` and ``executing_transition`` are both ``null`` when no
+    body runs: pass them explicitly. ``path`` and ``nested_id`` name the inner
+    net the body runs in, as a ``step`` result does, and are left out for a
+    body of the loaded net and when no body runs (since 2026-11-22)."""
 
     method: ClassVar[str] = "heartbeat"
     nullable_fields: ClassVar[frozenset[str]] = frozenset(
@@ -651,6 +654,8 @@ class Heartbeat(Notification):
 
     step_started_at: Optional[str] = None
     executing_transition: Optional[str] = None
+    path: Optional[list[PathStep]] = None
+    nested_id: Optional[str] = None
 
 
 class LoadProgress(Notification):

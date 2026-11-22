@@ -29,7 +29,7 @@ from petritype.core.executable_graph_components import (
     ReturnedEdgeFromTransition,
     SnapshotEdge,
 )
-from petritype.runner.owner import Owner
+from petritype.runner.owner import Executing, Owner
 from petritype.runner.registry import Registry
 
 pytestmark = pytest.mark.asyncio
@@ -689,7 +689,7 @@ async def test_reads_are_answered_while_a_step_is_airborne_and_the_rest_waits():
     await h.loaded("chain", {"n": 2})
     # id 2: airborne, no answer yet; ``launched`` goes out at once.
     assert await h.send("step", land=False) == [note("launched", 1, transition="Double", consumed=[["Input", "1"]])]
-    assert h.owner.status == ("Double", NOW)
+    assert h.owner.status == Executing("Double", NOW)  # a body of the loaded net: no path, no nested id
     [line] = await h.send("get_state")  # id 3: at once, from the snapshot
     state = line["result"]
     assert state["marking_version"] == 1

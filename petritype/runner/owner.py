@@ -356,6 +356,23 @@ class _InFlight:
     held_tokens: set[tuple[Optional[int], str, int]] = field(default_factory=set)
     # The ``press`` request waiting for this firing, if a ``fire`` control launched it.
     press_id: Optional[str] = None
+    # The path of the net the firing is in, taken at the launch (empty for the
+    # outer net), for ``heartbeat``. Nothing else fires while this firing is in
+    # flight, so the path stays true until the landing.
+    path: tuple[wire.PathStep, ...] = ()
+
+
+@dataclass(frozen=True)
+class Executing:
+    """The body in flight, as ``heartbeat`` names it (PROTOCOL.md §7.2): its
+    transition and when it started, and, for a body inside an inner net, that
+    net's ``path`` and ``nested_id``, as a ``step`` result names them. A value,
+    so the heartbeat thread can keep it."""
+
+    transition: str
+    started_at: datetime
+    path: tuple[wire.PathStep, ...] = ()
+    nested_id: Optional[int] = None
 
 
 @dataclass
@@ -441,12 +458,14 @@ class Owner:
         return self._loaded is not None and self._loaded.in_flight is not None
 
     @property
-    def status(self) -> Optional[tuple[str, datetime]]:
-        """The transition whose body runs and when it started, for ``heartbeat``;
-        ``None`` when no body runs."""
+    def status(self) -> Optional[Executing]:
+        """The body that runs, for ``heartbeat``: its transition, when it
+        started, and the path and nested id of the inner net it is in, if it is
+        in one; ``None`` when no body runs."""
         if self._loaded is None or self._loaded.in_flight is None:
             return None
-        return self._loaded.in_flight.name, self._loaded.in_flight.started_at
+        flight = self._loaded.in_flight
+        return Executing(flight.name, flight.started_at, flight.path, flight.net_id)
 
     def describe(self) -> dict:
         return self.registry.describe().wire()
@@ -1443,7 +1462,7 @@ class Owner:
                     snapshots[ancestor.nested_id] = self._capture(ancestor, eager={place_name: {index}})
         loaded.in_flight = _InFlight(
             net.nested_id, transition.name, now, step_id, snapshots, handover.consumed, held_nets, held_tokens,
-            press_id=press_id,
+            press_id=press_id, path=self._path_of(net),
         )
         loaded.idle = False
         out.launch = Launch(transition.name, _fire(net, transition, self.generation))
