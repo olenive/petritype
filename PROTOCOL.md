@@ -917,7 +917,9 @@ described.
   reduced to the net the transcript names. Twelve of the fifteen, `01` and
   `05` to `15`, send `describe` and pin it in full, so over pipes they match
   only a binary that serves their one net; the Rust example binary serves
-  every conformance net and others besides. The conformance nets live in
+  every conformance net and others besides, and from Rust 0.2.0 serves one
+  net alone when started with `--net <name>`, which is how a host replays a
+  shared transcript against it. The conformance nets live in
   `tests/protocol_nets/`, and four of them (`transit`, `wildlife`, `shop`
   and `traffic-light`) import their nets from `examples/`; the published
   package carries neither folder, so a host that replays the shared set
