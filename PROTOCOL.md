@@ -383,7 +383,8 @@ A token is `{id, label, color?, type_name?, keys?, nets?}`:
 completed firing, or `null`). Kept by the runner where the core does not keep
 it. Progress is per net: a net's progress counts the firings of its own
 transitions and names them by their own names, and a firing in an inner net
-is counted in that net's progress, read by addressing it (§12.3).
+is counted in that net's progress, read by addressing it (§12.3). A firing
+that fails counts in none of the four.
 
 ## 6. Methods
 
@@ -480,8 +481,10 @@ before it moves to `describe`.
   `mutate_where` edge) as its `mutated` lines then one `fired`, and a firing
   inside an inner net as one `nested` around `fired` (§12.4). Both of these
   carry the body's real `duration_ms`, which Rust builds before 0.2.0 wrote
-  as 0.0, and such a firing that fails is its `failed` with no `launched`
-  before it. The same firing therefore moves a net's
+  as 0.0; a firing whose body the runner did not run itself, one made by a
+  host program's own code or by a body inside the nets of its tokens, is
+  still written with 0.0. Such a firing that fails is its `failed` with no
+  `launched` before it. The same firing therefore moves a net's
   version by two in one runner and by one in the other (§4), and a host
   and a viewer accept both shapes (until 2026-11-22 this text said that
   neither current runner wrote `fired`).
@@ -663,8 +666,11 @@ runtime-specific id spellings. A port place of one of the net's subnet
 places is named by the object `{"place": subnet place, "port": port}`, as in
 §7.1. `after` returns entries with `seq` greater than it.
 
-The ring is one for the process: a firing inside an inner net (§12) is an
-entry too, in order with the outer firings, carrying `path` and `nested_id`
+The log belongs to a generation: a `load` and a `reset` each start with an
+empty log, and `seq` starts again at 1.
+
+The ring is one for the loaded net and every net inside it: a firing inside
+an inner net (§12) is an entry too, in order with the outer firings, carrying `path` and `nested_id`
 (the path as it stood when the firing happened: the place the token stood in
 at the time) and the inner net's place names and token ids; `seq` is shared.
 `get_log` with a `path` or `nested_id` returns only the entries of that net
@@ -1637,8 +1643,9 @@ the list counted from 0.
   the token's own order, of `{name, nested_id, path, template?, count}`: the
   net's name within the token, its nested id, its path as of now, the
   template that built it (§12.5) when the runtime knows one, and `count`,
-  the number of tokens in all its places, so a viewer can badge the token
-  without a further read. A token without nets has no `nets` field. The
+  the number of tokens in all its own places, so a viewer can badge the
+  token without a further read; the tokens of its subnets, those in their
+  ports included, are not counted. A token without nets has no `nets` field. The
   positional `produced` entries and the `added` and `mutated` notifications
   carry no `nets`: a viewer that wants them reads the token.
 - A subnet place's entry in `marking.places` carries its subnet's
@@ -1653,10 +1660,12 @@ the list counted from 0.
   act on that inner net exactly as on the outer one: its own topology,
   transition states, marking (its own token ids, unique within the inner
   net only, so a `get_token` on an inner token must name the net), progress
-  and log. A result about an inner net carries `path` and `nested_id`
-  (absent for the outer net), `inject`'s included: `{status, id,
-  marking_version, path, nested_id}`, with the inner net's version (since
-  2026-10-12); the `net` of an inner `get_state` is the net's name within
+  and log. The result of `get_state`, `get_place_tokens`, `get_token` and
+  `inject` about an inner net carries `path` and `nested_id` (absent for
+  the outer net), `inject`'s being `{status, id, marking_version, path,
+  nested_id}` with the inner net's version (since 2026-10-12); the results
+  of `query`, `distinct`, `get_log` and `set_filter` carry neither, as §6's
+  table shows, and a log entry carries its own; the `net` of an inner `get_state` is the net's name within
   its token, or for a subnet the name of its subnet place, `template?` the
   template that built it, and `generation` the inner net's own, `1` for as
   long as it exists.
@@ -2165,7 +2174,9 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
   served from the same marking as `get_state`.
 - `distinct` returns the distinct values of `key` over the tokens of the
   net, or of `places`, in order of first appearance in place order then
-  token order; a key no place declares gives `[]`.
+  token order; a key no place declares gives `[]`. It reads every token,
+  whatever filter the connection has (§13.4), so that a viewer can offer
+  every value to filter by.
 
 ### 13.4 A filter on the connection
 
@@ -2176,7 +2187,8 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
 A host serving one net to several clients may need each to see only some
 tokens (one character's view, fog of war). `set_filter` sets, for this
 connection and the net it names, the filter every later read and
-notification of that net is projected through; `set_filter` without
+notification of that net is projected through, `distinct` alone excepted
+(§13.3); `set_filter` without
 `filter` clears it. A net process has one connection, so one filter per
 net; a relay (§9) that serves several clients keeps a filter per client and
 applies this same projection itself, which tokens carrying `keys` on the
