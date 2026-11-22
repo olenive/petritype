@@ -95,16 +95,18 @@ NET_MODULES = {
     "levels": "tests.protocol_nets.levels",
     "groups": "tests.protocol_nets.groups",
     "workshop": "tests.protocol_nets.workshop",
+    "cellar": "tests.protocol_nets.cellar",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
 # the nested-net one, whose example module and templates must import in the process; the
 # two over the edges that accept an empty place, whose example modules must too; the
 # stepping rules, whose net runs and whose templates must import; the subnet places; and
 # the groups, whose topology the process serves as the owner does; and the failed
-# firings, whose net holds a subnet place.
+# firings and the ports seen from outside, whose nets hold a subnet place each.
 OVER_PIPES = (
     "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
     "09_subnet_places.json", "10_stepping_rules.json", "11_groups.json", "12_failures.json",
+    "13_ports_from_outside.json",
 )
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
@@ -712,6 +714,17 @@ def test_a_shared_transcript_masks_a_failures_error():
     assert failed["params"]["error"] == "<label>"
     refused = Masker().line({"id": "4", "error": {"message": "no such place", "code": "unknown_place"}})
     assert refused["error"] == {"message": "<label>", "code": "unknown_place"}
+
+
+def test_the_recorder_names_a_hidden_inject_after_its_token():
+    """An ``inject`` whose token the filter hides is told as ``hidden``, so its
+    answer is the first line to name the id: it is named after the token sent."""
+    from tests.record_transcript import Masker
+
+    masker = Masker()
+    masker.injected = {"name": "Merlot", "years": 0}
+    answer = masker.line({"id": "6", "result": {"status": "injected", "id": "2", "marking_version": 5}})
+    assert answer["result"]["id"] == "<id:merlot>"
 
 
 def test_a_shared_transcript_masks_the_versions_across_a_port():

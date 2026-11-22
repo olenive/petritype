@@ -35,7 +35,9 @@ minted (``level_1_ada``): the same token has the same capture in both views. A
 path is kept as the list of steps it is, its place and net
 names as they stand and each step's token id the capture of that token, or
 ``"<id>"`` where the token has not been named yet (a path is no place to name
-one: the token is named where its label is seen). Every ``marking_version`` and
+one: the token is named where its label is seen). A token that an ``inject``'s
+answer is the first line to name, one the connection's filter hid, is named after
+the token the ``inject`` sent. Every ``marking_version`` and
 ``outer_marking_version``, and every version in ``subnet_marking_versions``, is
 ``"<version>"``; every ``label``, ``type_name``, ``message``, ``runtime`` and
 ``runtime_version``, and every ``error`` that is text (a failure's, in ``failed`` and
@@ -153,6 +155,9 @@ class Masker:
 
     def __init__(self):
         self.bindings: dict[str, str] = {}   # capture name -> the string it stands for
+        # The token an ``inject`` sent, which its answer names by id alone: the
+        # name of a token no line before the answer showed (one a filter hid).
+        self.injected = None
         self.forget()
 
     def forget(self) -> None:
@@ -301,7 +306,10 @@ class Masker:
         if key == "controls" and isinstance(item, list):
             return item  # the net's own declaration, labels included: the same in every runtime
         if key == "id" and isinstance(item, str):
-            return self.token(net, item, place, parent.get("label", parent.get("value")), old)
+            hint = parent.get("label", parent.get("value"))
+            if hint is None and parent.get("status") == "injected":
+                hint = self.injected
+            return self.token(net, item, place, hint, old)
         if key == "nested_id" and isinstance(item, str):
             return self.nested(item, parent.get("path"), old=old)
         if key == "path" and isinstance(item, list):
@@ -442,6 +450,7 @@ def record(scenario: dict, settle: float = SETTLE_SECONDS) -> dict:
                 # An inject by pair on the loaded net: its answer names the token by id
                 # alone, and the token is the subnet's (§12.7).
                 addressed = masker.subnet("", params["place"])
+            masker.injected = params.get("token") if send["method"] == "inject" else None
             try:
                 expect = [
                     masker.line(

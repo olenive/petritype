@@ -39,9 +39,10 @@ firing and answers while a body runs (§6, §6.3, §6.5, §7.1, §12.3, §12.4,
 from version 1 (§10), and closes gaps in §5.1, §11, §12.1, §12.3, §12.6 and
 §12.7. Later the same day it came to say that the Rust runner reports the
 real duration of a body it runs inline, from its version 0.2.0 (§6.3,
-§12.4, §12.7), and the shared transcripts came to cover failed firings,
-each new case over a conformance net of its own, with a failure's `error`
-masked (§11). Both runners implement it, the Rust one (`petritype-runner`, in
+§12.4, §12.7), and the shared transcripts came to cover failed firings and a
+subnet's ports seen from outside, each new case over a conformance net of
+its own, with a failure's `error` masked (§11). Both runners implement it,
+the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
@@ -891,9 +892,9 @@ described.
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
-  here under `tests/protocol/` (four files as of 2026-10-03, twelve as of
+  here under `tests/protocol/` (four files as of 2026-10-03, thirteen as of
   2026-11-22, each replayed by `tests/test_protocol_transcripts.py` through
-  the runner's state machine; eight of them, `04`, `05` and `07` to `12`,
+  the runner's state machine; nine of them, `04`, `05` and `07` to `13`,
   are also replayed over pipes against `python -m petritype.runner`, the
   list `OVER_PIPES` there, and `01`, `02`, `03` and `06` in process only).
   They run
@@ -906,8 +907,8 @@ described.
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
   in full; a runner that carries other nets too replays it with a registry
-  reduced to the net the transcript names. Nine of the twelve, `01` and
-  `05` to `12`, send `describe` and pin it in full, so over pipes they match
+  reduced to the net the transcript names. Ten of the thirteen, `01` and
+  `05` to `13`, send `describe` and pin it in full, so over pipes they match
   only a binary that serves their one net; the Rust example binary serves
   every conformance net and others besides. The conformance nets live in
   `tests/protocol_nets/`, and four of them (`transit`, `wildlife`, `shop`
@@ -1397,6 +1398,64 @@ described.
   net, or of a body with a mutate edge, is one `failed` from the Rust runner
   (§6.3) and two pieces from the Python runner, so no shared transcript
   holds one.
+- A subnet's port seen from outside got its conformance net and transcript
+  on 2026-11-22, `13_ports_from_outside.json` over
+  `tests/protocol_nets/cellar.py`: a port holding tokens while the net
+  around it is read, a port's token changed by that net and told as
+  `mutated`, `removed` and `hidden`, a filter and a `distinct` naming the
+  port by its pair, a connection filter set on the subnet, and a port's
+  tokens read and injected by the pair and read through the subnet. Its
+  names, places, transition, key, template and seed are fixed here, since
+  the transcript depends on them:
+
+  **`cellar`** ("Bottles age on a rack in a cellar that the house reaches
+  through its port"), hosted `manual`, with no load parameters and no net
+  parameters. Its one token type is `Bottle`, `{name, years}`, `name` a
+  string and `years` an integer; every place of it, in the net and in its
+  subnet, holds bottles, is serializable and declares one key, `years`, the
+  bottle's `years`; a bottle's JSON form is that object, and its label is
+  the runtime's own. The net's places, in this order: `Table`, holding
+  `{"name": "Claret", "years": 4}`; and `Cellar`, a subnet place holding a
+  net the template `Cellar` builds, with the default stepping rule,
+  `inner_first`. The template `Cellar` takes no parameters and builds a net
+  with one place, `Rack`, a port, holding `{"name": "Rioja", "years": 0}`,
+  and no transition. The net's one transition, `Age`, has one input edge, a
+  `mutate` edge on the port `Rack` of `Cellar`, which hands its body the
+  bottle at the front of the rack; the body adds one to that bottle's
+  `years`, in place, and the transition has no output. `Age` has no guard
+  and no priority, so it is fireable whenever the rack holds a bottle and
+  the net never quiesces, and every net chooses by the default selector. The
+  transcript reads `describe` and loads the net; reads the state, whose
+  topology lists `Rack`, with its `key_names`, in the `ports` of `Cellar`,
+  and whose marking shows Rioja in the port with its keys; steps, `Age`
+  making Rioja 1 year old, told as a `mutated` naming the pair, with its
+  keys and `subnet_marking_versions`, then the firing as a `fired` that
+  consumed and produced nothing; sets the subnet's connection filter, a
+  `set_filter` addressed by path `[{"place": "Cellar"}]` keeping `years` 1,
+  answered with the subnet's version; injects
+  `{"name": "Merlot", "years": 0}` by the pair, which the subnet's filter
+  hides, told as `hidden {kind: "added", place, port}` with
+  `subnet_marking_versions` and answered with the id the subnet minted;
+  reads the state of the net, whose port shows `count` 2, `matching` 1 and
+  Rioja alone, and the port by the pair with `get_place_tokens`, the same;
+  reads Rioja through the subnet with `get_token`, and Merlot likewise,
+  `unknown_token` since the subnet's filter hides it; queries the net with
+  no `filter`, Claret on the table and Rioja in the port, the port projected
+  by the subnet's filter; queries with the filter
+  `{"places": [{"place": "Cellar", "port": "Rack"}]}`, both bottles of the
+  rack, a query's own filter applying alone; asks `distinct` of `years` with
+  the same `places`, `[1, 0]`, from every token of the port; steps twice,
+  `Age` making Rioja 2, out of the filter's view, told as a `removed` naming
+  the pair, and then 3, still hidden, told as
+  `hidden {kind: "mutated", place, port}`, each with
+  `subnet_marking_versions` and each before its `fired`; reads the subnet's
+  state by path, its `Rack` with `count` 2, `matching` 0 and no tokens;
+  clears the subnet's filter; and reads the port by the pair, Rioja at 3
+  years and then Merlot at 0. `Age`'s body has a mutate edge, so the Rust
+  runner reports each firing of it in one piece, its `mutated` (or the
+  `removed` or `hidden` standing in for it) then `fired`, and the Python
+  runner in two, with that line between them; both folds give the same lines
+  (above).
 
 ## 12. Nested nets
 
