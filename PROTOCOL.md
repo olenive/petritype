@@ -32,7 +32,12 @@ carried as optional fields of the topology (§5.1, §12.7), with a conformance n
 and a transcript for them (§11), written before either runtime implemented them,
 from `../petritype-rs/dev-docs/group-spec.md`; the version stays 2 (§10). The
 Python runner came to serve them the same day, which fixed the conformance net
-`groups` (§11). Both runners implement it, the Rust one (`petritype-runner`, in
+`groups` (§11). On 2026-11-22 the text was corrected after a host's review,
+with nothing on the wire changed: it says what each runner writes for a
+firing and answers while a body runs (§6, §6.3, §6.5, §7.1, §12.3, §12.4,
+§12.7), gives a relay its rules (§9), lists every difference of version 2
+from version 1 (§10), and closes gaps in §5.1, §11, §12.1, §12.3, §12.6 and
+§12.7. Both runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
@@ -211,7 +216,8 @@ Changes only on `load` and `reset` (a new generation), so a viewer fetches it
 once per generation and lays it out.
 
 - `places[]`: `name`; `type_name`, the runtime's own spelling of the token
-  type, for display only; `serializable`, whether tokens of this place have a
+  type, for display only; `serializable`, present on every place but a
+  subnet place (which holds no tokens), whether tokens of this place have a
   JSON form (decides whether `inject` and `get_token` with `kind: "json"` can
   work); `nested?`, `true` when tokens of this place may hold nets of their
   own (§12); `stepping?`, present exactly on a place that holds nets (a
@@ -261,7 +267,13 @@ once per generation and lays it out.
   viewer may honour hints (pinning those nodes) and must work without them.
   No runtime is required to compute a layout.
 - `groups?`: the names of the net's groups, in the order its definition
-  declares them, absent when it declares none (since 2026-11-21). A group is
+  declares them, absent when it declares none (since 2026-11-21). A listed
+  group may have no member, and what the order is depends on the library
+  that defines the net: the Rust core declares each group on its own and
+  lists every declared group in declaration order, an empty one included; the
+  Python library has a group only from its first mention by a node, reading
+  the places in declaration order (subnet places among them) and then the
+  transitions, so each group it lists has a member. A group is
   a named set of places and transitions of one net, set in the net's
   definition, that only drawings read. It has no effect on how the net runs:
   firing, stepping, token ids, saving and every notification are those of
@@ -295,7 +307,9 @@ once per generation and lays it out.
     one (`toggle`, `slider`, `select`) and absent for the others;
     `placeholder` is a `text`'s hint shown while it is empty. Other keys are a
     runtime's own (a notebook's button `kind`), and a viewer ignores them.
-  - `node?` names the place or transition the control acts on. It is for the
+  - `node?` names the place or transition the control acts on, by its name
+    in the net; a port place is named only by a pair (§12.7), so a control's
+    node is one of the net's own places or transitions. It is for the
     viewer, which may light the node while the control is hovered.
   - `action?` says what kind of thing a press does, for the viewer's lighting
     rule only: `"fire"` is lit while `node` is fireable; `"enable"` is a
@@ -371,7 +385,7 @@ is counted in that net's progress, read by addressing it (§12.3).
 |---|---|---|---|
 | `describe` | `{}` | Describe (§6.1) | allowed before `load` |
 | `load` | `{net, params?}` | `{status: "loaded", generation, marking_version}` | emits `load_progress`; `reloaded` |
-| `get_state` | `{token_limit?, path?, nested_id?}` | State (§5), plus `path`, `nested_id`, `template?` for an inner net | never waits for a running body |
+| `get_state` | `{token_limit?, path?, nested_id?}` | State (§5), plus `path`, `nested_id`, `template?` for an inner net | answered while a body runs, as §6.3 says |
 | `get_place_tokens` | `{place, port?, offset?, limit?, path?, nested_id?}` | `{place, port?, marking_version, count, matching?, offset, limit, tokens, has_more, path?, nested_id?}` | `limit` clamped to 1..1000, default 200 |
 | `get_token` | `{id, path?, nested_id?}` | `{id, place, type_name, kind: "json", value, path?, nested_id?, nets?}` or `{..., kind: "text", text, ...}` | live tokens only |
 | `step` | `{}` | `{fired: bool, transition?, failed?, path?, nested_id?, marking_version, running}` | one firing, sequential semantics (§6.3); `path` when it was in an inner net (§12.3) |
@@ -383,7 +397,7 @@ is counted in that net's progress, read by addressing it (§12.3).
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
 | `press` | `{control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}` | runs a control the net declares (§6.6); emits the events of whatever it did |
 | `get_log` | `{after?, limit?, path?, nested_id?}` | `{entries}` (§8) | |
-| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches}` (§13.3) | never waits for a running body |
+| `query` | `{filter?, token_limit?, path?, nested_id?}` | `{marking_version, count, matches}` (§13.3) | answered while a body runs, as §6.3 says |
 | `distinct` | `{key, places?, path?, nested_id?}` | `{marking_version, key, values}` (§13.3) | |
 | `set_filter` | `{filter?, path?, nested_id?}` | `{marking_version}` | the connection's projection (§13.4) |
 | `shutdown` | `{}` | `{status: "ok"}` | then the process exits |
@@ -444,18 +458,40 @@ before it moves to `describe`.
   for the body. `step` is the one request answered out of order (with a
   `press` that fires, §6.6): `get_state`, `get_place_tokens`, `get_token`,
   `get_log`, `query`, `distinct` and `stop` that arrive while its body runs
-  are answered before it.
+  off the request thread (below) are answered before it.
 - `start` runs on the net process's own clock until `stop`. A net whose
   `mode` is `"24/7"` idles when nothing is fireable (emitting `idle` once
   per idle spell) and keeps polling; any other net stops at quiescence and
   emits `execution_stopped {reason: "no_fireable_transitions"}` (version 0 spelt
   this `no_enabled_transitions`; the server's translation maps it).
-- The runtime picks its driver. Both fire one transition at a time. Both
-  runners run every body off their request thread and report `launched`
-  then `distributed` (the Python one since 2026-10-04). `fired` remains
-  legal for a runtime that cannot observe a body part-way, which neither
-  current runner is. Either way, state reads and `stop` are answered while
-  a body runs, and a viewer must handle both shapes.
+- The runtime picks its driver. Both fire one transition at a time, and
+  neither starts a firing while another is in flight. The Python runner
+  runs every body off its request thread and reports `launched` then
+  `distributed` (since 2026-10-04), with the body's real `duration_ms`. The
+  Rust runner does the same for an outer body it can detach, and runs every
+  other body inside the request or tick that fires it, reporting the firing
+  in one piece: an outer body it cannot detach (one with a `mutate` or
+  `mutate_where` edge) as its `mutated` lines then one `fired`, and a firing
+  inside an inner net as one `nested` around `fired` (§12.4). Both of these
+  carry `duration_ms` 0.0 today, and such a firing that fails is its
+  `failed` with no `launched` before it. The same firing therefore moves a net's
+  version by two in one runner and by one in the other (§4), and a host
+  and a viewer accept both shapes (until 2026-11-22 this text said that
+  neither current runner wrote `fired`).
+- **Reads while a body runs.** While a body runs off the request thread,
+  `get_state`, `get_place_tokens`, `get_token`, `get_log`, `query`,
+  `distinct` and `stop` are answered at once, a read from the marking as
+  the firing's `launched` left it, except the reads that §6.5 and §12.3
+  hold for the landing, and so are `describe` and `shutdown`; every other
+  request waits for the landing. While a body runs inside a request or
+  tick, which only the Rust runner does, that runner reads no request until
+  the body lands: every request, reads and `stop` included, is answered
+  after it, and the `heartbeat` (§7.2) names no body while an inner one
+  runs. A host that talks to a Rust process
+  therefore lets a read wait for as long as such a body runs, and takes
+  neither the wait nor a heartbeat that names no body as a sign that the
+  process has stopped (since 2026-11-22; until then this text said that
+  reads were answered while any body ran).
 - A failing body emits `failed`; whether execution goes on is the runtime's
   policy and is reported by `execution_stopped` when it stops, with
   `reason: "transition_failed"` and the failure's `error_type` and `message`
@@ -508,6 +544,17 @@ otherwise. `text` is the runtime's full rendering of the token (Python:
 this is the long one. A host that wants JSON for a place that has none gets
 `kind: "text"`, not an error; `not_serializable` is for `inject`.
 
+While a body runs off the request thread (§6.3), `get_token` is answered at
+once from the marking as the firing's `launched` left it: a token the
+firing took is in no place, and is `unknown_token`. In the Python runner,
+which runs every body so, a `get_token` waits for the landing in two cases
+(stated here since 2026-11-22): a token the body was handed through a mutate
+edge, whose full value is what the body may be changing; and, while a body
+in an inner net runs, a token that holds that net, at any level up to the
+outer net, whose rendering the body is changing (§12.3). The Rust runner
+runs both kinds of body inside the request or tick that fires them, and
+answers nothing until they land (§6.3).
+
 ### 6.6 Pressing a control
 
 `press {control, value?}` runs one of the controls the net declares
@@ -546,8 +593,8 @@ effects arrive as the usual notifications, and its answer carries the
 
 | method | params | when |
 |---|---|---|
-| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece, by a runtime that cannot observe a body part-way (neither current runner) |
-| `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (both runners, which run every body off their request thread): inputs taken, body started |
+| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece, by a runtime that runs the body where it cannot observe it part-way (the Rust runner, for an outer body with a mutate edge and for a firing inside an inner net, §6.3) |
+| `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (the Python runner for every firing, the Rust runner for an outer body it detaches, §6.3): inputs taken, body started |
 | `distributed` | `{transition, produced: [[place, id, label, color?]], duration_ms}` | the second piece: body returned, outputs placed |
 | `failed` | `{transition, error, restored, consumed: [[place, id]]}` | a body failed; `restored` says whether the consumed tokens went back (same ids, front of their places) |
 | `added` | `{place, port?, id, label, color?, keys?}` | a token arrived from outside (`inject`, a command) |
@@ -626,7 +673,8 @@ and of nets inside it. A firing in the bus's cabin:
 
 A host that serves the net to remote viewers relays the same shapes:
 
-- Each method is an HTTP request whose body is `params` and whose JSON
+- Each method is an HTTP request carrying `params`, in its body or, for a
+  read, in its query string as §9.1 says, and whose JSON
   answer is `result`, or an error status carrying `{detail, reason}` with
   `reason` the protocol error code. The routes are the server's to choose;
   petritype-server's are in its design doc.
@@ -635,47 +683,133 @@ A host that serves the net to remote viewers relays the same shapes:
   it in an envelope of its own (petritype-server adds `seq`, `ts`, `net_id`,
   `marking_version`, `running`) and may add events of its own, such as
   `subprocess_output {text}` for a stderr line and `stream_gap` when its
-  buffer overflowed. A viewer treats `stream_gap` as a gap: refetch state.
+  buffer overflowed. A viewer treats `stream_gap` as a gap: refetch state
+  (which states, §9.1).
 - The relay does not keep §3's order between a response and the
   notifications its request caused: the HTTP answer and the event stream
   are two connections, and either may arrive first. A viewer that depends
   on that order restores it itself, by holding the answer to a
   state-changing request until the stream has reached the answer's
-  `marking_version` (with a time limit, so a dead stream cannot wedge it)
-  and by treating a state notification at or below the version it holds
-  as already reflected rather than as a gap. petritype-bevy does both.
+  `marking_version` (with a time limit, so a dead stream cannot wedge it;
+  §9.1 says which net's version that is) and by treating a state
+  notification at or below the version it holds as already reflected
+  rather than as a gap. petritype-bevy does both.
+
+### 9.1 A relay's rules
+
+Since 2026-11-22, for version 2. They ask nothing new of a net process.
+
+1. **Params on a read.** A host may serve a read as a request whose params
+   travel in the query string. There a text, number or boolean param is
+   written plainly, `port` included; `path` is written as the JSON text of
+   its list, so the empty path is `[]`. A request whose params hold any
+   other structured value, such as a `{place, port}` entry in a filter's or
+   `distinct`'s `places` (§13.2), is sent with a JSON body. In a body every
+   param is its JSON value.
+2. **Names in a URL.** A name may hold any character (§2), so a host
+   carries place, transition and net names in the query string or the
+   body, never as a segment of the URL's path.
+3. **Which version an answer is held for.** The hold above waits for the
+   version of the net the answer is about:
+   - an answer about the loaded net: the loaded net's version;
+   - an answer addressed to an inner net, by `path` or `nested_id`: that
+     net's version, which the stream brings inside the `nested` events for
+     that net, as `event.params.marking_version`, and never on the wrapper
+     or the envelope;
+   - an `inject` by the pair of a port place (§12.7): the outer net's
+     version; the one `added` it causes carries the subnet's version too,
+     in `subnet_marking_versions`;
+   - a `step` whose result carries a `path`: its `marking_version` is the
+     outer net's, which that firing moves only if it touched a port place,
+     so a viewer that needs the order holds the answer until the stream has
+     brought the `nested` event for that inner net (the result's
+     `nested_id`) that ends the firing: `fired`, `distributed` or `failed`
+     for the transition the result names.
+
+   In each case the hold keeps its time limit.
+4. **The envelope.** The `marking_version` a relay puts on its envelope is
+   always the loaded net's, on a `nested` event too. A viewer that follows
+   inner nets reads their versions in `data`: the inner event's own
+   `marking_version`, and `subnet_marking_versions` and
+   `outer_marking_version` (§12.7). A `stream_gap` means refetch the loaded
+   net and every inner net and subnet the viewer follows.
+5. **Several versions.** A host may speak more than one protocol version and
+   choose per net process from that process's `describe` (§10). It passes
+   each process's messages on unchanged and never translates between
+   versions.
+
+### 9.2 What is the server's own
+
+Three things a reader of petritype-server's relay meets are that server's
+own conventions, and another relay may choose differently: each event is an
+unnamed server-sent event whose data is a JSON envelope holding `kind` and
+`data` beside the fields the relay adds; the relay answers `set_filter`
+itself, keeping a filter per client (§13.4), rather than passing it to the
+net process; and an error may carry a `reason` of the relay's own, beyond
+the codes of §3, for what only the relay knows, such as a worker that is not
+ready.
 
 ## 10. Versioning
 
 - `protocol_version` is an integer. **Version 2** is this document, since
-  2026-11-21. **Version 1** is this document as it stood before that day.
+  2026-11-21. **Version 1** is this document as it stood before that day,
+  which is the text at the tag `v0.3.1`
+  (<https://github.com/olenive/petritype/blob/v0.3.1/PROTOCOL.md>).
   **Version 0** is, retroactively, petritype-server's worker contract as it
   stood on 2026-10-03 (`petritype_server/worker/net_ipc.py` and
   `net_runner.py`); its differences from version 1 are tabulated in the
   server's design doc.
-- Version 2 differs from version 1 in these points. A `path` is a list of
-  steps where it was text joined with `/`, and every name can be spelt in
-  it (§12.1). A place that holds nets carries `stepping` in place of
-  `passive`, and deep stepping follows each place's rule, inner first by
-  default, where version 1's runtimes fired the outer net's choice first
-  (§12.3). A place may be a subnet place, named with `port` beside `place`
-  wherever the net around it names one of its port places, and a change of a
-  port place moves the versions of both nets that see it (§12.7). A net's
-  progress counts only its own firings (§5.4). A reader of version 2 does
-  not read version 1.
+- Version 2 differs from version 1 in these points (the list completed on
+  2026-11-22):
+  - **Addresses** (§12.1). A `path` is a list of steps where it was text
+    joined with `/`, and every name can be spelt in it. A path starts at
+    the first step below the loaded net, where version 1's started with the
+    loaded net's name, and the empty list `[]` names the loaded net, which
+    version 1 named by its name alone.
+  - **Stepping** (§5.1, §12.3). Every place that holds nets carries
+    `stepping`, the default `inner_first` included, in place of `passive`,
+    which version 2 never writes. Deep stepping follows each place's rule,
+    inner first by default. Version 1's runtimes fired the outer net's
+    choice first by default, and had an interleaved deep-step policy beside
+    it, which version 2 replaced with the rules.
+  - **Subnet places** (§12.7). A place may be a subnet place. Its entry in
+    `topology.places` has no `serializable`, and its marking entry is
+    `{subnet, ports}`, with no `count` or `tokens` of its own. The net
+    around it names one of its port places with `port` beside `place` in
+    edges, `added`, `removed`, `mutated` and `hidden`, in `get_place_tokens`
+    and its result, in `inject` and in a match of `query`; and by the object
+    `{place, port}` as the first element of a `consumed` or `produced` entry,
+    of a notification or of a log entry (§7.1, §8), and as an entry of a
+    filter's `places` and of `distinct`'s `places` (§13.2). A change of a
+    port place moves the versions of both nets that see it, so the `nested`
+    wrapper's `marking_version`, which never moved in version 1, moves when
+    the inner event changed a port place of the net around it (§12.4). A
+    token whose net holds a subnet place has a saved form, its subnet's
+    inside the place's entry (§12.5).
+  - **Reads that wait** (§12.3, §12.7). A read addressed to a subnet waits
+    while a firing of the net around it that touches one of its port places
+    is in flight; and while a firing of a subnet on its port is in flight,
+    a read of the net around it, where the runner answers one (§6.3), is
+    answered from the port as that firing's `launched` left it.
+  - **Progress** (§5.4). Each of a net's four progress fields,
+    `step_count`, `last_fired`, `fired_counts` and `last_progress_at`,
+    counts only the firings of that net's own transitions.
+
+  A reader of version 2 does not read version 1.
 - Adding an optional field, a notification, a method or an error code does
   not change the version; readers ignore what they do not know. Removing
   anything, renaming anything, or changing what a field means does.
 - A host learns the version from `describe` before `load`, and refuses a net
-  process whose version it does not speak with a clear message.
+  process whose version it does not speak with a clear message. A host may
+  speak several versions, choosing per net process (§9.1).
 
 ## 11. Conformance
 
 Conformance is tested by recorded transcripts: one JSON file per scenario,
 replayed through a runner without a process by a harness that owns the
 runner's state machine, or over pipes against the binary. The conformance
-nets below may change until v1 of the protocol is tagged, and each change is
-dated where the net is described.
+nets below may change, and each change is dated where the net is
+described.
 
 ```json
 {
@@ -715,8 +849,8 @@ dated where the net is described.
 - A transcript shared across runtimes masks every token id, those in the
   steps of a path included, every nested id, every `marking_version` and
   `outer_marking_version` and the values of `subnet_marking_versions` (§2,
-  §4, §12.1, §12.7), every `type_name` and `label`, `runtime` and
-  `runtime_version`, every `duration_ms` and time,
+  §4, §12.1, §12.7), every `type_name`, `label` and `message` (an error's
+  among them), `runtime` and `runtime_version`, every `duration_ms` and time,
   and sets every `detail` to `"<any>"`. It carries `color` only where both
   runtimes give the token the same colour, which the conformance nets do by
   giving hex values (`"#rrggbb"`, lowercase), never names (until 2026-10-16 a
@@ -749,9 +883,12 @@ dated where the net is described.
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
-  here under `tests/protocol/` (four files as of 2026-10-03, replayed by
-  `tests/test_protocol_transcripts.py` both through the runner's state
-  machine and over pipes against `python -m petritype.runner`). They run
+  here under `tests/protocol/` (four files as of 2026-10-03, eleven as of
+  2026-11-22, each replayed by `tests/test_protocol_transcripts.py` through
+  the runner's state machine; seven of them, `04`, `05` and `07` to `11`,
+  are also replayed over pipes against `python -m petritype.runner`, the
+  list `OVER_PIPES` there, and `01`, `02`, `03` and `06` in process only).
+  They run
   over the **conformance net** `tests/protocol_nets/parcel_distribution.py`,
   named `parcel-distribution`, described "Sort, stage and dispatch
   parcels": places `Receiving`, `Sorting`, `Staging Area`, `Dispatched`;
@@ -761,7 +898,15 @@ dated where the net is described.
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
   in full; a runner that carries other nets too replays it with a registry
-  reduced to the net the transcript names.
+  reduced to the net the transcript names. Eight of the eleven, `01` and
+  `05` to `11`, send `describe` and pin it in full, so over pipes they match
+  only a binary that serves their one net; the Rust example binary serves
+  every conformance net and others besides. The conformance nets live in
+  `tests/protocol_nets/`, and four of them (`transit`, `wildlife`, `shop`
+  and `traffic-light`) import their nets from `examples/`; the published
+  package carries neither folder, so a host that replays the shared set
+  through its own launcher does so from a source checkout at the release
+  tag.
 - Two more conformance nets came with §12 and §13 on 2026-10-09, each the
   example net of its design document built deterministically, so that the
   transcripts over them (`05_nested_nets.json`, `06_keys_query_filter.json`)
@@ -1083,9 +1228,11 @@ dated where the net is described.
   same way. No transition has a guard or a priority, and every net chooses
   by the default selector, so a net's own turn fires its first fireable
   transition. From the seed, a deep step a `step` (§12.3) fires, in this
-  order: the team's `Plan` (path `[Early]`), since the inner-first team goes
+  order: the team's `Plan` (path `[{"place": "Early", "token": t, "net":
+  ""}]`, `t` the team's token id), since the inner-first team goes
   first and its own ring starts at the team; its helper's `Work` twice (path
-  `[Early, Helpers]`), the ring going on after the team and then the helper
+  the team's step then `{"place": "Helpers", "token": h, "net": ""}`, `h`
+  the helper's token id), the ring going on after the team and then the helper
   alone having work; then the outer net's ring, starting at the outer net:
   `Forward`, the ring worker's `Work`, `Forward`, `Work`, `Forward`; then the
   late worker's `Work`, outer first, once nothing else has a firing; and
@@ -1195,9 +1342,10 @@ other. The net process hosts the outer net; inner nets live inside its
 tokens and are reached through them, so a viewer can open a token and watch
 the net inside it. This is the wire side of `NETS_AS_TOKENS.md` (R8); both
 runners implement it. A place may hold a net too: a *subnet place* holds one
-*subnet*, an inner net that lives as long as the outer net and is reached
-from it through its *port places* (§12.7). What §12.1 to §12.6 say of inner
-nets holds for subnets too, except where they say otherwise.
+*subnet*, an inner net that lives as long as the net that holds the place
+(§12.6) and is reached from that net through its *port places* (§12.7).
+What §12.1 to §12.6 say of inner nets holds for subnets too, except where
+they say otherwise.
 
 ### 12.1 Addressing: paths and nested ids
 
@@ -1225,11 +1373,23 @@ giving neither names the outer net.
   a step are compared exactly as given, whatever characters they hold. A
   `path` that is not a list, a step without `place`, a step that has one of
   `token` and `net` without the other, and a step value that is not a string
-  are `invalid_params`. A path names a net *as the marking stands*: an
+  are `invalid_params`. The rule of §2 that `null` counts as absence
+  covers the top level of `params` only, so a step holding `null`, such as
+  `{"place": "Depot", "token": null, "net": "cabin"}`, is `invalid_params`
+  too. Other keys of a step are ignored (§2), so a port's pair used as a
+  step, `{"place": "Level 3", "port": "Lobby"}`, is the step `{"place":
+  "Level 3"}` and addresses the subnet. A step of the wrong form for its
+  place, a token step on a subnet place or a subnet step on a place that is
+  not a subnet place, names no net and is `unknown_net` (stated since
+  2026-11-22). A path names a net *as the marking stands*: an
   outer token that is taken and put back gets a new token id (§2), so the
-  paths to its inner nets change, while their nested ids do not. A subnet's
-  path stays the same for as long as the subnet lives. A viewer that shows a
-  path as text, a breadcrumb, builds that text itself.
+  paths to its inner nets change, while their nested ids do not. The path of
+  a subnet of the loaded net, whose steps are all subnet steps, stays the
+  same for as long as the subnet lives. A net a token carries may hold
+  subnet places too (§12.5); a subnet there has a path that runs through the
+  token's step, and so changes as the token's id does, and in both runners
+  it is born with the token's net and dies with the token (§12.6). A viewer
+  that shows a path as text, a breadcrumb, builds that text itself.
 - A **nested id** is a string the runtime mints for each inner net when it
   comes into being, unique within a generation of the outer net and never
   reused in it, opaque to a reader (the runtimes spell it differently;
@@ -1237,8 +1397,10 @@ giving neither names the outer net.
   net: it survives every move of the token that holds it. It stops resolving
   when that token is consumed without being put back (§12.6), and when the
   outer net is reloaded or reset, which mints new ids for every inner net.
-  A subnet's nested id resolves from the `load` or `reset` that built it
-  until the next of either.
+  The nested id of a subnet of the loaded net resolves from the `load` or
+  `reset` that built it until the next of either; that of a subnet inside a
+  token's net, from when the runtime first knows of the token's net (§12.3,
+  baselines) until the token is consumed without being put back.
 
 A `path` or `nested_id` that names no live inner net is answered
 `unknown_net`, and the message says which step failed, by its position in
@@ -1322,11 +1484,16 @@ the list counted from 0.
   memory only: the member that fired last is the member whose turn last
   fired something. Only a turn in the ring moves the cursor, a turn whose
   firing failed as well as one whose firing landed; a firing of a net in an
-  `inner_first` or `outer_first` place leaves it where it is. When no member
-  has fired yet, or that member is no longer in the ring (its token was
-  taken), the ring starts at `N`. `load` and `reset` start every ring
-  afresh. Since the rule belongs to a place, it applies at every level: when
-  a net's deep step comes, it follows the rules of that net's own places.
+  `inner_first` or `outer_first` place leaves it where it is. The cursor
+  follows the net, not its token, in both runtimes: a net whose token is
+  taken and put back into a take-turns place of `N` is still in the ring,
+  at its token's new position in walk order, and the ring goes on after
+  it. When no member has fired yet, or that member has left the ring, its
+  token consumed without being put back or put into a place that is not a
+  take-turns place of `N`, the ring starts at `N` (stated since
+  2026-11-22). `load` and `reset` start every ring afresh. Since the rule
+  belongs to a place, it applies at every level: when a net's deep step
+  comes, it follows the rules of that net's own places.
 - **Driving.** Inner nets are live. Both runners' drivers make one deep step
   of the outer net at each `step` and at each firing of a running net. The
   stepping rule decides only which net fires next; within a net the
@@ -1344,26 +1511,46 @@ the list counted from 0.
   that port takes no turn: deep stepping skips it wherever its turn would
   come. Firing in parallel across levels is not part of this version: one
   firing at a time across the tree, except that an outer body may still be
-  running on its own thread, where a runtime's driver lets it.
+  running on its own thread, where a runtime's driver lets it. That
+  exception, and the outer-first nets' wait while a body of `N`'s own is in
+  flight (above), are the library's concurrent runtime: neither net process
+  starts a firing while another is in flight (§6.3), so the lines of two
+  firings never interleave on the wire (stated since 2026-11-22).
 - **Baselines.** An inner net's `fireable` baseline (§7.2) is taken when the
   runtime first knows of the net: at `load` for the inner nets the factory
-  seeded and for every subnet, at the `inject` that carried the token, or at
-  the landing of the outer firing that produced the token. No `fireable` is
+  seeded and for every subnet of the loaded net, at the `inject` that
+  carried the token, or at the landing of the outer firing that produced
+  the token; a subnet inside a token's net is known, and its baseline
+  taken, when that net is. No `fireable` is
   sent for the baseline itself; the first `nested` `fireable` for that net
   reports the first change from it. `reset` and `load` retake every
   baseline, the nets being new (since 2026-10-12).
-- **Reads during a firing.** While an outer body runs, a read addressed to
-  an inner net of a token that firing took, or holds through a mutate edge,
-  is answered after the landing (it may wait, as `get_token` on such a token
-  does, §6.5), and so is a read addressed to a subnet one of whose port
-  places that firing touches; every other inner net is unchanged by that
-  body, since an outer body reaches only the tokens it holds and an inner
-  body only its own net, and is answered at once. While an inner body runs,
-  reads of that inner net follow §6.3 as for the outer net. While a body of a
-  subnet runs whose firing took a token from one of the subnet's port places,
-  or holds one there through a mutate edge, a read of the net around the
-  subnet is answered at once, with that port as the firing's `launched` left
-  it and at the version that `launched` gave the net (§12.7).
+- **Reads during a firing.** What follows is what a runner does while a
+  body runs off its request thread: the Python runner for every body, the
+  Rust runner for an outer body it detaches. The Rust runner runs an outer
+  body with a mutate edge, and every inner body, inside the request or tick
+  that fires it and answers nothing until the body lands (§6.3), so with a
+  Rust process every read during such a body waits for the landing (stated
+  since 2026-11-22). While an outer body runs, a read addressed to an
+  inner net of a token that firing took, or holds through a mutate edge, is
+  answered after the landing, and so is a read addressed to a subnet one of
+  whose port places that firing touches; every other inner net is
+  unchanged by that body, since an outer body reaches only the tokens it
+  holds and an inner body only its own net, and is answered at once. A read
+  held for the landing is answered as the landing leaves the marking:
+  addressed by `path` through a token the firing took, it names the token
+  id the landing replaced (§12.1) and is `unknown_net`; addressed by
+  `nested_id`, it reaches the net wherever the landing put its token, and
+  is `unknown_net` only when the landing consumed the token (§12.6). In
+  the Python runner, while an inner body runs, reads of that inner net and
+  of every net above it are answered at once, as §6.3 says of the outer
+  net, except a `get_token` on a token that holds the firing net, at any
+  level up to the outer net, which waits for the landing (§6.5); and while
+  a body of a subnet runs whose firing took a token from one of the
+  subnet's port places, or holds one there through a mutate edge, a read of
+  the net around the subnet is answered at once, with that port as the
+  firing's `launched` left it and at the version that `launched` gave the
+  net (§12.7).
 - `enable`, `disable`, `set_param`, `start`, `stop`, `reset`, `step` and
   `press` act on the outer net only; any of them given `path` or `nested_id`
   is `invalid_params` (`step` named here since 2026-10-12: its result names
@@ -1387,11 +1574,15 @@ An event inside an inner net reaches the host as one `nested` notification
 ```
 
 `event` is the inner notification, any of §7, with the inner net's
-`marking_version` and the process's `running` in its `params`: a firing in
-an inner net is `nested` around `launched` then `nested` around
-`distributed` (or `failed`), and a harness folds the pair as it folds the
-outer one (§11). The wrapper carries the outer net's `marking_version` and
-`running`. The inner event leaves the outer net's version as it was, unless
+`marking_version` and the process's `running` in its `params`. A firing in
+an inner net is, from the Python runner, `nested` around `launched` then
+`nested` around `distributed` (or `failed`), which a harness folds as it
+folds the outer pair (§11), and from the Rust runner one `nested` around
+`fired` (or `failed`), with `duration_ms` 0.0 (§6.3): the inner net's
+version moves by two in one and by one in the other for the same firing,
+and a reader accepts both (since 2026-11-22; until then this text gave the
+two-piece form alone). The wrapper carries the outer net's `marking_version`
+and `running`. The inner event leaves the outer net's version as it was, unless
 it changed a port place of one of the outer net's subnet places; then the
 wrapper carries the outer net's new version (§12.7). Whatever the depth
 there is one wrapper, and `path` is the full path. A reader that does not
@@ -1458,8 +1649,11 @@ events are gone: `launched.consumed` names the token, its nested ids stop
 resolving (`unknown_net`), and a viewer attached to one detaches. An outer
 firing that takes the token and puts it back, the common move, keeps the
 inner net and its nested id and gives the token a new id. `reset` and `load`
-drop every inner net with the marking. A subnet exists as long as the outer
-net: from the `load` or `reset` that builds it until the next of either. No
+drop every inner net with the marking. A subnet exists as long as the net
+that holds its subnet place: a subnet of the loaded net from the `load` or
+`reset` that builds it until the next of either, and a subnet inside a net
+a token carries as long as that net, so it is born with the token's net and
+dies with the token, in both runners (stated since 2026-11-22). No
 runtime changes an inner net's topology once built; no inner transition
 reads or writes the net around it. That net reaches a token's nets only
 through its own bodies, and a subnet of its own only through the edges on
@@ -1551,7 +1745,12 @@ at whatever depth, and the loaded net is the one the process loaded.
   `nested_id`) and name the place alone: `get_place_tokens {place: "Level
   3", port: "Lobby"}` and `get_place_tokens {place: "Lobby", path:
   [{"place": "Level 3"}]}` read the same tokens, and each is answered with
-  the version of the net it addressed. On the outer net, `query` and
+  the version of the net it addressed. An `inject` by the pair is answered
+  with the outer net's version and the id the subnet minted for the token,
+  which is an id of the subnet: the token is read through the subnet, as
+  `get_token` below says, and a `get_token` on the outer net with that id
+  answers `unknown_token`, or the outer net's own token of that id when it
+  has one. On the outer net, `query` and
   `distinct` cover the ports with the places, a subnet place's ports at its
   position in their `ports` order, and a match in a port is `{place, port,
   token, json?}`. In a filter's `places` (§13.2) and in `distinct`'s
@@ -1615,17 +1814,24 @@ at whatever depth, and the loaded net is the one the process loaded.
   tokens of its ports the change touched. A version stamped on a read of
   either net covers every change of the port place told up to that version.
   A reader that follows both nets moves each version it holds to the value
-  given for that net and sees no version skipped in either. A reader that
-  follows one of the two nets and not the other sees a change told by the
+  given for that net and sees no version skipped in either. Neither field
+  carries a nested id; both name nets from the net that tells the change. A
+  subnet in `subnet_marking_versions` is named by its subnet place in that
+  net, so its path is the telling net's path (the `nested` wrapper's, or
+  `[]` for the loaded net) with `{"place": name}` added, and its nested id
+  is that place's `subnet.nested_id` in the telling net's marking;
+  `outer_marking_version` is the version of the net whose path is the
+  wrapper's path without its last step (stated since 2026-11-22). A reader
+  that follows one of the two nets and not the other sees a change told by the
   other as a gap in its own version (§4), the next value it meets being more
   than one beyond the one it holds, and refetches, as at any gap.
 
   For example, the loaded net `world` is at version 42 and holds the subnet
   place `Level 3`, whose subnet, nested id `"5"`, is at version 7. `Enter`
   takes a hero from `Door` and puts it into the port place `Lobby`; then the
-  subnet's `Walk In` takes it from `Lobby` into `Arena`. The runtime writes
-  these four lines, shown here as one array, with the `fireable` lines left
-  out:
+  subnet's `Walk In` takes it from `Lobby` into `Arena`. The Python runner
+  writes these four lines, shown here as one array, with the `fireable`
+  lines left out:
 
   ```json
   [
@@ -1658,11 +1864,20 @@ at whatever depth, and the loaded net is the one the process loaded.
   wrapper; the `distributed` of `Walk In` touched no port, so `world` stays
   at 45. A reader that follows `world` alone and skips `nested` next meets
   `world` at 46, sees the gap, and refetches.
+
+  A Rust process writes three lines for the same two firings (§6.3): the
+  same `launched` and `distributed` of `Enter`, then one `nested` around a
+  `fired` of `Walk In`, carrying its `consumed` and `produced` together,
+  `duration_ms` 0.0, `outer_marking_version` 45 and the subnet's
+  `marking_version` 9, on a wrapper at 45. `world` goes 43, 44, 45 there
+  too, and the subnet 8, 9.
 - **Reads, events and steps** keep their shape. An event in a subnet arrives
   as `nested` with the subnet's path, `[{"place": "Level 3"}]`, and its
   nested id. A `step` that fired inside a subnet answers with that `path`
-  and `nested_id`. A subnet's `fireable` baseline is taken at `load` and at
-  `reset` (§12.3). While an outer firing that touches one of the subnet's
+  and `nested_id`. A subnet's `fireable` baseline is taken when the runtime
+  first knows of it: at `load` and at `reset` for a subnet of the loaded
+  net, and with its token's net for a subnet inside one (§12.3). While an
+  outer firing that touches one of the subnet's
   port places is in flight, a read addressed to the subnet waits for the
   landing and the subnet takes no turn (§12.3).
 
@@ -1722,8 +1937,9 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
   which the outer net's `query` covers at its subnet place's position
   (§12.7). `count` is the number of matches and `matches`
   holds the first `token_limit` of them (default 200, clamped to 1..1000, as
-  `get_state`). It reflects the marking at `marking_version` and never waits
-  for a running body: it is served from the same marking as `get_state`.
+  `get_state`). It reflects the marking at `marking_version` and is
+  answered while a body runs exactly when `get_state` is (§6.3): it is
+  served from the same marking as `get_state`.
 - `distinct` returns the distinct values of `key` over the tokens of the
   net, or of `places`, in order of first appearance in place order then
   token order; a key no place declares gives `[]`.
