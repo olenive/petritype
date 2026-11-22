@@ -39,7 +39,9 @@ firing and answers while a body runs (§6, §6.3, §6.5, §7.1, §12.3, §12.4,
 from version 1 (§10), and closes gaps in §5.1, §11, §12.1, §12.3, §12.6 and
 §12.7. Later the same day it came to say that the Rust runner reports the
 real duration of a body it runs inline, from its version 0.2.0 (§6.3,
-§12.4, §12.7). Both runners implement it, the Rust one (`petritype-runner`, in
+§12.4, §12.7), and the shared transcripts came to cover failed firings,
+each new case over a conformance net of its own, with a failure's `error`
+masked (§11). Both runners implement it, the Rust one (`petritype-runner`, in
 `../petritype-rs`) and the Python one (`python -m petritype.runner`,
 `DESIGN_RUNNER.md`), and both replay the shared transcripts of §11; the
 Bevy visualiser (`../petritype-bevy`) hosts either as a net process since
@@ -853,7 +855,10 @@ described.
   steps of a path included, every nested id, every `marking_version` and
   `outer_marking_version` and the values of `subnet_marking_versions` (§2,
   §4, §12.1, §12.7), every `type_name`, `label` and `message` (an error's
-  among them), `runtime` and `runtime_version`, every `duration_ms` and time,
+  among them), `runtime` and `runtime_version`, every `error` that is text,
+  the failure's own words in a `failed` and in a log entry of a failed
+  firing (the Python runner writes `"Type: message"`, the Rust runner the
+  error's own text; masked since 2026-11-22), every `duration_ms` and time,
   and sets every `detail` to `"<any>"`. It carries `color` only where both
   runtimes give the token the same colour, which the conformance nets do by
   giving hex values (`"#rrggbb"`, lowercase), never names (until 2026-10-16 a
@@ -886,9 +891,9 @@ described.
 - The format was first implemented by the Rust runner, whose own four
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
-  here under `tests/protocol/` (four files as of 2026-10-03, eleven as of
+  here under `tests/protocol/` (four files as of 2026-10-03, twelve as of
   2026-11-22, each replayed by `tests/test_protocol_transcripts.py` through
-  the runner's state machine; seven of them, `04`, `05` and `07` to `11`,
+  the runner's state machine; eight of them, `04`, `05` and `07` to `12`,
   are also replayed over pipes against `python -m petritype.runner`, the
   list `OVER_PIPES` there, and `01`, `02`, `03` and `06` in process only).
   They run
@@ -901,8 +906,8 @@ described.
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
   in full; a runner that carries other nets too replays it with a registry
-  reduced to the net the transcript names. Eight of the eleven, `01` and
-  `05` to `11`, send `describe` and pin it in full, so over pipes they match
+  reduced to the net the transcript names. Nine of the twelve, `01` and
+  `05` to `12`, send `describe` and pin it in full, so over pipes they match
   only a binary that serves their one net; the Rust example binary serves
   every conformance net and others besides. The conformance nets live in
   `tests/protocol_nets/`, and four of them (`transit`, `wildlife`, `shop`
@@ -1336,6 +1341,62 @@ described.
   group, after which `Pack` alone is fireable; and resets. No other
   conformance net declares a group, so no other transcript carries `groups`
   or `group`.
+- Failed firings got their conformance net and transcript on 2026-11-22,
+  `12_failures.json` over `tests/protocol_nets/workshop.py`: a firing that
+  fails and loses its token, one that fails and gives it back, and each of
+  the two for a firing that took its token from a port place of a subnet.
+  Its names, places, transitions, template, load parameter and seed are
+  fixed here, since the transcript depends on them:
+
+  **`workshop`** ("Pots are glazed on a bench and unloaded from a kiln, and
+  a cracked pot fails the firing that holds it"), hosted `manual`, with one
+  load parameter and no net parameters. Every place of it, in the net and
+  in its subnet, holds strings and is serializable; a pot's JSON form is the
+  string, and its label is the runtime's own. The net's places, in this
+  order: `Bench`; `Kiln`, a subnet place holding a net the template `Kiln`
+  builds, with the default stepping rule, `inner_first`; and `Shelf`. The
+  template `Kiln` takes no parameters and builds a net holding no tokens,
+  with one place, `Hatch`, a port, and no transition. The net's transitions,
+  in this order: `Glaze`, which takes the front of `Bench` (a `take` edge)
+  and produces it unchanged into `Shelf`; and `Unload`, which takes the
+  front of the port `Hatch` of `Kiln` and produces it unchanged into
+  `Shelf`. Each body fails for a pot whose text begins with `"Cracked"` (the
+  Python body raises, the Rust body returns an error) and hands any other
+  pot on. The load parameter `restore`, a boolean that is not required and
+  defaults to `false`, says whether a failed firing puts back what it took:
+  the Python library sets that for a whole net (`restore_tokens_on_failure`)
+  and the Rust core for each transition, so the Rust net gives both
+  transitions the parameter's value. Seed: every place empty; the
+  transcript brings each pot in with `inject`, so that at most one
+  transition is fireable at a time. No transition has a guard or a
+  priority, and every net chooses by the default selector. The transcript
+  reads `describe`, whose one net lists the parameter as
+  `{name: "restore", type_name, required: false, default: false}`; loads
+  the net with no parameters; injects `"Cracked bowl"` into `Bench` and steps, `Glaze`
+  failing with `restored: false`, after which the state shows the bowl
+  gone; injects `"Cracked jug"` into the port by the pair and steps,
+  `Unload` failing with `restored: false`, its `launched` carrying
+  `subnet_marking_versions` and its `failed` none, since it put nothing
+  back (§12.7), after which the port is empty; reads the log, two entries
+  with `outcome: "failed"`, `produced: []`, the `error` and
+  `restored: false`; loads the net again with `{"restore": true}`, generation 2;
+  injects `"Cracked cup"` and then `"Plate"` into `Bench` and steps, `Glaze`
+  failing with `restored: true` and no `fireable` after it, the set being
+  the same, after which the state shows the cup back at the front of
+  `Bench`, before the plate, with its id; disables `Glaze`, so that only
+  `Unload` can fire next; injects `"Cracked vase"` by the pair and steps,
+  `Unload` failing with `restored: true`, its `failed` carrying
+  `subnet_marking_versions`, since it put the vase back into the port; reads
+  the state of the net and of the kiln by path `[{"place": "Kiln"}]`, the
+  vase in `Hatch` with its id in both; and reads the log, which starts again
+  at `seq` 1 after the second `load`, two entries with `restored: true`. A
+  failed firing is not folded (above), so each failure stands as its
+  `launched` then its `failed`, the step's answer carrying `failed: true`.
+  Every failure in it is a firing of the loaded net with no mutate edge,
+  which both runners report in those two pieces; a failure inside an inner
+  net, or of a body with a mutate edge, is one `failed` from the Rust runner
+  (§6.3) and two pieces from the Python runner, so no shared transcript
+  holds one.
 
 ## 12. Nested nets
 

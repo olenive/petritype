@@ -38,7 +38,8 @@ names as they stand and each step's token id the capture of that token, or
 one: the token is named where its label is seen). Every ``marking_version`` and
 ``outer_marking_version``, and every version in ``subnet_marking_versions``, is
 ``"<version>"``; every ``label``, ``type_name``, ``message``, ``runtime`` and
-``runtime_version`` ``"<label>"``; every ``duration_ms`` ``"<ms>"``; every time
+``runtime_version``, and every ``error`` that is text (a failure's, in ``failed`` and
+in a log entry, since 2026-11-22), ``"<label>"``; every ``duration_ms`` ``"<ms>"``; every time
 ``"<time>"``; every ``detail`` ``"<any>"``; ``topology.edges`` is
 ``{"<unordered>": [...]}``. ``topology.controls`` is kept as it stands, labels
 included: it is what the net declares, the same in every runtime. A ``color`` is
@@ -79,7 +80,7 @@ from tests.test_protocol_transcripts import (  # noqa: E402
     ANY, NET_MODULES, UNORDERED, Process, _capture_name, fold, matches, substitute,
 )
 
-LABEL_KEYS = frozenset({"label", "type_name", "message", "runtime", "runtime_version"})
+LABEL_KEYS = frozenset({"label", "type_name", "message", "error", "runtime", "runtime_version"})
 TIME_KEYS = frozenset({"started_at", "last_progress_at", "idle_since"})
 HEX_COLOUR = re.compile(r"#[0-9a-f]{6}")
 SETTLE_SECONDS = 0.2

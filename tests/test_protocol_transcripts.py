@@ -94,15 +94,17 @@ NET_MODULES = {
     "stepping-rules": "tests.protocol_nets.stepping_rules",
     "levels": "tests.protocol_nets.levels",
     "groups": "tests.protocol_nets.groups",
+    "workshop": "tests.protocol_nets.workshop",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
 # the nested-net one, whose example module and templates must import in the process; the
 # two over the edges that accept an empty place, whose example modules must too; the
 # stepping rules, whose net runs and whose templates must import; the subnet places; and
-# the groups, whose topology the process serves as the owner does.
+# the groups, whose topology the process serves as the owner does; and the failed
+# firings, whose net holds a subnet place.
 OVER_PIPES = (
     "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
-    "09_subnet_places.json", "10_stepping_rules.json", "11_groups.json",
+    "09_subnet_places.json", "10_stepping_rules.json", "11_groups.json", "12_failures.json",
 )
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
@@ -463,6 +465,10 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
             elif key == "color":
                 if not _hex(item):
                     problems.append(f"{here}: a shared transcript carries a colour only as #rrggbb")
+            elif key == "error" and isinstance(item, str):
+                # A failure's text (``failed``, a log entry): the runtime's own words.
+                if item not in STRING_MASKS:
+                    problems.append(f"{here}: {item!r} must be one of {sorted(STRING_MASKS)}")
             elif key in MASKED_KEYS and item not in MASKED_KEYS[key]:
                 problems.append(f"{here}: {item!r} must be one of {sorted(MASKED_KEYS[key])}")
             elif key in ("id", "nested_id") and not top and not (item == "<id>" or _capture_name(item)):
@@ -488,9 +494,9 @@ def _unsafe(value, path: str, top: bool = False) -> list[str]:
 
 @pytest.mark.parametrize("path", TRANSCRIPTS, ids=[path.stem for path in TRANSCRIPTS])
 def test_transcript_is_shared_safe(path: Path):
-    """Every token id, version, label, duration, time, type name and ``detail``
-    masked, and a ``color`` only as a hex ``#rrggbb`` (§11), so the Rust runner can
-    replay it too."""
+    """Every token id, version, label, duration, time, type name, failure's
+    ``error`` and ``detail`` masked, and a ``color`` only as a hex ``#rrggbb`` (§11),
+    so the Rust runner can replay it too."""
     transcript = load_transcript(path)
     problems = []
     for index, exchange in enumerate(transcript["exchanges"]):
@@ -689,6 +695,23 @@ def test_the_fold_carries_the_versions_across_a_port_from_both_pieces():
                   {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 0.1,
                                                        "marking_version": 2, "running": False}}])
     assert set(plain[0]["params"]) == {"transition", "consumed", "produced", "duration_ms", "marking_version", "running"}
+
+
+def test_a_shared_transcript_masks_a_failures_error():
+    """A failure's ``error`` is the runtime's own text (Python ``"Type: message"``,
+    Rust the error's ``Display``), masked like a ``message`` (§11, since 2026-11-22);
+    an error response's ``error`` is an object, whose ``message`` is masked."""
+    from tests.record_transcript import Masker
+
+    assert not _unsafe({"error": "<label>", "restored": False}, "x")
+    assert _unsafe({"error": "Cracked: Cracked bowl broke"}, "x")
+    assert not _unsafe({"error": {"message": "<label>", "code": "invalid_params"}}, "x", top=True)
+    failed = Masker().line({"method": "failed", "params": {
+        "transition": "Glaze", "error": "Cracked: Cracked bowl broke", "restored": False,
+        "consumed": [["Bench", "1"]], "marking_version": 3, "running": False}})
+    assert failed["params"]["error"] == "<label>"
+    refused = Masker().line({"id": "4", "error": {"message": "no such place", "code": "unknown_place"}})
+    assert refused["error"] == {"message": "<label>", "code": "unknown_place"}
 
 
 def test_a_shared_transcript_masks_the_versions_across_a_port():
