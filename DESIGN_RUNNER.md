@@ -301,6 +301,9 @@ same day added the launch notification for sequential observers
 *2026-11-22:* the work of 21 and 22 November (a stepping rule per place,
 protocol version 2 with paths as lists, subnet places and groups) goes out as
 0.4.0, a minor version whose removals the changelog names (`CHANGELOG.md`).
+0.4.1 the same day added the inner net's `path` and `nested_id` to the
+`heartbeat`, and carries the protocol text as corrected after a host's
+review and four more shared transcripts.
 
 ## As built, 2026-10-09: nested nets (PROTOCOL.md §12)
 

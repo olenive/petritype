@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.1, 2026-11-22
+
+The [`v0.4.1` tag](https://github.com/olenive/petritype/tree/v0.4.1). It carries the protocol text as corrected after a host's review and the fifteen shared transcripts, for a host that replays them from a source checkout.
 
 - `PROTOCOL.md` is corrected after a host's review, with nothing on the wire changed and the protocol still version 2. It says what each runner writes for a firing (the Rust runner reports an outer body with a mutate edge, and every firing inside an inner net, in one piece as `fired`) and what each answers while a body runs; §9 gives a relay its rules, for params in a query string, names in a URL, the net whose version an answer is held for, the envelope's version and a host that speaks several versions; §10 lists every difference of version 2 from version 1; and §5.1, §11 and §12 close smaller gaps, among them a subnet inside a token's net, empty groups, and which shared transcripts run over pipes.
 - `PROTOCOL.md` says that the Rust runner reports the real `duration_ms` of a body it runs inline, an outer body with a mutate edge and every firing inside an inner net, from its version 0.2.0; earlier Rust builds wrote 0.0 (§6.3, §12.4, §12.7).
