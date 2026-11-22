@@ -97,18 +97,19 @@ NET_MODULES = {
     "workshop": "tests.protocol_nets.workshop",
     "cellar": "tests.protocol_nets.cellar",
     "harbour": "tests.protocol_nets.harbour",
+    "odd-names": "tests.protocol_nets.odd_names",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
 # the nested-net one, whose example module and templates must import in the process; the
 # two over the edges that accept an empty place, whose example modules must too; the
 # stepping rules, whose net runs and whose templates must import; the subnet places; and
 # the groups, whose topology the process serves as the owner does; and the failed
-# firings, the ports seen from outside and the subnet inside a token's net, whose nets
-# hold a subnet place each.
+# firings, the ports seen from outside, the subnet inside a token's net and the names
+# with any character, whose nets hold a subnet place each.
 OVER_PIPES = (
     "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
     "09_subnet_places.json", "10_stepping_rules.json", "11_groups.json", "12_failures.json",
-    "13_ports_from_outside.json", "14_subnet_in_a_token.json",
+    "13_ports_from_outside.json", "14_subnet_in_a_token.json", "15_odd_names.json",
 )
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
