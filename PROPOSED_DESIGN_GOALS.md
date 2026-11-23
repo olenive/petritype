@@ -796,13 +796,13 @@ members that must be tokens of their own.
 - **The static checks** count a drain as moving nothing guaranteed, by hand since it is an
   argument edge by class: `assert_no_source_transitions` names a transition whose only
   argument edge is a drain (it fires for ever on an empty place), and `assert_acyclic` leaves
-  drains out of the token flow, as it leaves read edges out, since a loop closed only through
+  drains out of the token flow, as it leaves the non-consuming edges out, since a loop closed only through
   a drain cannot keep itself going (each round costs the draining transition a token taken
   through another edge). Both docstrings give examples, the traffic light among them.
 - **The runner** lists the kinds as `drain` and `survey` (`DESIGN_RUNNER.md`, "As built,
   2026-10-14"); **the visualiser** draws both with a hollow arrowhead (Graphviz
   `arrowhead="empty"`), the drain otherwise as a consuming edge and the survey as a dashed
-  read edge.
+  snapshot edge.
 - The examples, split on 2026-10-16 so that each shows one mechanic (the design's section 2
   net had a shop that priced orders with whatever promotions were running and drained them
   all when the day closed, and "draining promotions" read badly):

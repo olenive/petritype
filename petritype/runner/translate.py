@@ -21,8 +21,8 @@ from pydantic import BaseModel, TypeAdapter
 from petritype.core import serialisation as _serialisation
 from petritype.core.events import PathStep, PlaceKey, Port
 from petritype.core.executable_graph_components import (
-    DrainEdge, ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, NestedNets, SubnetPlaceNode,
-    SurveyEdge, TakeWhereEdge,
+    DrainEdge, ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, NestedNets, ReadAllEdge,
+    ReadWhereEdge, SubnetPlaceNode, SurveyEdge, TakeWhereEdge,
 )
 from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
@@ -321,7 +321,10 @@ class Filters:
         for a shape that is not one, ``unknown_place`` for a place not of the net.
         A ``places`` entry is a place's name or ``{"place", "port"}`` for a port
         place of one of the net's subnet places (§13.2); ``place_names`` holds
-        what the net can name, ports by their ``Port`` pairs."""
+        what the net can name, ports by their ``Port`` pairs. A clause with
+        ``input`` is ``invalid_params``, and the message says why: it reads the
+        token a firing gets from another place, so it means something only in a
+        keyed edge's filter (§13.2, since 2026-11-23)."""
         if not isinstance(raw, dict):
             raise ProtocolError(ErrorCode.INVALID_PARAMS, "a filter is an object")
         unknown = set(raw) - {"clauses", "places", "prefix"}
@@ -329,6 +332,13 @@ class Filters:
             raise ProtocolError(ErrorCode.INVALID_PARAMS, f"a filter has no {', '.join(map(repr, sorted(unknown)))}")
         clauses = []
         for clause in raw.get("clauses", []) or []:
+            if isinstance(clause, dict) and "input" in clause:
+                # A clause of a keyed edge's filter (§13.5), shown in a topology as declared.
+                raise ProtocolError(
+                    ErrorCode.INVALID_PARAMS,
+                    'a clause with "input" compares with the token a firing gets from another place, so it '
+                    "belongs only in a keyed edge's filter, not in a query or a connection's filter",
+                )
             if not isinstance(clause, dict) or not isinstance(clause.get("key"), str):
                 raise ProtocolError(ErrorCode.INVALID_PARAMS, 'a clause is {"key", "values"} or {"key", "param"}')
             if "param" in clause:
@@ -366,15 +376,28 @@ class Filters:
         return keys
 
     def to_wire(filter: Filter) -> dict:
-        out: dict = {"clauses": [
-            {"key": c.key, "param": c.param} if c.param is not None else {"key": c.key, "values": list(c.values)}
-            for c in filter.clauses
-        ]}
+        """A filter as declared (§13.2): a parameter clause unevaluated, and an
+        input clause as ``{key, input: {place, port?, key}}``, its place named as
+        an edge names one (§13.5)."""
+        out: dict = {"clauses": [Filters.clause_to_wire(c) for c in filter.clauses]}
         if filter.places is not None:
             out["places"] = [Places.ref(key) for key in filter.places]
         if filter.prefix is not None:
             out["prefix"] = filter.prefix
         return out
+
+    def clause_to_wire(clause: Clause) -> dict:
+        """``{key, values}``, ``{key, param}`` or ``{key, input: {place, port?, key}}``."""
+        if clause.input is not None:
+            place, port = Places.split(clause.input)
+            source: dict = {"place": place}
+            if port is not None:
+                source["port"] = port
+            source["key"] = clause.input_key
+            return {"key": clause.key, "input": source}
+        if clause.param is not None:
+            return {"key": clause.key, "param": clause.param}
+        return {"key": clause.key, "values": list(clause.values)}
 
 
 class Details:
@@ -517,7 +540,7 @@ class Topologies:
 
     def place(place: ListPlaceNode, port: bool = False, group: Optional[str] = None) -> wire.Place:
         """One place as the topology lists it; ``port`` for a port place in its
-        subnet's own topology, and ``group`` the group it is in there. A port
+        own net's topology, and ``group`` the group it is in there. A port
         listed in its subnet place's ``ports`` is given neither (§5.1, §12.7)."""
         return wire.Place(
             name=place.name,
@@ -530,29 +553,40 @@ class Topologies:
             group=group,
         )
 
-    def of(graph: ExecutableGraph, subnet: bool = False) -> wire.Topology:
+    def of(graph: ExecutableGraph) -> wire.Topology:
         """The net's shape. A place whose tokens hold nets carries ``nested`` and its
         ``stepping`` rule, the default included (§12.3). A subnet place is listed
         with its template's name as ``type_name`` (``""`` when its subnet was built
         without one), its ``ports`` in the subnet's order, as the subnet's own
-        topology lists them without ``port``, and its ``stepping`` (§12.7). With
-        ``subnet``, the net is the subnet of a subnet place, and each of its port
-        places carries ``port``; a net that is no subnet has no net around it to
-        reach its ports, so it shows none. An edge on a port names the subnet place
+        topology lists them without ``port``, and its ``stepping`` (§12.7). Each
+        port place of the net carries ``port``, whichever net it is: the loaded
+        net, a net a token carries or a subnet (since 2026-11-23; until then only
+        a subnet showed its ports). An edge on a port names the subnet place
         as its ``place`` and the port as its ``port``. An input edge's ``kind`` is
         its class's (``take_where``, ``drain``, ``snapshot``, ``survey``, ``mutate``,
-        ``mutate_where``), or for a plain argument edge ``take_all`` when its argument
-        takes every token as a list and ``take`` otherwise. The net's own groups are
+        ``mutate_where``, and since 2026-11-23 ``read``, ``read_where`` and
+        ``read_all``), or for a plain argument edge ``take_all`` when its argument
+        takes every token as a list and ``take`` otherwise; a keyed edge carries
+        its ``filter`` as declared; and an input edge that declares the ports it
+        reaches in the nets its place's tokens carry carries them as ``reaches``,
+        in the order declared, left out when it names none (since 2026-11-23). The
+        place of those tokens declares no ports: each token's net shows its own.
+        The net's own groups are
         ``groups``, in declared order, and each place, subnet place and transition in
         one carries its ``group``; a port in ``ports`` carries none, its group being
-        its subnet's (§5.1)."""
+        its subnet's (§5.1). A net whose definition declares it open carries ``open``,
+        ``true``, and any other net none (since 2026-11-23)."""
         places = MapPlaceNames.to_list_place_nodes(graph)
         functions = {transition.name: transition.function for transition in graph.transitions}
         edges: list[wire.Edge] = []
 
         def edge_on(edge, direction: str, **rest) -> wire.Edge:
             place, port = Places.split(edge.place_node_name)
-            return wire.Edge(place=place, port=port, transition=edge.transition_node_name, direction=direction, **rest)
+            reaches = list(getattr(edge, "reaches", ())) or None
+            return wire.Edge(
+                place=place, port=port, transition=edge.transition_node_name, direction=direction, **rest,
+                reaches=reaches,
+            )
 
         for edge in graph.argument_edges:
             if isinstance(edge, TakeWhereEdge):
@@ -572,6 +606,11 @@ class Topologies:
                 edges.append(edge_on(edge, "in", kind="mutate_where", filter=Filters.to_wire(edge.where)))
                 continue
             edges.append(edge_on(edge, "in", kind="mutate"))
+        for edge in graph.read_edges:
+            if isinstance(edge, ReadWhereEdge):
+                edges.append(edge_on(edge, "in", kind="read_where", filter=Filters.to_wire(edge.where)))
+                continue
+            edges.append(edge_on(edge, "in", kind="read_all" if isinstance(edge, ReadAllEdge) else "read"))
         outputs: dict[str, int] = {}
         for edge in graph.return_edges:
             outputs[edge.transition_node_name] = outputs.get(edge.transition_node_name, 0) + 1
@@ -588,7 +627,7 @@ class Topologies:
                     group=place.group,
                 )
                 if isinstance(place, SubnetPlaceNode)
-                else Topologies.place(place, port=subnet and place.port, group=place.group)
+                else Topologies.place(place, port=place.port, group=place.group)
                 for place in graph.places
             ],
             transitions=[
@@ -597,5 +636,6 @@ class Topologies:
             ],
             edges=edges,
             groups=list(graph.groups) or None,
+            open=True if graph.open else None,
         )
 

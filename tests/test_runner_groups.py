@@ -118,7 +118,7 @@ async def test_a_net_a_token_carries_shows_its_own_groups_and_the_net_around_it_
     inner = result(await harness.send("get_state", {"path": held["path"]}))["topology"]
     assert inner["groups"] == ["Sealing"]
     assert by_name(inner["places"])["Tray"]["group"] == "Sealing"
-    assert "port" not in by_name(inner["places"])["Tray"], "a token's net is no subnet: it shows no port"
+    assert by_name(inner["places"])["Tray"]["port"] is True, "a token's net shows its port, since 2026-11-23"
 
 
 async def test_a_net_with_no_groups_shows_no_groups_and_no_group_anywhere():

@@ -316,6 +316,24 @@ def yard_world() -> ExecutableGraph:
     ])
 
 
+@petri_net(name="levels-eve", description="Two levels, the second with a hero in its arena from its definition")
+def levels_eve() -> ExecutableGraph:
+    """The two levels, with Eve in level 2's arena from the level's definition: a
+    level is closed (it marks its ports), so a token from outside reaches only its
+    ports, and a token in its arena starts there or walks in (since 2026-11-23)."""
+    second = construct([
+        ListPlaceNode("Lobby", Hero, port=True),
+        ListPlaceNode("Arena", Hero, [Hero(name="Eve", fought=False)]),
+        ListPlaceNode("Exit Hall", Hero, port=True),
+    ], template="Level")
+    return construct([
+        ListPlaceNode("Door", Hero),
+        SubnetPlaceNode("Level 1", level()),
+        SubnetPlaceNode("Level 2", second),
+        ListPlaceNode("Outside", Hero),
+    ])
+
+
 # --- slow bodies on a port, outside and inside ----------------------------------------------------
 
 
@@ -429,13 +447,13 @@ class TestTopology:
         assert {"place": "Level 2", "port": "Lobby", "transition": "Climb", "direction": "out"} in topology["edges"]
         assert all(place["name"] != "Arena" for place in topology["places"]), "nothing else of the subnet"
 
-    async def test_a_subnets_own_topology_marks_its_ports_and_a_net_loaded_alone_does_not(self):
+    async def test_a_subnets_own_topology_marks_its_ports_and_so_does_a_net_loaded_alone(self):
         h = await loaded(levels, lone_level, net="levels")
         places = result(await h.send("get_state", {"path": L1}))["topology"]["places"]
         assert [place.get("port") for place in places] == [True, None, True]
         await h.send("load", {"net": "lone-level"})
         places = result(await h.send("get_state"))["topology"]["places"]
-        assert [place.get("port") for place in places] == [None, None, None], "no net around it reaches them"
+        assert [place.get("port") for place in places] == [True, None, True], "every net shows its ports"
 
     async def test_a_subnet_place_without_a_template_has_an_empty_type_name(self):
         h = await loaded(slow_door, slow_lobby, net="slow-lobby")
@@ -626,10 +644,9 @@ class TestReferences:
 
 class TestState:
     async def test_a_subnet_places_entry_holds_its_subnet_and_its_ports_under_the_token_limit(self):
-        h = await loaded(levels, net="levels")
+        h = await loaded(levels_eve, net="levels-eve")
         for name in ("Bram", "Cato", "Dara"):
             await h.send("inject", {"place": "Level 2", "port": "Lobby", "token": {"name": name, "fought": False}})
-        await h.send("inject", {"place": "Arena", "path": L2, "token": {"name": "Eve", "fought": False}})
         entry = result(await h.send("get_state", {"token_limit": 2}))["marking"]["places"]["Level 2"]
         assert entry["subnet"]["count"] == 4, "its ports included, and its own places"
         assert entry["ports"]["Lobby"]["count"] == 3 and len(entry["ports"]["Lobby"]["tokens"]) == 2

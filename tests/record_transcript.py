@@ -110,7 +110,10 @@ def _port(value) -> tuple[str, str] | None:
 
 
 def readable(label) -> str | None:
-    """A name for a token from its label or its JSON value, or ``None``."""
+    """A name for a token from its label or its JSON value, or ``None``. An
+    object is named by its ``name``, ``kind`` or ``id``, or failing those by its
+    first text field (since 2026-11-23: an order ``{item, courier}`` is named
+    after its item)."""
     value = label
     if isinstance(label, str):
         for parse in (json.loads, ast.literal_eval):
@@ -120,7 +123,10 @@ def readable(label) -> str | None:
             except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
                 continue
     if isinstance(value, dict):
-        value = next((value[key] for key in ("name", "kind", "id") if isinstance(value.get(key), (str, int))), None)
+        value = next(
+            (value[key] for key in ("name", "kind", "id") if isinstance(value.get(key), (str, int))),
+            next((item for item in value.values() if isinstance(item, str)), None),
+        )
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):

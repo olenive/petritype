@@ -154,7 +154,7 @@ class TestAssertNoSourceTransitions:
             ExecutableGraphCheck.assert_no_source_transitions(graph)
 
     def test_snapshot_fed_transition_counts_as_source(self):
-        # A read edge consumes nothing, so a transition fed only by one is
+        # A snapshot edge consumes nothing, so a transition fed only by one is
         # still a source.
         async def watch(seen: int) -> int:
             return seen

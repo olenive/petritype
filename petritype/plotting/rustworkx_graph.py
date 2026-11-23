@@ -1,4 +1,4 @@
-from typing import Optional, Union, Sequence, Iterable
+from typing import Any, Optional, Union, Sequence, Iterable
 
 from pydantic import BaseModel
 from petritype._optional import require
@@ -13,8 +13,8 @@ from petritype.core.data_structures import (
 )
 from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
-    ArgumentEdgeToTransition, DrainEdge, ExecutableGraph, MutateEdge, ReturnedEdgeFromTransition, SnapshotEdge,
-    SubnetPlaceNode, SurveyEdge,
+    ArgumentEdgeToTransition, DrainEdge, ExecutableGraph, MutateEdge, MutateWhereEdge, ReadAllEdge, ReadEdge,
+    ReadWhereEdge, ReturnedEdgeFromTransition, SnapshotEdge, SubnetPlaceNode, SurveyEdge, TakeWhereEdge,
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
 
@@ -24,9 +24,14 @@ class RustworkxArgumentEdgeData(BaseModel):
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
     drain: bool = False  # True for DrainEdge: takes every token, zero or more
+    where: Optional[Any] = None  # a TakeWhereEdge's Filter, which a drawing writes on the edge
+    reaches: tuple[str, ...] = ()  # the ports the edge declares it reaches in its tokens' nets, since 2026-11-23
 
     def __hash__(self):
-        return hash((self.source_place_node_name, self.target_transition_node_name, self.argument, self.drain))
+        return hash((
+            self.source_place_node_name, self.target_transition_node_name, self.argument, self.drain, self.where,
+            self.reaches,
+        ))
 
     def __eq__(self, other):
         if not isinstance(other, RustworkxArgumentEdgeData):
@@ -35,7 +40,9 @@ class RustworkxArgumentEdgeData(BaseModel):
             self.source_place_node_name == other.source_place_node_name and
             self.target_transition_node_name == other.target_transition_node_name and
             self.argument == other.argument and
-            self.drain == other.drain
+            self.drain == other.drain and
+            self.where == other.where and
+            self.reaches == other.reaches
         )
 
 
@@ -58,16 +65,25 @@ class RustworkxReturnedEdgeData(BaseModel):
 
 
 class RustworkxReadEdgeData(BaseModel):
+    """A non-consuming edge, one that leaves its tokens in their places: a snapshot
+    or survey, a mutate or mutate-where edge, or a read, read-where or read-all edge
+    (since 2026-11-23). The class keeps the name it had when the group was called
+    read edges."""
     source_place_node_name: PlaceKey  # a place's name, or a port's Port pair
     target_transition_node_name: TransitionNodeName
     argument: ArgumentName
-    mutate: bool  # True for MutateEdge (read/write), False for SnapshotEdge (read-only copy)
+    mutate: bool  # True for MutateEdge (reads and writes), False for SnapshotEdge (a copy) and a read edge
     survey: bool = False  # True for SurveyEdge: a copy of every token, zero or more
+    where: Optional[Any] = None  # a MutateWhereEdge's or ReadWhereEdge's Filter, which a drawing writes on the edge
+    read: bool = False  # True for a ReadEdge, ReadWhereEdge or ReadAllEdge: the live tokens, to look at
+    read_all: bool = False  # True for ReadAllEdge: every token, live, zero or more
+    reaches: tuple[str, ...] = ()  # the ports the edge declares it reaches in its tokens' nets, since 2026-11-23
 
     def __hash__(self):
-        return hash(
-            (self.source_place_node_name, self.target_transition_node_name, self.argument, self.mutate, self.survey)
-        )
+        return hash((
+            self.source_place_node_name, self.target_transition_node_name, self.argument, self.mutate, self.survey,
+            self.where, self.read, self.read_all, self.reaches,
+        ))
 
     def __eq__(self, other):
         if not isinstance(other, RustworkxReadEdgeData):
@@ -77,7 +93,11 @@ class RustworkxReadEdgeData(BaseModel):
             self.target_transition_node_name == other.target_transition_node_name and
             self.argument == other.argument and
             self.mutate == other.mutate and
-            self.survey == other.survey
+            self.survey == other.survey and
+            self.where == other.where and
+            self.read == other.read and
+            self.read_all == other.read_all and
+            self.reaches == other.reaches
         )
 
 
@@ -121,6 +141,8 @@ class RustworkxGraph:
                     target_transition_node_name=edge.transition_node_name,
                     argument=edge.argument,
                     drain=isinstance(edge, DrainEdge),
+                    where=edge.where if isinstance(edge, TakeWhereEdge) else None,
+                    reaches=edge.reaches,
                 ),
             ))
         return tuple(out)
@@ -150,9 +172,12 @@ class RustworkxGraph:
         mutate_edges: Iterable[MutateEdge],
         place_names_to_indices: dict[PlaceKey, NodeIndex],
         transition_names_to_indices: dict[TransitionNodeName, NodeIndex],
+        read_edges: Iterable[ReadEdge] = (),
     ) -> Sequence[tuple[NodeIndex, NodeIndex, RustworkxReadEdgeData]]:
+        """The non-consuming edges of a net, snapshots and surveys, then mutate
+        edges, then read edges, as rustworkx edges."""
         out = []
-        for edges, mutate in ((snapshot_edges, False), (mutate_edges, True)):
+        for edges, mutate in ((snapshot_edges, False), (mutate_edges, True), (read_edges, False)):
             for edge in edges:
                 out.append((
                     place_names_to_indices[edge.place_node_name],
@@ -163,6 +188,10 @@ class RustworkxGraph:
                         argument=edge.argument,
                         mutate=mutate,
                         survey=isinstance(edge, SurveyEdge),
+                        where=edge.where if isinstance(edge, (MutateWhereEdge, ReadWhereEdge)) else None,
+                        read=isinstance(edge, ReadEdge),
+                        read_all=isinstance(edge, ReadAllEdge),
+                        reaches=edge.reaches,
                     ),
                 ))
         return tuple(out)
@@ -200,6 +229,7 @@ class RustworkxGraph:
             mutate_edges=executable_graph.mutate_edges,
             place_names_to_indices=place_names_to_indices,
             transition_names_to_indices=transition_names_to_indices,
+            read_edges=executable_graph.read_edges,
         )
         graph.add_edges_from(g_edges_to_transitions)
         graph.add_edges_from(g_edges_from_transitions)

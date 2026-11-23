@@ -114,10 +114,55 @@ class NodeLabel:
             return "{" + NodeLabel.record_text(title) + "}"
         return "{" + NodeLabel.record_text(title) + "|{" + cells + "}}"
 
+    def filter_label(filter: Filter) -> str:
+        """A keyed edge's filter as a reader writes one, as petritype-dot writes
+        it: its clauses joined by `` and ``, a constant clause as ``class in {Bird,
+        Mammal}`` (a boolean as ``true`` or ``false``), a parameter clause as
+        ``class = $season``, a clause that reads another input as ``name =
+        Orders.courier`` (a port's as ``Level 1/Lobby.courier``), and ``any`` for
+        a filter with no clauses. Its places and prefix are left out: an edge
+        reads one place."""
+        if not filter.clauses:
+            return "any"
+
+        def spelt(value: Any) -> str:
+            return ("true" if value else "false") if isinstance(value, bool) else str(value)
+
+        def clause_text(clause) -> str:
+            if clause.input is not None:
+                source = clause.input
+                where = f"{source.place}/{source.port}" if isinstance(source, Port) else source
+                return f"{clause.key} = {where}.{clause.input_key}"
+            if clause.param is not None:
+                return f"{clause.key} = ${clause.param}"
+            return f"{clause.key} in {{{', '.join(spelt(value) for value in clause.values)}}}"
+
+        return " and ".join(clause_text(clause) for clause in filter.clauses)
+
+    def reaches_label(reaches: Sequence[str]) -> str:
+        """The ports an edge declares it reaches in its tokens' nets, as petritype-dot
+        writes them: ``reaches Orders In, Shots Out``, in the order declared."""
+        return "reaches " + ", ".join(reaches)
+
+    def edge_label(edge: Any, first: Optional[str] = None) -> dict[str, str]:
+        """An edge's ``label`` attribute, quoted (``quoted_text``) since rustworkx
+        quotes a label without escaping it, or nothing for an edge with nothing to
+        say: ``first`` (a read-all edge's ``*``) or the keyed edge's filter
+        (``filter_label``), then, since 2026-11-23, the ports the edge reaches
+        (``reaches_label``) as the last line, the lines joined by Graphviz's ``\\n``."""
+        lines = [first] if first is not None else []
+        where = getattr(edge, "where", None)
+        if where is not None:
+            lines.append(NodeLabel.filter_label(where))
+        reaches = getattr(edge, "reaches", ())
+        if reaches:
+            lines.append(NodeLabel.reaches_label(reaches))
+        return {"label": NodeLabel.quoted_text("\n".join(lines))} if lines else {}
+
     def edge_port(edge: Any, cells: dict[Port, str]) -> dict[str, str]:
         """The attribute that ends an edge on a port at the port's cell: the edge's
-        tail for an input or read edge, its head for an output edge; nothing for
-        an edge on a place of the net's own."""
+        tail for an input edge, a non-consuming one included, its head for an
+        output edge; nothing for an edge on a place of the net's own."""
         if isinstance(edge, RustworkxReturnedEdgeData):
             cell = cells.get(edge.target_place_node_name)
             return {"headport": cell} if cell is not None else {}
@@ -243,6 +288,17 @@ class RustworkxToGraphviz:
         its ports. Filters apply per net, so the cells count every token: a port is filtered
         in its subnet's own drawing. There, in the drawing of the subnet, a port place has a
         second ring, so that the border shows from inside.
+
+        A keyed edge (``TakeWhereEdge``, ``MutateWhereEdge``) is drawn as a take or a mutate edge
+        with its filter written on it (``NodeLabel.filter_label``), as petritype-dot draws one.
+
+        A read edge (since 2026-11-23) is a dotted dim grey arrow towards the transition, told
+        apart from a snapshot's dashed one: a ``ReadWhereEdge`` with its filter written on it,
+        a ``ReadAllEdge`` with a hollow arrowhead and the label ``*``, as petritype-dot draws them.
+
+        An input edge that declares the ports it reaches in its tokens' nets (``reaches``, since
+        2026-11-23) has the line ``reaches Orders In, Shots Out`` as its label's last line, after
+        its filter or its ``*`` (``NodeLabel.edge_label``), as petritype-dot writes it.
         """
 
         # Extract the last entry from each kind of history
@@ -252,12 +308,12 @@ class RustworkxToGraphviz:
         # The places the last firing touched, by the keys its edges name them by (a port by
         # its pair), and the transition itself, to be outlined in magenta. Every argument
         # edge took from its place (the input history holds one copy per argument edge),
-        # every read edge read its place, and the output history holds the very places the
-        # firing deposited into, matched here by identity to their keys.
+        # every non-consuming edge handed over from its place, and the output history holds
+        # the very places the firing deposited into, matched here by identity to their keys.
         magenta_outlined_places: set[PlaceKey] = set()
         magenta_outlined_transition = last_transition.name if last_transition else None
         if last_transition:
-            for edge in (*graph.argument_edges, *graph.snapshot_edges, *graph.mutate_edges):
+            for edge in (*graph.argument_edges, *graph.snapshot_edges, *graph.mutate_edges, *graph.read_edges):
                 if edge.transition_node_name == last_transition.name:
                     magenta_outlined_places.add(edge.place_node_name)
         if last_output_place:
@@ -340,10 +396,27 @@ class RustworkxToGraphviz:
 
             # An edge on a port ends at the port's cell of its subnet place's box.
             port = NodeLabel.edge_port(edge, cells)
+            # A keyed edge is drawn as its plain kind, with its filter written on it, and an edge
+            # that declares the ports it reaches has them as its label's last line (both since
+            # 2026-11-23).
+            label = NodeLabel.edge_label(edge)
             if isinstance(edge, RustworkxReadEdgeData):
-                # Read edges keep their distinct shape but recolour magenta when their transition
-                # fires, like the consuming / producing edges. Resting colour is the same dark grey.
+                # Non-consuming edges keep their distinct shape but recolour magenta when their
+                # transition fires, like the consuming / producing edges. Resting colour is the same
+                # dark grey.
                 colour = 'magenta' if should_be_magenta(edge) else 'dimgray'
+                if edge.read:
+                    # A read edge: a dotted arrow towards the transition, the live token looked at,
+                    # told apart from a snapshot's dashed copy. A read-where carries its filter, and
+                    # a read-all a hollow head, since it reads an empty place too, and the label *.
+                    return {
+                        'style': 'dotted',
+                        'color': colour,
+                        'arrowhead': 'empty' if edge.read_all else 'normal',
+                        'penwidth': '1',
+                        **port,
+                        **(NodeLabel.edge_label(edge, "*") if edge.read_all else label),
+                    }
                 if edge.mutate:
                     # MutateEdge: bidirectional, dot ends, slightly thicker — reads AND writes.
                     return {
@@ -353,6 +426,7 @@ class RustworkxToGraphviz:
                         'color': colour,
                         'penwidth': '2',
                         **port,
+                        **label,
                     }
                 # SnapshotEdge: a dashed arrow towards the transition — a non-consuming read.
                 # SurveyEdge: the same with a hollow head — it reads an empty place too.
@@ -362,6 +436,7 @@ class RustworkxToGraphviz:
                     'arrowhead': 'empty' if edge.survey else 'normal',
                     'penwidth': '1',
                     **port,
+                    **label,
                 }
 
             if should_be_magenta(edge):
@@ -372,6 +447,7 @@ class RustworkxToGraphviz:
                 # DrainEdge: a consuming arrow with a hollow head — it takes from an empty place too.
                 attrs['arrowhead'] = 'empty'
             attrs.update(port)
+            attrs.update(label)
             return attrs
 
         return node_attr_fn, edge_attr_fn

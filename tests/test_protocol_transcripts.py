@@ -98,6 +98,10 @@ NET_MODULES = {
     "cellar": "tests.protocol_nets.cellar",
     "harbour": "tests.protocol_nets.harbour",
     "odd-names": "tests.protocol_nets.odd_names",
+    "couriers": "tests.protocol_nets.couriers",
+    "roll-call": "tests.protocol_nets.roll_call",
+    "trays": "tests.protocol_nets.trays",
+    "post-office": "tests.protocol_nets.post_office",
 }
 # The process-mode transcripts: a running net, whose lines arrive after the response;
 # the nested-net one, whose example module and templates must import in the process; the
@@ -105,11 +109,16 @@ NET_MODULES = {
 # stepping rules, whose net runs and whose templates must import; the subnet places; and
 # the groups, whose topology the process serves as the owner does; and the failed
 # firings, the ports seen from outside, the subnet inside a token's net and the names
-# with any character, whose nets hold a subnet place each.
+# with any character, whose nets hold a subnet place each; the keyed edges that choose
+# by another input, whose clause the process writes and refuses as the owner does; the
+# read edges, whose squads' template must import in the process; the ports on a
+# token's net, whose units' template must import there too; and the closed nets, whose
+# posts' templates must import there as well.
 OVER_PIPES = (
     "04_start_run.json", "05_nested_nets.json", "07_empty_place_edges.json", "08_traffic_light.json",
     "09_subnet_places.json", "10_stepping_rules.json", "11_groups.json", "12_failures.json",
-    "13_ports_from_outside.json", "14_subnet_in_a_token.json", "15_odd_names.json",
+    "13_ports_from_outside.json", "14_subnet_in_a_token.json", "15_odd_names.json", "16_keyed_by_input.json",
+    "17_read_edges.json", "18_ports_on_a_token.json", "19_closed_nets.json",
 )
 
 START = datetime(2026, 10, 3, 9, 15, 2, 413000, tzinfo=timezone.utc)
@@ -728,6 +737,16 @@ def test_the_recorder_names_a_hidden_inject_after_its_token():
     masker.injected = {"name": "Merlot", "years": 0}
     answer = masker.line({"id": "6", "result": {"status": "injected", "id": "2", "marking_version": 5}})
     assert answer["result"]["id"] == "<id:merlot>"
+
+
+def test_the_recorder_names_an_object_without_a_name_by_its_first_text():
+    """A token's ``name``, ``kind`` or ``id`` names it; an object with none of them
+    is named by its first text field (an order after its item)."""
+    from tests.record_transcript import readable
+
+    assert readable('{"item": "Lamp", "courier": "Cleo"}') == "lamp"
+    assert readable('{"courier": "Ben", "name": "Ada"}') == "ada"
+    assert readable('{"years": 3}') is None
 
 
 def test_a_shared_transcript_masks_the_versions_across_a_port():

@@ -213,7 +213,7 @@ class Box:
     items: list
 
 
-def _read_edge_graph(edge_class):
+def _non_consuming_edge_graph(edge_class):
     def bump(boxes: list[Box], x: int) -> int:
         boxes[0].items.append(x)
         return x
@@ -229,10 +229,10 @@ def _read_edge_graph(edge_class):
     ], record_events=True)
 
 
-class TestReadEdges:
+class TestNonConsumingEdges:
 
     def test_snapshot_read_changes_nothing(self):
-        graph = _read_edge_graph(SnapshotEdge)
+        graph = _non_consuming_edge_graph(SnapshotEdge)
         _fire(graph)
         assert graph.place_named("Shared").tokens == [Box([0]), Box([1])]
         assert graph.place_named("Shared").token_ids == (1, 2)
@@ -241,7 +241,7 @@ class TestReadEdges:
         assert events[-1].consumed == (("In", 3),)
 
     def test_mutate_keeps_the_id_and_records_a_mutation(self):
-        graph = _read_edge_graph(MutateEdge)
+        graph = _non_consuming_edge_graph(MutateEdge)
         _fire(graph)
         assert graph.place_named("Shared").tokens == [Box([0, 7]), Box([1])]
         assert graph.place_named("Shared").token_ids == (1, 2)

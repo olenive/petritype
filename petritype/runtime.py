@@ -24,8 +24,9 @@ Layers built so far:
   is fireable).
 - **Offloaded bodies (#8):** a synchronous transition marked `execution="thread"` runs on a
   thread-pool executor instead of the event loop, so blocking user code can't stall the runner.
-- **Read arcs (#10):** a transition can read a place's tokens as an argument without consuming
-  them (`transition_names_to_read_edges`).
+- **Non-consuming edges (#10):** a transition can be handed a place's tokens as an argument
+  without consuming them, through a snapshot, survey, mutate or read edge
+  (`transition_names_to_read_edges`, a name kept from before the read edges of 2026-11-23).
 - **Limits:** `Runner.run(ctx, stop_after_n_firings=N)` paces — it always returns a
   `RunSummary` whose `quiesced` flag tells a stop from completion. `RunContext.
   error_after_n_firings` is a run-wide fuse: `TooManyFiringsError` is raised *before* the
@@ -43,7 +44,7 @@ Layers built so far:
   (inner-first places, then the ring after its cursor), else the sweep, else one behind it
   (the rest of the ring, then the outer-first places once nothing outer is in flight). An
   inner firing runs inline while outer bodies may be in flight, never in a token one of
-  them holds through a mutate edge, and never in the subnet of a subnet place one of whose
+  them holds through a mutate or a read edge, and never in the subnet of a subnet place one of whose
   ports an outer firing in flight has an edge on. Inner firings count as firings of the
   outer net under their ``InnerFiring``.
 
@@ -55,6 +56,11 @@ Design notes realised here:
   tokens) / `SetTokens` (replace; `[]` clears). Transitions: `SetParam` (merge kwargs),
   `Enable` / `Disable`, `Fire` (fire it now if it is fireable). The net: `SetNetParam` (one
   of ``graph.params``). Bad commands are dropped-and-logged, or raise under `RunContext.strict`.
+- **Closed nets (since 2026-11-23):** a command the program makes is outside the net, so
+  `Extend` and `SetTokens` at a place of a closed net that is not one of its ports are
+  refused with `ClosedNetError`, dropped-and-logged or raised under `strict` as any bad
+  command is; a command a control of the net gives (`apply_control`, `by_control`) is
+  inside and lands. The knobs and `Fire` stay with the program (`ClosedNets`).
 - **Controls:** a control-map ``{name: ControlSpec}`` binds widgets to commands; a net
   declares one with ``@petri_net(controls=...)`` and its place styles (``PlaceStyle``) with
   ``place_styles=...``, which the protocol runner serves to viewers (PROTOCOL.md §5.1, §6).
@@ -63,6 +69,7 @@ Design notes realised here:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import logging
 import time
@@ -74,12 +81,15 @@ from typing import Any, Awaitable, Callable, Optional, Union
 from pydantic import BaseModel, ConfigDict
 
 from petritype.core.executable_graph_components import (
+    ClosedNetError,
+    ClosedNets,
     ExecutableGraph,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FiringTokenIds,
     FunctionTransitionNode,
     GraphEvents,
+    HeldByBodyError,
     MapPlaceNames,
     MapTransitionNames,
     NestedNets,
@@ -377,11 +387,34 @@ def apply_control(ctx: RunContext, spec: ControlSpec, value: Any) -> Optional[Co
     """Turn a control's value into a command via ``ControlSpec.command`` (``spec.to_command``,
     handed the net when it takes it) and enqueue it on ``ctx.inbox`` (if any). Returns the
     command, or ``None`` if the control produced nothing. The control never touches the graph
-    — only the inbox."""
+    — only the inbox.
+
+    A control is the net's own, so the command it gives is applied as from inside the net
+    (``by_control``, since 2026-11-23): an ``Extend`` it gives lands at any place of a closed
+    net, as a ``press`` of the protocol runner does."""
     command = ControlSpec.command(spec, value, ctx.graph)
-    if command is not None and ctx.inbox is not None:
-        ctx.inbox.put_nowait(command)
+    if command is not None:
+        command = by_control(command)
+        if ctx.inbox is not None:
+            ctx.inbox.put_nowait(command)
     return command
+
+
+# The mark a control's command carries: applied as from inside the net (``by_control``).
+_BY_CONTROL = "_petritype_by_control"
+
+
+def by_control(command: Command) -> Command:
+    """A copy of ``command`` marked as given by one of the net's own controls (since
+    2026-11-23). ``_apply_command`` applies it as from inside the net, so the rule on closed
+    nets (``ClosedNets``) does not refuse it. ``apply_control`` and the protocol runner's
+    ``press`` mark what a control gives; a command the program makes itself is outside.
+    Anything that is not a command is returned as it is, for ``_apply_command`` to refuse."""
+    if not dataclasses.is_dataclass(command) or isinstance(command, type):
+        return command
+    copy = dataclasses.replace(command)
+    object.__setattr__(copy, _BY_CONTROL, True)
+    return copy
 
 
 # --- helpers -----------------------------------------------------------------------------
@@ -436,6 +469,8 @@ def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
     transition = _transition_named(graph, cmd.transition)
     if transition is None:
         return _reject(ctx, f"unknown transition {cmd.transition!r}")
+    if not _controls_allowed(ctx, cmd, f"firing {cmd.transition!r} by name"):
+        return False
     if transition.name in ctx.disabled or transition.name in graph.in_flight:
         return False
     place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(graph)
@@ -469,6 +504,40 @@ def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
     return True
 
 
+def _refuse(ctx: RunContext, refusal: ValueError) -> bool:
+    """A command the rule on closed nets refuses: raised as it is under ``strict``,
+    otherwise dropped and logged, as any command the net cannot take is."""
+    if ctx.strict:
+        raise refusal
+    _log.warning("dropping refused command: %s", refusal)
+    return False
+
+
+def _tokens_allowed(ctx: RunContext, cmd: Command, act: str) -> bool:
+    """True when ``cmd`` may write its place: it is inside (``by_control``) or the net
+    lets it (``ClosedNets.ensure_tokens``); otherwise refused through ``_refuse``."""
+    if getattr(cmd, _BY_CONTROL, False):
+        return True
+    try:
+        ClosedNets.ensure_tokens(ctx.graph, cmd.place, act)
+    except ClosedNetError as refusal:
+        return _refuse(ctx, refusal)
+    return True
+
+
+def _controls_allowed(ctx: RunContext, cmd: Command, act: str) -> bool:
+    """True when ``cmd`` may work a knob or fire by name: it is inside
+    (``by_control``), or no body holds a net under the rule
+    (``ClosedNets.ensure_controls``); otherwise refused through ``_refuse``."""
+    if getattr(cmd, _BY_CONTROL, False):
+        return True
+    try:
+        ClosedNets.ensure_controls(ctx.graph, act)
+    except HeldByBodyError as refusal:
+        return _refuse(ctx, refusal)
+    return True
+
+
 def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     """Apply one input command to the live graph. Returns True if applied.
 
@@ -478,7 +547,15 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     ``SetNetParam`` one with no transition; ``Enable``/``Disable`` record
     ``Toggled`` only when the switch changed; ``Fire`` records the firing's events
     when it fires (``_fire_now``) and nothing when it does not, which is not a
-    rejection (False, nothing logged)."""
+    rejection (False, nothing logged).
+
+    Closed nets (``ClosedNets``, since 2026-11-23): a command the program makes is
+    outside the net, so ``Extend`` and ``SetTokens`` at a place of a closed net that is
+    not one of its ports are refused with ``ClosedNetError``, and while a body of the
+    net around it holds the net, the knobs and ``Fire`` of a net under the rule with
+    ``HeldByBodyError``: raised under ``strict``, else dropped and logged, as any
+    command the net cannot take. A command a control of the net gives
+    (``by_control``) is inside, and the rule does not refuse it."""
     graph = ctx.graph
     TokenIds.resync(graph)
 
@@ -507,6 +584,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
                     NestedNets.ensure_nested_token(token, place)
                 except TypeError as error:
                     return _reject(ctx, str(error))
+        if not _tokens_allowed(ctx, cmd, f"{'an Extend' if isinstance(cmd, Extend) else 'a SetTokens'}"):
+            return False
         # Told by this net, under the place as it names it (a port by its pair);
         # a port's new ids are its subnet's.
         if isinstance(cmd, SetTokens):
@@ -524,6 +603,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
             return _reject(ctx, f"unknown transition {cmd.transition!r}")
         if not isinstance(cmd.kwargs, dict):
             return _reject(ctx, f"SetParam.kwargs must be a dict, got {type(cmd.kwargs).__name__}")
+        if not _controls_allowed(ctx, cmd, f"setting the keywords of {cmd.transition!r}"):
+            return False
         transition.kwargs = {**(transition.kwargs or {}), **cmd.kwargs}
         for param in cmd.kwargs:
             GraphEvents.record(graph, ParamChanged(cmd.transition, param))
@@ -532,6 +613,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     if isinstance(cmd, SetNetParam):
         if not isinstance(cmd.param, str) or cmd.param not in graph.params:
             return _reject(ctx, f"the net declares no parameter {cmd.param!r}")
+        if not _controls_allowed(ctx, cmd, f"setting parameter {cmd.param!r}"):
+            return False
         NetParams.set(graph, cmd.param, cmd.value)
         return True
 
@@ -539,6 +622,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
         if _transition_named(graph, cmd.transition) is None:
             return _reject(ctx, f"unknown transition {cmd.transition!r}")
         enabled = isinstance(cmd, Enable)
+        if not _controls_allowed(ctx, cmd, f"switching {cmd.transition!r} {'on' if enabled else 'off'}"):
+            return False
         was_enabled = cmd.transition not in ctx.disabled
         if enabled:
             ctx.disabled.discard(cmd.transition)
@@ -666,27 +751,36 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
     """Concurrent-mode launch: consume the inputs synchronously (no await, so peers
     can't grab the same tokens), then start the body as a background task. The task
     resolves to ``(outputs, duration_ms)``, timed around the body itself rather than
-    around the loop's wait for it."""
+    around the loop's wait for it. The nets the body is handed are held until it
+    returns, and what the rule on closed nets refused meanwhile fails the task
+    (``ClosedNets``, since 2026-11-23)."""
     firing_ids = FiringTokenIds()
-    args, _ = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
-        transition=transition,
-        transition_names_to_incoming_edges=incoming,
-        place_names_to_nodes=place_nodes,
-        transition_names_to_read_edges=read,
-        firing_ids=firing_ids,
-    )
-
-    async def timed_body():
-        started = time.perf_counter()
-        outputs = await ExecutableGraphOperations.stage_2_call_transition_function(
+    with ClosedNets.moving(ctx.graph):
+        args, _ = ExecutableGraphOperations.stage_1_extract_argument_tokens_from_places(
             transition=transition,
-            tokens_kwargs=args,
-            transition_names_to_outgoing_edges=outgoing,
+            transition_names_to_incoming_edges=incoming,
             place_names_to_nodes=place_nodes,
-            executor=ctx.thread_pool,
+            transition_names_to_read_edges=read,
+            firing_ids=firing_ids,
+            # The parameters a keyed edge's clause may name, as the fireability check read them.
             net_params=ctx.graph.params,
         )
-        return outputs, (time.perf_counter() - started) * 1000.0
+
+    async def timed_body():
+        try:
+            started = time.perf_counter()
+            outputs = await ExecutableGraphOperations.stage_2_call_transition_function(
+                transition=transition,
+                tokens_kwargs=args,
+                transition_names_to_outgoing_edges=outgoing,
+                place_names_to_nodes=place_nodes,
+                executor=ctx.thread_pool,
+                net_params=ctx.graph.params,
+            )
+            ClosedNets.settle(firing_ids)
+            return outputs, (time.perf_counter() - started) * 1000.0
+        finally:
+            ClosedNets.release(firing_ids)
 
     return asyncio.ensure_future(timed_body()), firing_ids, args
 
@@ -697,6 +791,19 @@ def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransit
     record its events, or raise ``TransitionFailedError`` (restoring the inputs, ids
     included, when ``graph.restore_tokens_on_failure`` is set)."""
     graph = ctx.graph
+    with ClosedNets.moving(graph):
+        _land(graph, task, transition, consumed, firing_ids, place_nodes, incoming)
+    name = transition.name
+    graph.step_count += 1
+    graph.fired_counts[name] = graph.fired_counts.get(name, 0) + 1
+    # Convenience only: names *one* completion of this batch. Observers
+    # that need every firing should diff fired_counts via fired_since.
+    graph.last_fired = name
+
+
+def _land(graph: ExecutableGraph, task: asyncio.Future, transition: FunctionTransitionNode, consumed: dict,
+          firing_ids: FiringTokenIds, place_nodes: dict, incoming: dict) -> None:
+    """The deposit, or the failure, of a finished concurrent firing (``_complete``)."""
     try:
         outputs, duration_ms = task.result()
     except Exception as exception:
@@ -718,19 +825,23 @@ def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransit
         firing_ids=firing_ids,
         duration_ms=duration_ms,
     )
-    name = transition.name
-    graph.step_count += 1
-    graph.fired_counts[name] = graph.fired_counts.get(name, 0) + 1
-    # Convenience only: names *one* completion of this batch. Observers
-    # that need every firing should diff fired_counts via fired_since.
-    graph.last_fired = name
+
+
+def _release_all(flight_state: dict) -> None:
+    """The holds of every firing still in flight, released as a concurrent loop
+    ends, so that no net is left held by a body that will never be awaited."""
+    for _transition, _args, firing_ids in flight_state.values():
+        ClosedNets.release(firing_ids)
 
 
 def _held(flight_state: dict) -> frozenset:
     """The ``(place, token id)`` pairs the outer bodies in flight hold through a
-    mutate edge: tokens still in their places, whose inner nets no inner firing may
-    touch while such a body runs."""
-    return frozenset(pair for _transition, _args, firing_ids in flight_state.values() for pair in firing_ids.mutated)
+    mutate edge or a read edge (since 2026-11-23): tokens still in their places,
+    whose inner nets no inner firing may touch while such a body runs."""
+    return frozenset(
+        pair for _transition, _args, firing_ids in flight_state.values()
+        for pair in (*firing_ids.mutated, *firing_ids.read)
+    )
 
 
 async def _fire_inner(ctx: RunContext, part: str, held: frozenset = frozenset()) -> bool:
@@ -1019,6 +1130,7 @@ class Runner:
             # loss on top of whatever interrupted the run.
             for task in in_flight:
                 task.cancel()
+            _release_all(flight_state)
             graph.in_flight = set()
 
     async def _tick_sequential(ctx: RunContext, tick: float) -> None:
@@ -1095,4 +1207,5 @@ class Runner:
         finally:
             for task in in_flight:
                 task.cancel()
+            _release_all(flight_state)
             graph.in_flight = set()

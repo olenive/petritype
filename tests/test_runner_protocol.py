@@ -59,7 +59,7 @@ def test_the_error_codes_are_the_closed_set():
     assert {str(code) for code in ErrorCode} == {
         "unknown_method", "invalid_params", "not_loaded", "unknown_net", "load_failed",
         "unknown_place", "unknown_transition", "unknown_token", "unknown_control", "not_serializable",
-        "invalid_token", "unsupported", "internal",
+        "invalid_token", "closed_net", "unsupported", "internal",
     }
 
 

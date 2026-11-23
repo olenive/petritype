@@ -47,6 +47,9 @@ class ErrorCode(StrEnum):
     UNKNOWN_CONTROL = "unknown_control"
     NOT_SERIALIZABLE = "not_serializable"
     INVALID_TOKEN = "invalid_token"
+    # An ``inject`` from outside a closed net at a place that is not one of its ports
+    # (since 2026-11-23, §3, §6.4, §12.7).
+    CLOSED_NET = "closed_net"
     UNSUPPORTED = "unsupported"
     INTERNAL = "internal"
 
@@ -84,6 +87,18 @@ class Wire(BaseModel):
     def wire(self) -> dict:
         """The model as a JSON-ready dict."""
         return self.model_dump(mode="json")
+
+
+class Tolerant(Wire):
+    """Base of the models a topology is read into (§5.1): ``Topology``, ``Place``,
+    ``SubnetPlace``, ``PlaceStyle``, ``Transition``, ``Edge`` and ``Control``. Since
+    2026-11-23 a field this version does not know is kept as it came when a topology
+    is read, written back with the rest by ``wire``, and the rest of the topology is
+    read; until then such a field refused the whole topology. The runner itself
+    writes only the fields these models declare. Every other model still refuses a
+    field it does not know."""
+
+    model_config = ConfigDict(extra="allow")
 
 
 # --- framing --------------------------------------------------------------------------------
@@ -197,7 +212,7 @@ class Describe(Wire):
 # --- state (§5) -----------------------------------------------------------------------------
 
 
-class PlaceStyle(Wire):
+class PlaceStyle(Tolerant):
     """How a viewer draws a place (§5.1): ``fill: "token"`` fills it with the colour
     of its one token while it holds exactly one that has a colour."""
 
@@ -207,11 +222,12 @@ class PlaceStyle(Wire):
 SteppingName = Literal["inner_first", "take_turns", "outer_first", "passive"]
 
 
-class Place(Wire):
+class Place(Tolerant):
     """``stepping`` is present exactly on a place that holds nets, its stepping
-    rule (§5.1, §12.3); ``port`` on a port place in its subnet's own topology
-    (§12.7); ``group`` on a place in a group, in its own net's topology, never
-    on a port listed in its subnet place's ``ports`` (§5.1)."""
+    rule (§5.1, §12.3); ``port`` on a port place in its own net's topology,
+    whichever net that is (§12.7, since 2026-11-23); ``group`` on a place in a
+    group, in its own net's topology, never on a port listed in its subnet
+    place's ``ports`` (§5.1)."""
 
     name: str
     type_name: str
@@ -224,7 +240,7 @@ class Place(Wire):
     group: Optional[str] = None
 
 
-class SubnetPlace(Wire):
+class SubnetPlace(Tolerant):
     """A subnet place in the topology of the net around it (§5.1, §12.7):
     ``type_name`` the template that built its subnet (``""`` for none), ``ports``
     its port places in the subnet's declaration order, each as a ``Place`` of the
@@ -239,7 +255,7 @@ class SubnetPlace(Wire):
     group: Optional[str] = None
 
 
-class Transition(Wire):
+class Transition(Tolerant):
     """``group`` on a transition in a group (§5.1)."""
 
     name: str
@@ -247,22 +263,39 @@ class Transition(Wire):
     group: Optional[str] = None
 
 
-class Edge(Wire):
+# The input edge kinds of §5.1 this runner writes; the read kinds since 2026-11-23.
+EDGE_KINDS = (
+    "take", "take_all", "snapshot", "mutate", "take_where", "mutate_where", "drain", "survey",
+    "read", "read_where", "read_all",
+)
+
+
+class Edge(Tolerant):
     """``port`` names one of the ports of ``place`` when ``place`` is a subnet
-    place (§12.7)."""
+    place (§12.7).
+
+    ``kind`` is one of ``EDGE_KINDS`` when this runner writes it, and any string
+    when a topology is read (since 2026-11-23): a kind this version does not know
+    is kept as it came, for the reader to draw as a plain edge (§5.1), and the
+    rest of the topology is read. ``filter`` is kept as the JSON it came as, so a
+    clause of a shape this version does not know is kept as such too (§13.2).
+
+    ``reaches`` (since 2026-11-23), on an input edge on a place whose tokens carry
+    nets, names the ports its body reaches in those nets, in the order declared,
+    and is left out when it names none. A field this version does not know is kept
+    as it came (``Tolerant``)."""
 
     place: str
     port: Optional[str] = None
     transition: str
     direction: Literal["in", "out"]
-    kind: Optional[Literal[
-        "take", "take_all", "snapshot", "mutate", "take_where", "mutate_where", "drain", "survey",
-    ]] = None
+    kind: Optional[str] = None
     slot: Optional[int] = None
     filter: Optional[dict[str, Any]] = None
+    reaches: Optional[list[str]] = None
 
 
-class Control(Wire):
+class Control(Tolerant):
     """A control the net declares (§5.1), which ``press`` runs (§6): a ``ControlSpec``
     without its ``to_command``. ``node``, ``action`` and ``config`` are left out when
     absent or empty; ``config.value`` is the initial value of a kind that has one."""
@@ -275,14 +308,18 @@ class Control(Wire):
     config: Optional[dict[str, Any]] = None
 
 
-class Topology(Wire):
+class Topology(Tolerant):
     """``groups``: the net's groups in declared order, absent when it has none,
-    each net's own (§5.1)."""
+    each net's own (§5.1). ``open``: ``true`` on a net whose definition declares it
+    open, absent otherwise, so a net that shows a ``port`` and no ``open`` is closed
+    (§5.1, §12.7, since 2026-11-23). Read tolerantly, with its places, transitions,
+    edges and controls (``Tolerant``, since 2026-11-23)."""
 
     places: list[Union[Place, SubnetPlace]]
     transitions: list[Transition]
     edges: list[Edge]
     groups: Optional[list[str]] = None
+    open: Optional[bool] = None
     hints: Optional[dict[str, Any]] = None
     controls: Optional[list[Control]] = None
 

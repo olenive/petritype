@@ -305,6 +305,11 @@ protocol version 2 with paths as lists, subnet places and groups) goes out as
 `heartbeat`, and carries the protocol text as corrected after a host's
 review and four more shared transcripts.
 
+*2026-11-23:* the work of 23 November (a keyed edge that chooses its token
+by another input, read edges, ports shown on every net, an edge's `reaches`,
+and closed nets) goes out as 0.5.0, a minor version, since a net that marks
+a port is now closed to everyone outside it (`CHANGELOG.md`).
+
 ## As built, 2026-10-09: nested nets (PROTOCOL.md §12)
 
 The owner serves a tree of nets, not one: the outer net the host loaded and,
@@ -809,8 +814,9 @@ Settlements:
   and its stepping rule; an edge on a port carries `port`. With `subnet`, which the
   owner passes for a subnet's record, a port place carries `port: true`. A net
   loaded on its own or carried by a token shows no `port`, since nothing reaches
-  its ports (written into PROTOCOL.md §5.1). A place style on a subnet place is
-  `load_failed`.
+  its ports (written into PROTOCOL.md §5.1). That rule went on 2026-11-23, with
+  `subnet`: every net now shows its ports (at the end of this file). A place
+  style on a subnet place is `load_failed`.
 - **State and requests.** A snapshot's views are keyed by the same keys, a subnet
   place's ports at its position, and it keeps each subnet place's entry
   (`_subnet_entry`), whose `count` agrees with the ports as the snapshot shows
@@ -893,3 +899,168 @@ whole share is the topology; nothing else on the wire changes.
 `tests/test_runner_groups.py` covers the fields for the loaded net, a subnet by
 path and by nested id, a token's net, a net with no groups, and the firings and
 log that name none; `tests/test_runner_process.py` serves `groups` as a process.
+
+## As built, 2026-11-23: keyed edges that choose by another input (PROTOCOL.md §13.5)
+
+The first step of the edges spec agreed on 2026-11-23. A keyed edge's
+filter may hold an input clause, `Clause(key, input=place, input_key=key)`, which
+makes it a bound edge choosing its token by the token its transition gets from
+its source. The engine finds the pair (`KeyedEdges.pairing`); the runner's share
+is the topology, the refusal, and its prediction of a launch.
+
+- **Topology.** `Filters.to_wire` writes an input clause as declared,
+  `{key, input: {place, port?, key}}`, its place named as an edge names one.
+- **Refused in a client's filter.** `Filters.from_wire` answers a clause with
+  `input` with `invalid_params` and a message saying it belongs only in a keyed
+  edge's filter, for `query` and `set_filter` alike, before any other check of
+  the clause.
+- **The launch.** `_handed_over` asks `KeyedEdges.pairing` for the tokens a
+  source and its bound edges will act on, as stage 1 does, so `launched.consumed`
+  names them and the snapshot the body runs against has them gone from where
+  they stood (`keyed_taken`, as for any keyed take); a mutate source and a bound
+  `mutate_where` edge are among the `mutated` indices.
+- **No index.** Each fireability check makes one pass over each bound place,
+  keeping the first index for each value of the clauses' keys, then one lookup
+  per source token tried, never a scan per source token.
+- **The transcripts.** `tests/protocol/16_keyed_by_input.json` was recorded over
+  the new conformance net `couriers` (`tests/protocol_nets/couriers.py`, fixed in
+  PROTOCOL.md §11) and is replayed through the owner and over pipes; every other
+  transcript re-records to the same bytes. The recorder names a token whose
+  object has no `name`, `kind` or `id` by its first text field, so the orders
+  are named after their items.
+
+`tests/test_input_clauses.py` covers the engine, the wire, the refusal, the
+prediction of `launched` and the drawing.
+
+## As built, 2026-11-23: read edges (PROTOCOL.md §5.1)
+
+The second step of the edges spec. The library gained three input edges that
+hand the body tokens to look at, live, without taking or copying them:
+`ReadEdge`, `ReadWhereEdge` and `ReadAllEdge`, a class family of their own
+beside the snapshot and mutate edges, so that each path that copies a token
+or records a mutation keeps to the kinds it had, kept in the graph's own
+field, `read_edges`. The
+engine's map of a transition's non-consuming edges (`to_read_edges`, a name
+kept from before) holds them after the snapshot and mutate edges, so
+fireability, stage 1 and `KeyedEdges.pairing` see them where they see the
+others: a read or read-where edge may be a source, and a read-where edge may
+be bound. Stage 1 hands over the live token, or for a read-all a new list of
+the live tokens, and notes their ids in `FiringTokenIds.read`, which no event
+reads; the concurrent runtime holds the nets of those tokens still while the
+body runs, as it does for mutated ones. The build refuses a place a read edge
+reads that another input edge of the transition names.
+
+- **Topology.** `Topologies.of` lists them as `kind: "read"`, `"read_where"`
+  (with its `filter`, as declared) and `"read_all"`.
+- **The launch.** `_handed_over` leaves them out: they take nothing and the
+  body leaves what they hand over as it is, so `launched.consumed` names none
+  of their tokens, and a read during the body is served from the snapshot as
+  for any token the body does not hold. A bound
+  `read_where` edge's source is predicted through the pairing, as in step 1.
+  A firing with a read edge is reported in two pieces, like every firing of
+  this runner, with no `mutated` for what it read.
+- **Tolerant reading.** `protocol.Edge.kind` reads any string, so a topology
+  read through the wire types keeps an edge kind it does not know, and its
+  `filter`, plain JSON, keeps a clause it does not know. The kinds the runner
+  writes are `EDGE_KINDS`. The other wire models still refuse a field they do
+  not know (`extra="forbid"`, a guard for the writer).
+- **The transcripts.** `tests/protocol/17_read_edges.json` was recorded over
+  the new conformance net `roll-call` (`tests/protocol_nets/roll_call.py`,
+  fixed in PROTOCOL.md §11), whose squads are nets built from the registered
+  template `Squad`, and is replayed through the owner and over pipes; every
+  other transcript re-records to the same bytes.
+
+`tests/test_read_edges.py` covers the engine, the refusals, the concurrent
+runtime, the wire, the tolerant reading and the drawing.
+
+## As built, 2026-11-23: ports on every net, and the reach an edge declares (PROTOCOL.md §5.1, §12.7)
+
+The third step of the edges spec, its first two parts. A net that a token
+carries could already mark places as ports; only the wire withheld them.
+
+- **Ports shown.** `Topologies.of` lost its `subnet` argument, and
+  `Owner._new_net` with it: every net's topology writes `port: true` on the
+  places its definition marks as ports, the loaded net, a net a token carries
+  and a subnet alike. A place of net-carrying tokens declares nothing of the
+  ports its tokens' nets offer, since those nets arrive in tokens as the net
+  runs and may differ: each shows its own when read by path or nested id. No
+  shared transcript changed, since no conformance net marked a port outside a
+  subnet.
+- **The reach.** Every input edge class takes `reaches`, a tuple of port names,
+  by keyword alone (`PositionalArgsBaseModel._keyword_only`, so a keyed edge's
+  filter stays its fourth positional argument). The build refuses it on a place
+  that holds no nets, a port of a subnet place counting by its own `nested`,
+  and refuses an empty name (`ExecutableGraphCheck.ensure_reaches_are_sound`).
+  Nothing else reads it: firing, stepping, ids and events are those of the same
+  net without it, and no one checks that a token's net has the ports named.
+  Which places a body may write is the rule on closed nets, below.
+- **Topology.** An input edge writes `reaches` after its `filter`, in the order
+  declared, and leaves it out when empty; output edges have none.
+- **Tolerant reading.** The models a topology is read into (`Topology`,
+  `Place`, `SubnetPlace`, `PlaceStyle`, `Transition`, `Edge`, `Control`) are
+  `protocol.Tolerant`, `extra="allow"`: a field they do not know is kept as it
+  came, written back by `wire()`, and the rest is read, so a `State` holding such
+  a topology reads whole too. Every other wire model still refuses a field it
+  does not know, the guard for the writer that step 2 kept; the topology's
+  models trade that guard for reading what a newer runtime writes, and the
+  recorded fixtures guard what this runner writes there.
+- **The drawing.** `RustworkxArgumentEdgeData` and `RustworkxReadEdgeData` carry
+  `reaches`, and `NodeLabel.edge_label` writes `reaches Orders In, Shots Out` as
+  the label's last line, after a filter or a read-all's `*`.
+- **The transcripts.** `tests/protocol/18_ports_on_a_token.json` was recorded
+  over the new conformance net `trays` (`tests/protocol_nets/trays.py`, fixed in
+  PROTOCOL.md §11), whose units are nets built from the registered template
+  `Unit`, and is replayed through the owner and over pipes; every other
+  transcript re-records to the same bytes.
+
+`tests/test_ports_and_reach.py` covers the ports shown and drawn, the reach on
+every input edge kind, its refusals, a firing that is the same with it as
+without it, the wire, the tolerant reading and the label.
+
+## As built, 2026-11-23: closed nets in the runner (PROTOCOL.md §3, §5.1, §6.4, §12.7)
+
+The third step of the edges spec, its last part, stage one: a net that marks a
+port is closed to everyone outside it unless its definition declares it open.
+The rule lives in the library (`ClosedNets` in
+`petritype.core.executable_graph_components`, the runtime's `_apply_command`);
+the runner adds what the wire needs.
+
+- **`inject` answers `closed_net`.** The runner's requests are outside every
+  net. `_inject` applies its `Extend` through the net's strict context as
+  before, and the runtime raises `ClosedNetError` for a place of a closed net
+  that is not one of its ports, or a port pair of one of its subnet places;
+  `_inject` answers that with the new `ErrorCode.CLOSED_NET`, before the
+  `ValueError` it answers as `invalid_token`, and nothing is added or told.
+  The token is decoded first, so a token that does not decode is
+  `invalid_token` whatever the place.
+- **`press` is inside.** A control is the net's own, so `_press` applies what
+  it gives marked by `petritype.runtime.by_control`, which `_apply_command`
+  lets through the rule; `apply_control` marks it the same way for a program.
+  A `fire` control is launched by the owner as before.
+- **`open` in a topology.** `Topologies.of` writes `open: true` on a net whose
+  definition declares it open, after `groups`, and nothing for any other net;
+  `protocol.Topology` gains `open`. A reader knows a net is closed when it
+  shows a `port` and no `open`.
+- **A body's refusal is a failed firing.** A body that writes to a private
+  place of a closed net it holds raises in its thread; the engine fails the
+  firing with the error as the `TransitionFailedError`'s cause, after
+  releasing the body's holds, and the owner reports `launched` then `failed`
+  as for any failure, the error masked in a shared transcript. Knobs and
+  firing by name stay with the runner: `enable`, `disable`, `set_param` and
+  `step` act on the loaded net, which no body of this runner holds.
+- **The transcripts.** `tests/protocol/19_closed_nets.json` was recorded over
+  the new conformance net `post-office` (`tests/protocol_nets/post_office.py`,
+  fixed in PROTOCOL.md §11), whose posts are nets built from the registered
+  templates `Post` and `Open Post`, and is replayed through the owner and over
+  pipes; the eighteen older transcripts re-record to the same bytes. Its
+  `Forge` takes the post it writes into and the net restores nothing on
+  failure, since the Rust core cannot restore a token that carries a net, so
+  the failure loses both tokens.
+
+`tests/test_runner_closed_nets.py` covers `inject` at the top level, by a port
+pair and by path, a `press` into a private place, and `open` on the wire;
+`tests/test_closed_nets.py` covers the rule in the library. One runner test
+changed: `test_a_subnet_places_entry_holds_its_subnet_and_its_ports_under_the_token_limit`
+in `tests/test_runner_subnets.py` injected a hero into `Arena`, a level's own
+place, by path, which a level, marking its ports, now refuses; the hero now
+starts in the arena of a level the test builds with it in its definition.

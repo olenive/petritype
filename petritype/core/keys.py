@@ -13,7 +13,11 @@ A ``Filter`` is also what a *keyed edge* carries (R5): ``TakeWhereEdge(place,
 transition, argument, where=Filter.where(class_="Bird"))`` consumes the oldest
 matching token rather than the front one, and ``MutateWhereEdge`` hands the
 oldest matching token to the body live; every other token stays where it is,
-with its id. Both are re-exported here from the engine module.
+with its id. Since 2026-11-23 ``ReadWhereEdge`` hands it over live to look at,
+told by no event. All three are re-exported here from the engine module. Since
+the same day a keyed edge's filter may also hold a clause that reads a key of
+the token the same firing gets from another input, ``Clause("name",
+input="Orders", input_key="courier")``: the courier the order names.
 
 A ``Filter`` is what a query, a viewer and a projection (PROTOCOL.md §13) share:
 clauses ANDed together, each accepting one of a set of values for a key (OR
@@ -36,11 +40,11 @@ from typing import Any, Callable, Mapping, Optional, Sequence, Union
 
 from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
-    ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, TakeWhereEdge, TokenIds,
+    ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, ReadWhereEdge, TakeWhereEdge, TokenIds,
 )
 
 __all__ = [
-    "KeyValue", "Keys", "Clause", "Filter", "Match", "Query", "TakeWhereEdge", "MutateWhereEdge",
+    "KeyValue", "Keys", "Clause", "Filter", "Match", "Query", "TakeWhereEdge", "MutateWhereEdge", "ReadWhereEdge",
     "is_key_value", "same_value",
 ]
 
@@ -88,20 +92,49 @@ class Keys:
 @dataclass(frozen=True)
 class Clause:
     """One condition on one key: the token's value for ``key`` is one of
-    ``values``, or, with ``param`` instead, equals the net parameter so named as
-    it stands when the filter is applied. Exactly one of the two is given."""
+    ``values``; or, with ``param`` instead, equals the net parameter so named as
+    it stands when the filter is applied; or, with ``input`` and ``input_key``
+    instead (since 2026-11-23), equals the key ``input_key`` of the token this
+    firing gets from the place ``input``, named as an edge names a place (a
+    place's name, or a ``Port`` pair). Exactly one of ``values``, ``param`` and
+    ``input`` is given, and ``input_key`` goes with ``input``.
+
+    A clause with ``input`` belongs in the filter of a keyed edge
+    (``TakeWhereEdge``, ``MutateWhereEdge``, ``ReadWhereEdge``), which is then a *bound edge*: it
+    chooses its token by the token its transition gets from the input, the
+    edge's *source*. ``MutateWhereEdge("Couriers", "Load", "courier",
+    where=Filter((Clause("name", input="Orders", input_key="courier"),)))``
+    hands the body the courier the order names. Outside a firing there is no
+    such token, so the clause accepts nothing: ``accepts``, ``Filter.keeps``,
+    ``Query.matches`` and ``Query.first`` keep no token through it. Which pair a
+    firing takes, and what the net may declare, is ``KeyedEdges`` in the engine."""
 
     key: str
     values: tuple[KeyValue, ...] = ()
     param: Optional[str] = None
+    input: Optional[PlaceKey] = None
+    input_key: Optional[str] = None
 
     def __post_init__(self):
-        if (self.param is None) == (not self.values):
-            raise ValueError("a clause has either values or a param")
+        given = sum((bool(self.values), self.param is not None, self.input is not None))
+        if given != 1:
+            raise ValueError("a clause has exactly one of values, a param and an input")
+        if (self.input is None) != (self.input_key is None):
+            raise ValueError("a clause's input_key goes with its input, and its input with an input_key")
         if not all(is_key_value(value) for value in self.values):
             raise TypeError("a clause's values are strings, integers or booleans")
+        if self.input is not None:
+            if not isinstance(self.input, (str, Port)):
+                raise TypeError("a clause's input is a place's name or a Port pair")
+            if not isinstance(self.input_key, str):
+                raise TypeError("a clause's input_key is a key's name")
 
     def accepts(self, keys: Mapping[str, KeyValue], params: Mapping[str, Any]) -> bool:
+        """Whether a token with these keys passes, with ``params`` the net's
+        parameters. A clause with ``input`` accepts nothing here: only a firing
+        has the token it reads."""
+        if self.input is not None:
+            return False
         if self.key not in keys:
             return False
         value = keys[self.key]

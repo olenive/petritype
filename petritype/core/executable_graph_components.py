@@ -3,7 +3,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
-from typing import Awaitable, Callable, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
+from typing import Awaitable, Callable, ClassVar, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
 from pydantic import BaseModel, PrivateAttr, model_serializer, model_validator
 import asyncio
 import functools
@@ -41,6 +41,68 @@ _net_ids = itertools.count(1)
 # fire (``"outer_first"``), or only when a body or the program steps them (``"passive"``).
 # The names are the protocol's (PROTOCOL.md §12.3).
 Stepping = Literal["inner_first", "take_turns", "outer_first", "passive"]
+
+# Closed nets (since 2026-11-23, ``ClosedNets``): the rule is in force on a net that marks
+# a place as a port, and such a net is closed unless it declares itself open. Stage two of
+# the rule turns this default to True, so that every net is under the rule and every net
+# that does not declare itself open is closed. Read by ``ClosedNets.under_the_rule`` alone.
+CLOSED_WITHOUT_PORTS = False
+
+# What every refusal of a write at a private place says, so that it says how to put it right.
+_PUT_IT_RIGHT = "mark the place as a port, start the net with the token in its definition, or declare the net open"
+
+
+class ClosedNetError(ValueError):
+    """A write from outside a closed net at a place that is not one of its ports
+    (``ClosedNets``, since 2026-11-23): putting, taking or replacing tokens there
+    through the library's own functions (``NestedNets.put``, ``NestedNets.take``),
+    the runtime's ``Extend`` and ``SetTokens``, or the runner's ``inject``; a write
+    at the port of one of its subnet places, which is never one of its own ports;
+    or, found when a body returns, a body's own edit of such a place's list.
+
+    Attributes:
+        net: The net, by the template that built it, or ``#`` and its ``net_id``
+            when no template did.
+        place: The place, as the write named it (a ``Port`` pair for a port of a
+            subnet place).
+        act: What was refused, in a few words (``"a put"``, ``"an inject"``).
+    """
+
+    def __init__(self, net: str, place: Any, act: str):
+        self.net = net
+        self.place = place
+        self.act = act
+        super().__init__(
+            f"{act} at {_place_words(place)} of net {net!r} is refused: the net is closed, so from outside it "
+            f"only its ports may be written. To make it land, {_PUT_IT_RIGHT}."
+        )
+
+
+class HeldByBodyError(ValueError):
+    """A body of the net around a net asked to work one of its knobs, or to fire
+    one of its transitions by name, while it held the net (``ClosedNets``, since
+    2026-11-23): setting a parameter (``NetParams.set``, ``NestedNets.set_param``),
+    the runtime's ``SetNetParam``, ``SetParam``, ``Enable``, ``Disable`` and
+    ``Fire``, a selector of its own for a firing, or, found when the body returns,
+    a change it made to them directly. Refused only on a net that is under the rule
+    (a net that marks a port, open or closed); a net that marks none keeps its
+    knobs for a body, as before. The program, its drivers and the runner keep them
+    on every net.
+
+    Attributes:
+        net: The net, as for ``ClosedNetError``.
+        act: What was refused, in a few words (``"setting parameter 'speed'"``).
+    """
+
+    def __init__(self, net: str, act: str):
+        self.net = net
+        self.act = act
+        super().__init__(
+            f"{act} on net {net!r} is refused: a body of the net around it holds the net, and its parameters, "
+            f"switches, tie-break, stepping rules, selector and firing by name stay with the program and the "
+            f"runner. Make the change from the program or the runner, or give the net a transition of its own "
+            f"that makes it."
+        )
 
 
 class TransitionFailedError(RuntimeError):
@@ -126,10 +188,15 @@ class SubnetHeldError(RuntimeError):
 
 
 class PositionalArgsBaseModel(BaseModel):
-    """Base class that enables positional arguments for Pydantic models."""
-    
+    """Base class that enables positional arguments for Pydantic models. A field
+    named in ``_keyword_only`` is given by keyword alone: positional arguments
+    fill the other fields in order, so adding such a field to a class moves no
+    positional argument of its subclasses."""
+
+    _keyword_only: ClassVar[frozenset[str]] = frozenset()
+
     def __init__(self, *args, **kwargs):
-        field_names = list(self.__class__.model_fields.keys())
+        field_names = [name for name in self.__class__.model_fields if name not in self._keyword_only]
         # Map positional arguments to field names
         for i, arg in enumerate(args):
             if i < len(field_names):
@@ -335,10 +402,22 @@ class ArgumentEdgeToTransition(PositionalArgsBaseModel):
     """A consuming edge (place -> transition). Every edge names its place by a
     ``PlaceKey``: a place of the net by its name, or a port of one of the net's
     subnet places by the pair, ``Port("Level 3", "Lobby")``, which every edge
-    kind accepts where it would take a name."""
+    kind accepts where it would take a name.
+
+    ``reaches`` (since 2026-11-23, given by keyword alone, on every input edge
+    kind) names the ports the body reaches in the nets the place's tokens carry,
+    in the order given: ``MutateEdge("Field", "Hand Over", "unit",
+    reaches=("Orders In",))``. It is a declaration for readers and drawings, as a
+    group is, and changes nothing about firing. The build refuses it on a place
+    that holds no nets and refuses an empty name
+    (``ExecutableGraphCheck.ensure_reaches_are_sound``); whether a token's net
+    has the ports named is not checked, since nets arrive in tokens as the net
+    runs. An output edge has no ``reaches``."""
+    _keyword_only: ClassVar[frozenset[str]] = frozenset({"reaches"})
     place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
+    reaches: tuple[str, ...] = ()
 
 
 class ReturnedEdgeFromTransition(PositionalArgsBaseModel):
@@ -378,12 +457,18 @@ class DrainEdge(ArgumentEdgeToTransition):
 
 
 class SnapshotEdge(PositionalArgsBaseModel):
-    """A non-consuming read edge (place -> transition). The transition receives a **deep-copy
+    """A non-consuming edge (place -> transition). The transition receives a **deep-copy
     snapshot** of the place's tokens, so reading cannot disturb the place. Fireability requires
-    the place to be non-empty (presence), but firing does not consume the tokens."""
+    the place to be non-empty (presence), but firing does not consume the tokens.
+
+    A snapshot of a token that carries a net copies the net, and the copy is a new net with
+    a new ``net_id``. To look at such a token without copying it, use a ``ReadEdge``.
+    ``reaches``, by keyword alone, is as for ``ArgumentEdgeToTransition``."""
+    _keyword_only: ClassVar[frozenset[str]] = frozenset({"reaches"})
     place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
+    reaches: tuple[str, ...] = ()
 
 
 class SurveyEdge(SnapshotEdge):
@@ -396,12 +481,16 @@ class SurveyEdge(SnapshotEdge):
 
 
 class MutateEdge(PositionalArgsBaseModel):
-    """A non-consuming read/write edge (place -> transition). The transition receives the
+    """A non-consuming edge that reads and writes (place -> transition). The transition receives the
     **live** tokens and may modify them in place; they stay in the place (not consumed) but may
-    be changed. Fireability requires the place to be non-empty (presence)."""
+    be changed. Fireability requires the place to be non-empty (presence). ``reaches``, by
+    keyword alone, is as for ``ArgumentEdgeToTransition``: on a place of net-carrying tokens,
+    the ports the body reaches in the token's net."""
+    _keyword_only: ClassVar[frozenset[str]] = frozenset({"reaches"})
     place_node_name: PlaceKey
     transition_node_name: FunctionName
     argument: ArgumentName
+    reaches: tuple[str, ...] = ()
 
 
 class MutateWhereEdge(MutateEdge):
@@ -417,6 +506,53 @@ class MutateWhereEdge(MutateEdge):
         return self
 
 
+class ReadEdge(PositionalArgsBaseModel):
+    """A **read edge** (place -> transition, since 2026-11-23): the body is handed the front
+    token of the place, live, to look at. Nothing is taken and nothing is copied, so the token
+    keeps its place and its id, and no event is recorded for it. The transition is fireable
+    only while the place holds a token. The argument receives one token: it is annotated as
+    the place's type (or not at all), and ``ReadAllEdge`` is the edge for every token.
+
+    The body must leave the token unchanged. That is the author's promise, which Python cannot
+    enforce: a body that changes what it reads changes the token in its place, with no
+    ``Mutated`` told. A token that carries a net is handed over as it is, so its net keeps its
+    ``net_id``, where a ``SnapshotEdge`` would copy the net under a new one.
+
+    The read edges (``ReadEdge``, ``ReadWhereEdge``, ``ReadAllEdge``) are three of the
+    **non-consuming edges**, the edges that leave their token in its place, beside
+    ``SnapshotEdge``, ``SurveyEdge``, ``MutateEdge`` and ``MutateWhereEdge``. A net keeps
+    them in ``ExecutableGraph.read_edges``. A place a read edge reads is read by no other
+    input edge of the same transition (``ExecutableGraphCheck.ensure_read_edges_stand_alone``).
+    ``reaches``, by keyword alone, is as for ``ArgumentEdgeToTransition``.
+    """
+    _keyword_only: ClassVar[frozenset[str]] = frozenset({"reaches"})
+    place_node_name: PlaceKey
+    transition_node_name: FunctionName
+    argument: ArgumentName
+    reaches: tuple[str, ...] = ()
+
+
+class ReadWhereEdge(ReadEdge):
+    """A read edge that hands the body the oldest token *matching a filter*, live, rather
+    than the front token (keyed edges, ``petritype.core.keys``); fireable while the place
+    holds a matching token. Its filter may choose by another input of the same firing
+    (a bound edge, ``KeyedEdges``). The argument receives the one token."""
+    where: Any
+
+    @model_validator(mode="after")
+    def _where_is_a_filter(self) -> "ReadWhereEdge":
+        if not callable(getattr(self.where, "keeps", None)):
+            raise TypeError("where must be a Filter (petritype.core.keys)")
+        return self
+
+
+class ReadAllEdge(ReadEdge):
+    """A read edge that hands the body every token of the place, live, oldest first, as a
+    new list, possibly empty, and never holds the transition back. The list is the body's
+    own; the tokens in it are the place's. The argument must be annotated ``list[T]`` for the
+    place's ``T``, checked when the graph is built, as a survey's is."""
+
+
 class ExecutableGraph(BaseModel):
     """A Petri net graph that can be executed.
 
@@ -425,6 +561,10 @@ class ExecutableGraph(BaseModel):
         transitions: Collection of transition nodes that transform tokens
         argument_edges: Edges from places to transitions (input)
         return_edges: Edges from transitions to places (output)
+        snapshot_edges, mutate_edges, read_edges: The non-consuming edges, which leave
+            their tokens in their places: snapshots and surveys, mutate and mutate-where
+            edges, and the read edges (``ReadEdge``, ``ReadWhereEdge``, ``ReadAllEdge``,
+            since 2026-11-23)
         step_count: Monotonic count of transitions that have fired since this
             graph was created. Increments by one every time ``execute_graph``
             successfully fires a transition. Use this as a stable sequence
@@ -514,6 +654,29 @@ class ExecutableGraph(BaseModel):
             JSON form, and the switch an inner net has (an inner net runs without a
             ``RunContext``). The runtime's ``Enable``/``Disable`` commands are the
             runner's switch on the net it drives, kept on ``RunContext.disabled``.
+        open: Whether the net declares itself open (since 2026-11-23), given in its
+            definition (``construct_graph(open=True)``). A net that marks a place as a
+            port is **closed** unless it declares itself open (``is_closed``): from
+            outside it, tokens are put, taken and replaced only at its ports
+            (``ClosedNets``). An open net lets anyone outside write to any of its
+            places; it opens the places only, not the knobs, and not the nets inside
+            it, each of which has its own rule. Part of the definition: a copy, a
+            fork and a net restored from its template keep it, and a saved form does
+            not mention it.
+
+    Closed nets (since 2026-11-23, ``ClosedNets``): outside a net are a body, guard
+    or key function of a transition of the net around it, the program and its
+    drivers, and the runner's requests; inside it are its own transitions, the
+    handlers of its own controls, the tokens its definition starts it with, and the
+    engine's own moves. A closed net refuses a write from outside at a place that is
+    not one of its ports with ``ClosedNetError``; a body of the net around a net
+    that is under the rule cannot set its knobs or fire it by name
+    (``HeldByBodyError``). Reading, stepping and the whole-state acts (importing a
+    marking, restoring, forking, saving) stay allowed. Python enforces this through
+    the library's own functions, the runtime's commands and the runner, and checks
+    after a body returns that it did not edit the private places of a closed net it
+    held; a program that edits a place's list, ``params`` or ``disabled`` directly
+    is not caught.
 
     JSON form: a graph dumps (in JSON mode) as, and validates from, its saved form
     ``{template, marking, params, enabled}`` (``petritype.core.serialisation``),
@@ -542,11 +705,14 @@ class ExecutableGraph(BaseModel):
     transitions: Sequence[FunctionTransitionNode]
     argument_edges: Sequence[ArgumentEdgeToTransition]
     return_edges: Sequence[ReturnedEdgeFromTransition]
-    # Non-consuming read edges (place -> transition): SnapshotEdge passes a deep copy (place
-    # untouched), and SurveyEdge, a SnapshotEdge, a deep copy of every token, possibly none;
-    # MutateEdge passes the live tokens (transition may modify them in place).
+    # Non-consuming edges (place -> transition), which leave their tokens in their places:
+    # SnapshotEdge passes a deep copy (place untouched), and SurveyEdge, a SnapshotEdge, a deep
+    # copy of every token, possibly none; MutateEdge passes the live tokens (transition may
+    # modify them in place); ReadEdge, ReadWhereEdge and ReadAllEdge pass the live tokens to
+    # look at, nothing copied and nothing told (since 2026-11-23).
     snapshot_edges: Sequence[SnapshotEdge] = []
     mutate_edges: Sequence[MutateEdge] = []
+    read_edges: Sequence[ReadEdge] = []
     step_count: int = 0
     # Name of the most recent transition fired by the last firing attempt (an
     # ``execute_graph`` call, or one sequential-Runner attempt), or None if it
@@ -609,8 +775,13 @@ class ExecutableGraph(BaseModel):
     net_id: int = 0
     template: Optional[str] = None
     disabled: set[str] = set()
+    open: bool = False
     # Event records waiting to be drained; never dumped with the model.
     _events: list[Event] = PrivateAttr(default_factory=list)
+    # The holds of the bodies that hold this net now (``BodyHold``, ``ClosedNets``): set
+    # in stage 1 of a firing of the net around it and released when the body returns or
+    # the firing ends. Kept in memory only: neither saved nor copied.
+    _holds: list = PrivateAttr(default_factory=list)
     # The round-robin cursor (read by ``tie_break="round_robin"``): the declaration
     # index of the default selector's last pick in this net, under any tie-break, or
     # None before its first. Kept in memory only; a net loaded from its saved form
@@ -667,11 +838,28 @@ class ExecutableGraph(BaseModel):
     def __deepcopy__(self, memo=None):
         """A deep copy is a new net: it gets its own ``net_id``, so a forked nested
         token is told apart from the original, and its ring starts afresh, the
-        ring's cursor being the original's alone."""
+        ring's cursor being the original's alone, and no body holds it."""
+        memo = {} if memo is None else memo
+        memo.setdefault(id(self._holds), [])  # the holds are this net's, not the copy's
         copy = super().__deepcopy__(memo)
         copy.net_id = next(_net_ids)
         copy._ring_cursor = None
+        copy._holds = []
         return copy
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the net is closed (since 2026-11-23): it is under the rule of
+        ``ClosedNets`` (it marks a place as a port) and does not declare itself
+        ``open``. From outside a closed net, tokens are put, taken and replaced only
+        at its ports."""
+        return not self.open and ClosedNets.under_the_rule(self)
+
+    @property
+    def held_by_body(self) -> bool:
+        """Whether a body of the net around this net holds it now (``BodyHold``):
+        from stage 1 of that firing until its body returns or the firing ends."""
+        return bool(self._holds)
 
     def export_marking(self) -> dict[str, list]:
         """``{place: [tokens as JSON]}``, oldest first (``NetJson.export_marking``)."""
@@ -801,10 +989,12 @@ class ExecutableGraph(BaseModel):
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Return edge references unknown transition: {edge.transition_node_name}")
 
-        for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
-            _edge_place(places_by_name, edge.place_node_name, "Read", edge.transition_node_name)
+        for edge in (
+            *values.get('snapshot_edges', []), *values.get('mutate_edges', []), *values.get('read_edges', []),
+        ):
+            _edge_place(places_by_name, edge.place_node_name, "Non-consuming", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
-                raise ValueError(f"Read edge references unknown transition: {edge.transition_node_name}")
+                raise ValueError(f"Non-consuming edge references unknown transition: {edge.transition_node_name}")
 
         return values
 
@@ -917,25 +1107,53 @@ class ExecutableGraph(BaseModel):
                     f"return_index values; use integers on all of them or on none."
                 )
 
-        for edge in (*values.get('snapshot_edges', []), *values.get('mutate_edges', [])):
-            place = _edge_place(places_by_name, edge.place_node_name, "Read", edge.transition_node_name)
+        for edge in (
+            *values.get('snapshot_edges', []), *values.get('mutate_edges', []), *values.get('read_edges', []),
+        ):
+            place = _edge_place(places_by_name, edge.place_node_name, "Non-consuming", edge.transition_node_name)
             transition = transition_names_to_nodes[edge.transition_node_name]
             place_type = place.type
             argument_type = get_type_hints(transition.function).get(edge.argument)
-            if isinstance(edge, SurveyEdge):
+            if isinstance(edge, (SurveyEdge, ReadAllEdge)):
                 ExecutableGraphCheck.ensure_argument_takes_every_token(edge, place, transition, argument_type)
+            elif isinstance(edge, ReadEdge):
+                ExecutableGraphCheck.ensure_argument_takes_one_token(edge, place, transition, argument_type)
             elif place_type is not None and argument_type is not None:
                 if not CompareTypes.between_annotations_where_both_maybe_in_list(
                     annotation1=place_type,
                     annotation2=argument_type,
                 ):
                     raise TypeError(
-                        f"Type mismatch for read edge from {_place_words(edge.place_node_name)} to transition "
-                        f"'{transition.name}': place type '{place_type}' does not match argument type "
+                        f"Type mismatch for non-consuming edge from {_place_words(edge.place_node_name)} to "
+                        f"transition '{transition.name}': place type '{place_type}' does not match argument type "
                         f"'{argument_type}'."
                     )
 
         return values
+
+    @model_validator(mode="after")
+    def check_read_edges(self) -> "ExecutableGraph":
+        """A place a read edge reads is read by no other input edge of the same
+        transition (``ExecutableGraphCheck.ensure_read_edges_stand_alone``)."""
+        ExecutableGraphCheck.ensure_read_edges_stand_alone(self)
+        return self
+
+    @model_validator(mode="after")
+    def check_input_clauses(self) -> "ExecutableGraph":
+        """A keyed edge whose filter reads the token of another input (a bound
+        edge, ``KeyedEdges``) names an input of its own transition that gives one
+        token, with the keys declared on both places
+        (``ExecutableGraphCheck.ensure_input_clauses_are_sound``)."""
+        ExecutableGraphCheck.ensure_input_clauses_are_sound(self)
+        return self
+
+    @model_validator(mode="after")
+    def check_reaches(self) -> "ExecutableGraph":
+        """An input edge that declares the ports it reaches stands on a place that
+        holds nets, and names each port by a name that is not empty
+        (``ExecutableGraphCheck.ensure_reaches_are_sound``, since 2026-11-23)."""
+        ExecutableGraphCheck.ensure_reaches_are_sound(self)
+        return self
 
 
 class SubnetPlaceNode(PositionalArgsBaseModel):
@@ -1003,6 +1221,19 @@ class SubnetPlaceNode(PositionalArgsBaseModel):
         return next((place for place in self.ports if place.name == name), None)
 
 
+def _named(key: PlaceKey) -> str:
+    """A place an edge names, quoted for a message: ``'Orders'``, or ``port
+    'Lobby' of 'Level 1'``."""
+    if isinstance(key, Port):
+        return f"port {key.port!r} of {key.place!r}"
+    return repr(key)
+
+
+def _spelt(annotation: Any) -> str:
+    """A type for a message: a class by its name, anything else as written."""
+    return annotation.__name__ if isinstance(annotation, type) else str(annotation)
+
+
 def _place_words(key: PlaceKey) -> str:
     """A place an edge names, for a message: ``place 'Door'``, or ``port 'Lobby'
     of subnet place 'Level 3'``."""
@@ -1051,15 +1282,22 @@ ExecutableGraph.model_rebuild()
 @dataclass
 class FiringTokenIds:
     """Which token ids one firing touched. Passive state, filled in as the firing
-    goes: stage 1 records what it consumed (per argument, in the order taken) and
-    what it handed over through mutate edges; stage 3 records what it deposited.
+    goes: stage 1 records what it consumed (per argument, in the order taken), what
+    it handed over through mutate edges, and what it handed over through read edges
+    (since 2026-11-23); stage 3 records what it deposited.
     ``restore_argument_tokens_to_places`` reads ``consumed`` to put the same ids back.
-    Places are named by their ``PlaceKey``, a port by its ``Port`` pair.
+    ``read`` is told by no event: the concurrent runtime reads it, with ``mutated``,
+    for the tokens whose inner nets no inner firing may touch while the body runs.
+    Places are named by their ``PlaceKey``, a port by its ``Port`` pair. ``held`` (since
+    2026-11-23) is the holds stage 1 set on the nets the body was handed
+    (``ClosedNets.lend``), which the firing releases when the body returns.
     """
 
     consumed: dict[ArgumentName, tuple[PlaceKey, list[int]]] = field(default_factory=dict)
     mutated: list[PlaceTokenId] = field(default_factory=list)
     produced: list[PlaceTokenId] = field(default_factory=list)
+    read: list[PlaceTokenId] = field(default_factory=list)
+    held: list = field(default_factory=list)
 
 
 class TokenIds:
@@ -1226,11 +1464,280 @@ class NetParams:
     def set(executable_graph: ExecutableGraph, name: str, value: Any) -> None:
         """Set a declared parameter and record ``ParamChanged(None, name)``. A name
         the net did not declare at construction is a ``KeyError``: parameters are
-        part of what a net is, not a free store."""
+        part of what a net is, not a free store. A body of the net around a net
+        under the rule, holding it, is refused with ``HeldByBodyError``
+        (``ClosedNets``, since 2026-11-23)."""
         if name not in executable_graph.params:
             raise KeyError(f"the net declares no parameter {name!r}")
+        ClosedNets.ensure_controls(executable_graph, f"setting parameter {name!r}")
         executable_graph.params[name] = value
         GraphEvents.record(executable_graph, ParamChanged(None, name))
+
+
+@dataclass(eq=False)
+class BodyHold:
+    """One body's hold on a net it was handed (``ClosedNets``, since 2026-11-23).
+    Stage 1 sets one on every net carried by a token it hands a body live, by any
+    edge but a snapshot or a survey, which hand over copies; the firing releases it
+    when the body returns, or when the firing ends otherwise. ``NestedNets.subnet_scope``
+    on a held net sets one on the subnet for the block's time. Passive state.
+
+    ``places`` is the before-record of a closed net's private places, per place its
+    tokens and their ids, and ``controls`` that of the knobs of a net under the
+    rule; ``None`` where the rule asks for none. ``refusal`` is the first refusal or
+    difference found while the hold stood, which fails the firing when the body
+    returns, even if the body caught the error."""
+
+    net: "ExecutableGraph"
+    places: Optional[dict[str, tuple[list, list[int]]]]
+    controls: Optional[tuple]
+    refusal: Optional[Exception] = None
+
+
+class ClosedNets:
+    """Functions of the rule on closed nets (since 2026-11-23).
+
+    A net that marks a place as a port is **under the rule**, and **closed** unless
+    its definition declares it ``open`` (``ExecutableGraph.is_closed``). Stage two of
+    the rule will put every net under it (``CLOSED_WITHOUT_PORTS``).
+
+    **Outside** a net: a body, guard or key function of a transition of the net
+    around it, by any edge; the program and its drivers; the runner's requests.
+    **Inside** it: its own transitions' bodies, guards and keys, the handlers of its
+    own controls (a ``press``, ``apply_control``), the tokens its definition starts it
+    with, and the engine's own moves (a firing's inputs and outputs, a failed
+    firing's restore, a deep step's inner firings).
+
+    - **Tokens.** From outside a closed net, putting, taking or replacing tokens is
+      allowed at its ports and refused at any other place with ``ClosedNetError``
+      (``ensure_tokens``): ``NestedNets.put`` and ``NestedNets.take``, the runtime's
+      ``Extend`` and ``SetTokens``, and the runner's ``inject``. A write at
+      ``Port(subnet place, port)`` is a write to a place of the net around the
+      subnet, judged by that net's rule first: a closed net refuses it, since a port
+      of a subnet place is never one of its own ports, and an open one lets it land
+      at the subnet's port. An open net lets every write land. The check is the
+      net's own, whoever calls, a body holding the net or not. A body that builds a
+      new net and puts it in place of a token's net has made a new net, which no
+      hold covers.
+    - **Knobs and firing by name.** Setting a parameter, a transition's switch or
+      keywords, firing by name (``Fire``) and a selector of one's own stay with the
+      program, its drivers and the runner. A body of the net around a net that is
+      under the rule, while it holds the net, is refused them with
+      ``HeldByBodyError`` (``ensure_controls``), on a closed net and on one declared
+      open alike: ``open`` opens the places, not the knobs. A held net that marks no
+      port keeps today's behaviour, so a body still sets its parameters (the transit
+      example's ``Depart`` and ``Arrive`` set their cabin's ``stopped``). Stage two
+      puts every net under the rule, so such a net will give the setting to a
+      transition of its own or leave it to the program; declaring it open will
+      not serve, since ``open`` opens the places only.
+    - **Reading and stepping** are allowed for everyone, a body included: a body may
+      step a net it holds (``execute_graph``), whose transitions are inside it.
+    - **Whole-state acts** (``import_marking``, ``NetJson.load_into`` and
+      ``restore``, a fork, saving) reach the places through the library's own
+      paths and stay the program's. A body that loads a marking into a closed net
+      it holds changes its private places, which the before-and-after check finds.
+
+    **The before-and-after check.** A body holds the live net and can edit
+    ``place.tokens``, ``params`` or ``disabled`` directly, which no function sees.
+    So each hold records the tokens and ids of a closed net's private places, and
+    the knobs of a net under the rule (``record``), and the firing fails when the
+    body returns if they differ (``settle``). Each move of the net's own while the
+    hold stands (a step the body makes) compares first and records afresh after
+    (``moving``), so that the net's own firings count as its own. A change made
+    inside a token object of a private place, or inside a parameter's value, keeps
+    its place, its id and its identity, and is not seen. Neither is a program that
+    edits a place's list directly: Python enforces the rule through its own
+    functions, the runtime's commands and the runner, and through this check for a
+    body."""
+
+    def under_the_rule(executable_graph: ExecutableGraph) -> bool:
+        """Whether the rule is in force on the net: it marks a place as a port, or
+        stage two's default puts every net under it. The one test that reads
+        ``CLOSED_WITHOUT_PORTS``."""
+        return CLOSED_WITHOUT_PORTS or any(
+            isinstance(place, ListPlaceNode) and place.port for place in executable_graph.places
+        )
+
+    def label(executable_graph: ExecutableGraph) -> str:
+        """The net as a refusal names it: its template, or ``#`` and its ``net_id``."""
+        return executable_graph.template if executable_graph.template is not None else f"#{executable_graph.net_id}"
+
+    def note(executable_graph: ExecutableGraph, refusal: Exception) -> None:
+        """Keep ``refusal`` on each hold on the net that has none yet, so that the
+        firing whose body holds it fails with it."""
+        for hold in executable_graph._holds:
+            if hold.refusal is None:
+                hold.refusal = refusal
+
+    def ensure_tokens(executable_graph: ExecutableGraph, place: PlaceKey, act: str) -> None:
+        """Refuse with ``ClosedNetError`` a write from outside at ``place`` of a
+        closed net, unless it is one of the net's ports; a ``Port`` pair is never
+        one. Called after the place is known to exist."""
+        if not executable_graph.is_closed:
+            return
+        if not isinstance(place, Port):
+            node = executable_graph.place_named(place)
+            if not isinstance(node, ListPlaceNode) or node.port:
+                return
+        refusal = ClosedNetError(ClosedNets.label(executable_graph), place, act)
+        ClosedNets.note(executable_graph, refusal)
+        raise refusal
+
+    def ensure_controls(executable_graph: ExecutableGraph, act: str) -> None:
+        """Refuse with ``HeldByBodyError`` a knob or a firing by name on a net under
+        the rule that a body holds now."""
+        if not executable_graph._holds or not ClosedNets.under_the_rule(executable_graph):
+            return
+        refusal = HeldByBodyError(ClosedNets.label(executable_graph), act)
+        ClosedNets.note(executable_graph, refusal)
+        raise refusal
+
+    def record(executable_graph: ExecutableGraph) -> tuple[Optional[dict], Optional[tuple]]:
+        """The before-record of a hold: the tokens and ids of each private place of
+        a closed net, and the knobs of a net under the rule (its parameters, its
+        switches, its tie-break, its selector, the stepping rules of its places and
+        each transition's keywords); ``None`` for each the rule does not ask for."""
+        places = None
+        if executable_graph.is_closed:
+            places = {
+                place.name: (list(place.tokens), list(place._token_ids))
+                for place in executable_graph.places
+                if isinstance(place, ListPlaceNode) and not place.port
+            }
+        controls = None
+        if ClosedNets.under_the_rule(executable_graph):
+            controls = (
+                dict(executable_graph.params),
+                frozenset(executable_graph.disabled),
+                executable_graph.tie_break,
+                executable_graph.transition_selector,
+                tuple(getattr(place, "stepping", None) for place in executable_graph.places),
+                tuple(dict(transition.kwargs or {}) for transition in executable_graph.transitions),
+            )
+        return places, controls
+
+    def hold(executable_graph: ExecutableGraph) -> BodyHold:
+        """A new hold on the net, with its before-record, set on the net."""
+        places, controls = ClosedNets.record(executable_graph)
+        hold = BodyHold(executable_graph, places, controls)
+        executable_graph._holds.append(hold)
+        return hold
+
+    def lend(firing_ids: "FiringTokenIds", tokens: Iterable[Any]) -> None:
+        """Stage 1 hands ``tokens`` to a body live: hold every net each carries."""
+        for token in tokens:
+            if not NestedNets.holds_nets(token):
+                continue
+            try:
+                nets = NestedNets.of(token)
+            except TypeError:
+                continue
+            firing_ids.held.extend(ClosedNets.hold(net) for net in nets.values())
+
+    def release(firing_ids: "FiringTokenIds") -> Optional[Exception]:
+        """Release the firing's holds and return the first refusal or difference
+        found, if any; releasing again does nothing."""
+        held, firing_ids.held = firing_ids.held, []
+        found = None
+        for hold in held:
+            ClosedNets.unhold(hold)
+            if found is None:
+                found = hold.refusal or ClosedNets.difference(hold)
+        return found
+
+    def settle(firing_ids: "FiringTokenIds") -> None:
+        """The body returned: release the firing's holds, and raise the first
+        refusal or difference, which fails the firing."""
+        found = ClosedNets.release(firing_ids)
+        if found is not None:
+            raise found
+
+    def unhold(hold: BodyHold) -> None:
+        holds = hold.net._holds
+        for index, held in enumerate(holds):
+            if held is hold:
+                del holds[index]
+                return
+
+    def difference(hold: BodyHold) -> Optional[Exception]:
+        """What changed under the hold since its record, as the refusal it would
+        have been: ``ClosedNetError`` for a private place whose tokens or ids differ,
+        ``HeldByBodyError`` for knobs that differ."""
+        net = hold.net
+        places, controls = ClosedNets.record(net)
+        if hold.places is not None:
+            for name, (tokens, ids) in hold.places.items():
+                now_tokens, now_ids = places.get(name, ([], [])) if places is not None else ([], [])
+                if ids != now_ids or len(tokens) != len(now_tokens) or any(
+                    a is not b for a, b in zip(tokens, now_tokens)
+                ):
+                    return ClosedNetError(ClosedNets.label(net), name, "an edit of the place's tokens by a body")
+        if hold.controls is not None and controls is not None and not _same_controls(hold.controls, controls):
+            return HeldByBodyError(
+                ClosedNets.label(net),
+                "a change by a body to its parameters, switches, tie-break, selector, stepping rules or keywords",
+            )
+        return None
+
+    @contextmanager
+    def moving(executable_graph: ExecutableGraph) -> Iterator[None]:
+        """Around a move of the net's own (one of its firings, a deep step from it)
+        while a body holds it: compare each hold's record first, keeping what a body
+        changed as the hold's refusal, and record afresh after, so that what the net
+        did itself is its own. Nothing for a net no body holds."""
+        if not executable_graph._holds:
+            yield
+            return
+        for hold in executable_graph._holds:
+            if hold.refusal is None:
+                hold.refusal = ClosedNets.difference(hold)
+        try:
+            yield
+        finally:
+            for hold in executable_graph._holds:
+                hold.places, hold.controls = ClosedNets.record(executable_graph)
+
+    def pass_on(executable_graph: ExecutableGraph, subnet: ExecutableGraph) -> list[BodyHold]:
+        """``subnet_scope`` on a net a body holds lends the body its subnet: hold
+        the subnet for the block's time."""
+        return [ClosedNets.hold(subnet)] if executable_graph._holds else []
+
+    def hand_back(executable_graph: ExecutableGraph, holds: list[BodyHold]) -> None:
+        """The block of ``subnet_scope`` ended: release the subnet's holds, and keep
+        any refusal or difference found there on the holds of the net around it."""
+        for hold in holds:
+            ClosedNets.unhold(hold)
+            found = hold.refusal or ClosedNets.difference(hold)
+            if found is not None:
+                ClosedNets.note(executable_graph, found)
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    if a is b:
+        return True
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
+
+def _same_controls(before: tuple, now: tuple) -> bool:
+    """Whether two records of a net's knobs (``ClosedNets.record``) agree."""
+    params_before, disabled_before, tie_before, selector_before, stepping_before, kwargs_before = before
+    params_now, disabled_now, tie_now, selector_now, stepping_now, kwargs_now = now
+    if params_before.keys() != params_now.keys() or not all(
+        _same_value(params_before[name], params_now[name]) for name in params_before
+    ):
+        return False
+    if len(kwargs_before) != len(kwargs_now) or any(
+        a.keys() != b.keys() or not all(_same_value(a[key], b[key]) for key in a)
+        for a, b in zip(kwargs_before, kwargs_now)
+    ):
+        return False
+    return (
+        disabled_before == disabled_now and tie_before == tie_now and selector_before is selector_now
+        and stepping_before == stepping_now
+    )
 
 
 @dataclass(frozen=True, eq=False)
@@ -1261,7 +1768,8 @@ class NestedNets:
     - gathers their events into its own log as ``Nested`` records (``drain``), with
       the path to the net they happened in and the net's stable ``net_id``;
     - lets an outer body reach inside the tokens it holds (``put``, ``take``,
-      ``set_param``), and its edges reach a subnet's port places, which is the
+      ``set_param``), at the ports alone of a closed net (``ClosedNets``, since
+      2026-11-23), and its edges reach a subnet's port places, which is the
       only coupling: the one place a net shares is a port, with its own subnet,
       and no inner transition sees the outer net.
 
@@ -1426,8 +1934,8 @@ class NestedNets:
         """Every net in a place of this net that deep stepping enters, in walk
         order, each with its place's rule: a passive place's nets are left out,
         and so are the nets of a token in ``held``, ``(place, token id)`` pairs of
-        tokens an outer body in flight has in hand through a mutate edge (the
-        concurrent runtime's), which no inner firing may touch meanwhile, and the
+        tokens an outer body in flight has in hand through a mutate or a read edge
+        (the concurrent runtime's), which no inner firing may touch meanwhile, and the
         subnet of a subnet place one of whose ports a transition of this net in
         flight has an edge on (``held_subnets``): until that firing lands, the
         subnet takes no turn."""
@@ -1451,7 +1959,7 @@ class NestedNets:
         touching: dict[str, set[str]] = {}
         for edge in (
             *executable_graph.argument_edges, *executable_graph.return_edges,
-            *executable_graph.snapshot_edges, *executable_graph.mutate_edges,
+            *executable_graph.snapshot_edges, *executable_graph.mutate_edges, *executable_graph.read_edges,
         ):
             if isinstance(edge.place_node_name, Port) and edge.transition_node_name in in_flight:
                 touching.setdefault(edge.place_node_name.place, set()).add(edge.transition_node_name)
@@ -1611,8 +2119,12 @@ class NestedNets:
         """Append ``tokens`` to a place of an inner net, type-checked, with fresh
         ids, recording ``Added`` for each; returns the ids. ``place_name`` may be a
         port of one of the inner net's subnet places, ``Port(...)``: the inner net
-        tells the change, naming the pair, and the subnet mints the ids."""
+        tells the change, naming the pair, and the subnet mints the ids. A closed
+        net takes tokens from outside only at its ports: any other place, a port
+        pair included, is refused with ``ClosedNetError`` and nothing is put
+        (``ClosedNets``, since 2026-11-23)."""
         place = NestedNets.token_place(inner, place_name)
+        ClosedNets.ensure_tokens(inner, place_name, "a put")
         TokenIds.resync(inner)
         for token in tokens:
             ExecutableGraphCheck.ensure_resident_token_type_matches_place_type(token, place)
@@ -1624,8 +2136,10 @@ class NestedNets:
     def take(inner: ExecutableGraph, place_name: PlaceKey, count: int = 1) -> list:
         """Remove and return the ``count`` oldest tokens of a place of an inner net,
         recording ``Removed`` for each. Fewer than ``count`` present is an error
-        (nothing is taken). A port is named by its pair, as for ``put``."""
+        (nothing is taken). A port is named by its pair, as for ``put``, and a
+        closed net gives tokens up only at its ports, as ``put`` takes them."""
         place = NestedNets.token_place(inner, place_name)
+        ClosedNets.ensure_tokens(inner, place_name, "a take")
         TokenIds.resync(inner)
         if len(place.tokens) < count:
             raise ValueError(f"{place_name!r} holds {len(place.tokens)} tokens, not {count}")
@@ -1637,7 +2151,8 @@ class NestedNets:
         return taken
 
     def set_param(inner: ExecutableGraph, name: str, value: Any) -> None:
-        """``NetParams.set`` on an inner net."""
+        """``NetParams.set`` on an inner net, refused to a body holding a net under
+        the rule (``HeldByBodyError``)."""
         NetParams.set(inner, name, value)
 
     @contextmanager
@@ -1649,7 +2164,13 @@ class NestedNets:
         ``SubnetHeldError`` while a firing of ``executable_graph`` on one of the
         subnet's ports is in flight, since the subnet is held still until it lands;
         ``LookupError`` if ``place`` is no subnet place. ``ExecutableGraph.subnet``
-        reads a subnet at any time."""
+        reads a subnet at any time.
+
+        The block is outside the subnet (``ClosedNets``, since 2026-11-23): a closed
+        subnet takes tokens only at its ports. Called on a net a body holds, the
+        block holds the subnet for the body too, so the subnet's knobs are the
+        body's to read and not to set when it is under the rule, and what the block
+        did there that the rule refuses fails the body's firing when it returns."""
         subnet = executable_graph.subnet(place)
         if subnet is None:
             raise LookupError(f"{place!r} is no subnet place of the net")
@@ -1657,9 +2178,11 @@ class NestedNets:
         if holder is not None:
             raise SubnetHeldError(place, holder)
         subnet.record_events = executable_graph.record_events
+        holds = ClosedNets.pass_on(executable_graph, subnet)
         try:
             yield subnet
         finally:
+            ClosedNets.hand_back(executable_graph, holds)
             NestedNets.drain(executable_graph)
 
     def token_count(executable_graph: ExecutableGraph) -> int:
@@ -1816,18 +2339,44 @@ class MapTransitionNames:
 
     def to_read_edges(
         executable_graph: ExecutableGraph,
-    ) -> dict[str, tuple[Union["SnapshotEdge", "MutateEdge"], ...]]:
-        """Map each transition to its non-consuming read edges (SnapshotEdge + MutateEdge)."""
-        read_edges: dict[str, tuple] = {}
-        for edge in (*executable_graph.snapshot_edges, *executable_graph.mutate_edges):
-            read_edges[edge.transition_node_name] = read_edges.get(edge.transition_node_name, ()) + (edge,)
-        return read_edges
+    ) -> dict[str, tuple[Union["SnapshotEdge", "MutateEdge", "ReadEdge"], ...]]:
+        """Map each transition to its non-consuming edges: its snapshot and survey
+        edges, its mutate and mutate-where edges, then its read, read-where and
+        read-all edges. The function and the engine's
+        ``transition_names_to_read_edges`` keep the name they had when this text
+        called the group read edges; a read edge is now one of the three kinds."""
+        non_consuming: dict[str, tuple] = {}
+        for edge in (*executable_graph.snapshot_edges, *executable_graph.mutate_edges, *executable_graph.read_edges):
+            non_consuming[edge.transition_node_name] = non_consuming.get(edge.transition_node_name, ()) + (edge,)
+        return non_consuming
 
 
 class KeyedEdges:
-    """Functions over keyed edges (``TakeWhereEdge``, ``MutateWhereEdge``)."""
+    """Functions over keyed edges (``TakeWhereEdge``, ``MutateWhereEdge``,
+    ``ReadWhereEdge``).
 
-    def first_kept(edge: Union[TakeWhereEdge, MutateWhereEdge], place: ListPlaceNode, params: dict) -> Optional[int]:
+    **Bound edges** (since 2026-11-23). A keyed edge whose filter holds a clause
+    with ``input`` (``Clause(key, input=place, input_key=key)``) chooses its token
+    by the token its transition gets from that place, its **source**: the
+    courier an order names. The source edge gives one token (a take, take-where,
+    snapshot, mutate, mutate-where, read or read-where edge), and several edges
+    may be bound to one source; ``ExecutableGraphCheck.ensure_input_clauses_are_sound``
+    refuses the rest when the net is built.
+
+    **Which pair fires**: for each source, the oldest source token that has a
+    match, with the oldest match for it. A source's candidates are its place's
+    tokens in queue order, only those its own filter keeps for a keyed source. A
+    candidate needs a match in every edge bound to it: the oldest token of the
+    bound place that the bound edge's whole filter keeps, each input clause
+    comparing the bound token's ``key`` with the candidate's ``input_key`` as
+    key values compare (same type and equal). A candidate with no match waits
+    and does not hold back those behind it, and the sources of one transition
+    choose independently. ``pairing`` finds the pair; fireability asks it and
+    launch takes what it gives, before any token moves."""
+
+    def first_kept(
+        edge: Union[TakeWhereEdge, MutateWhereEdge, ReadWhereEdge], place: ListPlaceNode, params: dict,
+    ) -> Optional[int]:
         """The index of the oldest token of ``place`` the edge's filter keeps, or ``None``.
         The filter sees the place as the edge names it, so on a port its ``places``
         names the port by its ``Port`` pair."""
@@ -1836,46 +2385,287 @@ class KeyedEdges:
                 return index
         return None
 
+    def input_clauses(edge: Any) -> tuple:
+        """The clauses of an edge's filter that read the token of another input,
+        in declared order; empty for an edge that is not bound."""
+        where = getattr(edge, "where", None)
+        if where is None:
+            return ()
+        return tuple(clause for clause in where.clauses if getattr(clause, "input", None) is not None)
+
+    def source_of(edge: Any) -> Optional[PlaceKey]:
+        """The place a bound edge's input clauses name, its source, or ``None``
+        for an edge that is not bound. A built net's bound edge names one."""
+        clauses = KeyedEdges.input_clauses(edge)
+        return clauses[0].input if clauses else None
+
+    def pairing(
+        transition: FunctionTransitionNode,
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[PlaceKey, ListPlaceNode],
+        transition_names_to_read_edges: Optional[dict[str, tuple]],
+        params: dict,
+    ) -> Optional[dict[ArgumentName, int]]:
+        """The index, in its place as it stands, of the token each source and each
+        bound edge of ``transition`` gets, by argument; ``{}`` for a transition
+        with no bound edge, and ``None`` when a source has no token with a match
+        in every edge bound to it.
+
+        One pass over each bound place builds a lookup from the values its input
+        clauses compare to the first index whose other clauses pass; then each
+        source token tried costs one lookup per bound edge, never a scan."""
+        edges = (
+            *transition_names_to_incoming_edges.get(transition.name, ()),
+            *(transition_names_to_read_edges or {}).get(transition.name, ()),
+        )
+        bound = [edge for edge in edges if KeyedEdges.input_clauses(edge)]
+        if not bound:
+            return {}
+        by_source: dict[PlaceKey, list] = {}
+        for edge in bound:
+            by_source.setdefault(KeyedEdges.source_of(edge), []).append(edge)
+        chosen: dict[ArgumentName, int] = {}
+        for source, bound_to_it in by_source.items():
+            source_edge = next((edge for edge in edges if edge.place_node_name == source), None)
+            found = KeyedEdges._pair(source, source_edge, bound_to_it, place_names_to_nodes, params)
+            if found is None:
+                return None
+            chosen.update(found)
+        return chosen
+
+    def _pair(
+        source: PlaceKey, source_edge: Any, bound: list, place_names_to_nodes: dict, params: dict,
+    ) -> Optional[dict[ArgumentName, int]]:
+        """The oldest token of ``source`` with a match in every edge of ``bound``,
+        and the match in each, by argument; ``None`` if there is none."""
+        from petritype.core.keys import Keys  # the module imports this one
+
+        lookups = [KeyedEdges._lookup(edge, place_names_to_nodes[edge.place_node_name], params) for edge in bound]
+        if any(not lookup for _clauses, lookup in lookups):
+            return None
+        place = place_names_to_nodes[source]
+        own = getattr(source_edge, "where", None)
+        for index, token in enumerate(place.tokens):
+            if own is not None and not own.keeps(place, token, params, source):
+                continue
+            keys = Keys.of(place, token)
+            matched = []
+            for clauses, lookup in lookups:
+                match = lookup.get(tuple(_typed(keys[clause.input_key]) for clause in clauses))
+                if match is None:
+                    break
+                matched.append(match)
+            else:
+                chosen = {edge.argument: match for edge, match in zip(bound, matched)}
+                if source_edge is not None:
+                    chosen[source_edge.argument] = index
+                return chosen
+        return None
+
+    def _lookup(edge: Any, place: ListPlaceNode, params: dict) -> tuple[tuple, dict[tuple, int]]:
+        """A bound edge's input clauses, and the lookup one pass over its place
+        builds: from the values of those clauses' keys, each as ``(type, value)``
+        so that ``1`` is not ``True``, to the index of the oldest token whose
+        other clauses pass, within the places the filter covers."""
+        from petritype.core.keys import Keys  # the module imports this one
+
+        clauses = KeyedEdges.input_clauses(edge)
+        others = tuple(clause for clause in edge.where.clauses if getattr(clause, "input", None) is None)
+        lookup: dict[tuple, int] = {}
+        if not edge.where.covers(edge.place_node_name) or not place.keys:
+            return clauses, lookup
+        for index, token in enumerate(place.tokens):
+            keys = Keys.of(place, token)
+            if all(clause.accepts(keys, params) for clause in others):
+                lookup.setdefault(tuple(_typed(keys[clause.key]) for clause in clauses), index)
+        return clauses, lookup
+
+
+def _typed(value: Any) -> tuple[type, Any]:
+    """A key value with its type, so that values compare as keys do: ``1`` is not ``True``."""
+    return type(value), value
+
 
 class ExecutableGraphCheck:
     """Functions that do not alter the executable graph."""
 
-    def requires_presence(edge: Union[ArgumentEdgeToTransition, SnapshotEdge, MutateEdge]) -> bool:
+    def ensure_input_clauses_are_sound(executable_graph: ExecutableGraph) -> None:
+        """Raise ``ValueError`` for a bound edge (``KeyedEdges``) the net cannot
+        fire as declared, naming the transition and the places. Checked when the
+        graph is built, for each bound edge in declaration order:
+
+        - its input clauses name one place, its source;
+        - the source is one of its transition's input places;
+        - neither the bound edge's place nor the source is read by another edge
+          of the transition, so that the source is one edge and the positions the
+          pairing chooses stay true until each edge acts on them;
+        - the source's edge is not bound itself, so no chain and no cycle (an
+          edge that names its own place is its own source, and bound);
+        - the source's edge gives one token: a take, take-where, snapshot, mutate
+          or mutate-where edge whose argument is not annotated ``list[T]``, or a
+          read or read-where edge (since 2026-11-23), which always gives one;
+        - the bound edge's place declares each clause's key, and the source's
+          place each ``input_key``.
+
+        Constant and parameter clauses are left as they were: a key the place
+        does not declare matches nothing there."""
+        places = MapPlaceNames.to_list_place_nodes(executable_graph)
+        functions = {transition.name: transition.function for transition in executable_graph.transitions}
+        edges_of: dict[str, list] = {}
+        for edge in (*executable_graph.argument_edges, *executable_graph.snapshot_edges,
+                     *executable_graph.mutate_edges, *executable_graph.read_edges):
+            edges_of.setdefault(edge.transition_node_name, []).append(edge)
+        for transition_name, edges in edges_of.items():
+            bound = [edge for edge in edges if KeyedEdges.input_clauses(edge)]
+            if not bound:
+                continue
+            readers: dict[PlaceKey, list] = {}
+            for edge in edges:
+                readers.setdefault(edge.place_node_name, []).append(edge)
+            for edge in bound:
+                here = edge.place_node_name
+                clauses = KeyedEdges.input_clauses(edge)
+                sources = list(dict.fromkeys(clause.input for clause in clauses))
+                chooses = f"transition {transition_name!r} chooses its token from {_named(here)}"
+                if len(sources) > 1:
+                    raise ValueError(f"{chooses} by two inputs, {_named(sources[0])} and {_named(sources[1])}")
+                source = sources[0]
+                if source not in readers:
+                    raise ValueError(f"{chooses} by {_named(source)}, which it does not read")
+                for key in (here, source):
+                    if len(readers[key]) > 1:
+                        raise ValueError(
+                            f"transition {transition_name!r} reads {_named(key)} through more than one edge, and a "
+                            f"token there chooses or is chosen by another input"
+                        )
+                source_edge = readers[source][0]
+                if KeyedEdges.input_clauses(source_edge):
+                    raise ValueError(f"{chooses} by {_named(source)}, whose own token is chosen by an input")
+                if ExecutableGraphCheck.gives_every_token(source_edge, places[source], functions[transition_name]):
+                    raise ValueError(f"{chooses} by {_named(source)}, whose edge gives every token rather than one")
+                for clause in clauses:
+                    for key, place in ((clause.key, here), (clause.input_key, source)):
+                        if key not in places[place].key_names:
+                            raise ValueError(f"{chooses} by key {key!r}, which {_named(place)} does not declare")
+
+    def gives_every_token(edge: Any, place: ListPlaceNode, function: Callable) -> bool:
+        """Whether an input edge hands its body every token of its place as one
+        list rather than one token: a drain, a survey, a read-all, or a take,
+        snapshot or mutate edge whose argument is annotated ``list[T]`` for the
+        place's ``T``, by the test stage 1 applies. A keyed edge and a read edge
+        give one token."""
+        if isinstance(edge, (DrainEdge, SurveyEdge, ReadAllEdge)):
+            return True
+        if isinstance(edge, (TakeWhereEdge, MutateWhereEdge, ReadEdge)):
+            return False
+        argument_type = get_type_hints(function).get(edge.argument)
+        return ExecutableGraphCheck.argument_takes_every_token(argument_type, place.type)
+
+    def ensure_read_edges_stand_alone(executable_graph: ExecutableGraph) -> None:
+        """Raise ``ValueError`` for a read edge (``ReadEdge``, ``ReadWhereEdge``,
+        ``ReadAllEdge``) whose place another input edge of the same transition
+        names, of any kind, a second read edge included, naming the transition and
+        the place. Beside a take from the same place a read edge would hand the
+        body a token that is gone, or the wrong one; beside a snapshot or a mutate
+        edge, a token the other edge copies or changes.
+        The Rust core refuses every place a transition reads twice; this library
+        refuses it where a read edge is one of the two. A place the transition
+        produces into is no input, and may be the place it reads."""
+        inputs: dict[tuple[str, PlaceKey], int] = {}
+        for edge in (
+            *executable_graph.argument_edges, *executable_graph.snapshot_edges, *executable_graph.mutate_edges,
+            *executable_graph.read_edges,
+        ):
+            key = (edge.transition_node_name, edge.place_node_name)
+            inputs[key] = inputs.get(key, 0) + 1
+        for edge in executable_graph.read_edges:
+            if inputs[(edge.transition_node_name, edge.place_node_name)] > 1:
+                raise ValueError(
+                    f"transition {edge.transition_node_name!r} reads {_named(edge.place_node_name)} through a "
+                    f"{type(edge).__name__} and another input edge; a place a read edge reads is read by no other "
+                    f"input edge of its transition"
+                )
+
+    def ensure_reaches_are_sound(executable_graph: ExecutableGraph) -> None:
+        """Raise ``ValueError`` for an input edge whose ``reaches`` (since
+        2026-11-23) is given on a place that holds no nets, a place not declared
+        ``nested`` (a port of a subnet place by that port's own ``nested``), or
+        names a port by the empty string; the message names the transition and the
+        place. These are the only refusals: whether a token's net has the ports an
+        edge names is checked neither here nor when the edge fires, since the nets
+        arrive in tokens as the net runs, so ``reaches`` is a declaration for
+        readers and drawings and changes nothing about firing."""
+        for edge in (
+            *executable_graph.argument_edges, *executable_graph.snapshot_edges, *executable_graph.mutate_edges,
+            *executable_graph.read_edges,
+        ):
+            if not edge.reaches:
+                continue
+            place = executable_graph.place_named(edge.place_node_name)
+            if not (isinstance(place, ListPlaceNode) and place.nested):
+                raise ValueError(
+                    f"the {type(edge).__name__} from {_named(edge.place_node_name)} to transition "
+                    f"{edge.transition_node_name!r} reaches {list(edge.reaches)}, but its place holds no nets: "
+                    f"reaches names ports of the nets a nested place's tokens carry"
+                )
+            if any(not name for name in edge.reaches):
+                raise ValueError(
+                    f"the {type(edge).__name__} from {_named(edge.place_node_name)} to transition "
+                    f"{edge.transition_node_name!r} reaches a port named by the empty string"
+                )
+
+    def requires_presence(edge: Union[ArgumentEdgeToTransition, SnapshotEdge, MutateEdge, ReadEdge]) -> bool:
         """Whether an input edge holds its transition back until its place has a
-        token: true for every edge but the two that read every token, zero or more
-        (``DrainEdge``, ``SurveyEdge``), which accept an empty place."""
-        return not isinstance(edge, (DrainEdge, SurveyEdge))
+        token: true for every edge but the three that read every token, zero or
+        more (``DrainEdge``, ``SurveyEdge``, ``ReadAllEdge``), which accept an
+        empty place."""
+        return not isinstance(edge, (DrainEdge, SurveyEdge, ReadAllEdge))
 
     def argument_takes_every_token(argument_type: Any, place_type: Any) -> bool:
         """Whether an argument annotated ``argument_type`` receives every token of a
         place of ``place_type`` as one list: ``list[T]`` for the place's ``T``, the
-        test stage 1 applies to a plain argument or read edge."""
+        test stage 1 applies to a plain argument edge and to a snapshot or mutate
+        edge."""
         return get_origin(argument_type) is list and CompareTypes.between_annotations_where_one_maybe_in_list(
             annotation_not_in_list=place_type,
             annotation_maybe_in_list=argument_type,
         )
 
     def ensure_argument_takes_every_token(
-        edge: Union[DrainEdge, SurveyEdge],
+        edge: Union[DrainEdge, SurveyEdge, ReadAllEdge],
         place: ListPlaceNode,
         transition: FunctionTransitionNode,
         argument_type: Any,
     ) -> None:
-        """Raise ``TypeError`` unless the argument of a ``DrainEdge`` or ``SurveyEdge``
-        is annotated ``list[T]`` for its place's ``T``: the edge hands the body every
-        token, possibly none, and a plain ``T`` has nothing to receive from an empty
-        place."""
+        """Raise ``TypeError`` unless the argument of a ``DrainEdge``, ``SurveyEdge``
+        or ``ReadAllEdge`` is annotated ``list[T]`` for its place's ``T``: the edge
+        hands the body every token, possibly none, and a plain ``T`` has nothing to
+        receive from an empty place."""
         if ExecutableGraphCheck.argument_takes_every_token(argument_type, place.type):
             return
-
-        def spelt(annotation: Any) -> str:
-            return annotation.__name__ if isinstance(annotation, type) else str(annotation)
-
-        given = "no annotation" if argument_type is None else spelt(argument_type)
+        given = "no annotation" if argument_type is None else _spelt(argument_type)
         raise TypeError(
             f"{type(edge).__name__} from place '{place.name}' to transition '{transition.name}': "
-            f"argument '{edge.argument}' must be annotated list[{spelt(place.type)}], since the edge "
+            f"argument '{edge.argument}' must be annotated list[{_spelt(place.type)}], since the edge "
             f"hands the body every token of the place, possibly none; it has {given}."
+        )
+
+    def ensure_argument_takes_one_token(
+        edge: Union[ReadEdge, ReadWhereEdge],
+        place: ListPlaceNode,
+        transition: FunctionTransitionNode,
+        argument_type: Any,
+    ) -> None:
+        """Raise ``TypeError`` unless the argument of a ``ReadEdge`` or
+        ``ReadWhereEdge`` is annotated as its place's type, or not at all: the edge
+        hands the body one token, a list only when the place holds lists, and
+        ``ReadAllEdge`` is the edge that hands over every token."""
+        if argument_type is None or CompareTypes.between_annotations(place.type, argument_type):
+            return
+        raise TypeError(
+            f"{type(edge).__name__} from {_place_words(edge.place_node_name)} to transition '{transition.name}': "
+            f"argument '{edge.argument}' must be annotated {_spelt(place.type)}, the place's type, since the edge "
+            f"hands the body one token (a ReadAllEdge hands over every token); it has {_spelt(argument_type)}."
         )
 
     def sufficient_tokens_are_available(
@@ -1886,11 +2676,16 @@ class ExecutableGraphCheck:
         executable_graph: Optional[ExecutableGraph] = None,
     ) -> bool:
         """Every input place non-empty, and, for a keyed edge (``TakeWhereEdge``,
-        ``MutateWhereEdge``), holding a token its filter keeps; ``executable_graph``
-        supplies the parameters a filter may name (without it a keyed edge is
-        judged by presence alone). A ``DrainEdge`` or ``SurveyEdge`` asks nothing of
-        its place (``requires_presence``): it reads every token, zero or more, so
-        an empty place never holds its transition back; a guard still can."""
+        ``MutateWhereEdge``, ``ReadWhereEdge``), holding a token its filter keeps;
+        ``executable_graph`` supplies the parameters a filter may name (without it
+        a keyed edge is judged by presence alone). A ``DrainEdge``, ``SurveyEdge``
+        or ``ReadAllEdge`` asks nothing of its place (``requires_presence``): it
+        reads every token, zero or more, so an empty place never holds its
+        transition back; a guard still can.
+
+        A bound edge, whose filter reads the token of another input, is judged with
+        its source: every source must have a token with a match in each edge bound
+        to it (``KeyedEdges.pairing``), asked after every edge on its own."""
         # Transitions with no incoming edges (generators) are always ready to fire
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
             transition.name, tuple()
@@ -1902,11 +2697,12 @@ class ExecutableGraphCheck:
             place = place_names_to_nodes[edge.place_node_name]
             if len(place.tokens) == 0:
                 return False
-            if params is not None and isinstance(edge, TakeWhereEdge):
+            if params is not None and isinstance(edge, TakeWhereEdge) and not KeyedEdges.input_clauses(edge):
                 if KeyedEdges.first_kept(edge, place, params) is None:
                     return False
-        # Read edges (snapshot/mutate) require presence too — there must be a token to read —
-        # but firing does not consume them. A survey reads whatever is there, possibly nothing.
+        # Non-consuming edges (snapshot, mutate, read) require presence too, as there must be a
+        # token to hand over, but firing does not consume them. A survey and a read-all read
+        # whatever is there, possibly nothing.
         if transition_names_to_read_edges:
             for edge in transition_names_to_read_edges.get(transition.name, ()):
                 if not ExecutableGraphCheck.requires_presence(edge):
@@ -1914,9 +2710,17 @@ class ExecutableGraphCheck:
                 place = place_names_to_nodes[edge.place_node_name]
                 if len(place.tokens) == 0:
                     return False
-                if params is not None and isinstance(edge, MutateWhereEdge):
+                if (
+                    params is not None and isinstance(edge, (MutateWhereEdge, ReadWhereEdge))
+                    and not KeyedEdges.input_clauses(edge)
+                ):
                     if KeyedEdges.first_kept(edge, place, params) is None:
                         return False
+        if params is not None and KeyedEdges.pairing(
+            transition, transition_names_to_incoming_edges, place_names_to_nodes, transition_names_to_read_edges,
+            params,
+        ) is None:
+            return False
         return True
 
     def transition_is_fireable(
@@ -2096,10 +2900,11 @@ class ExecutableGraphCheck:
         (``P1 → T1 → P2 → T2 → P1``).
 
         Token flow is the directed bipartite graph of ``argument_edges``
-        (place → transition) and ``return_edges`` (transition → place). Read edges
-        are excluded: a snapshot moves no tokens, so a cycle through one cannot
-        feed itself; mutate edges are excluded on the same conservative grounds
-        (they modify tokens in place but move none).
+        (place → transition) and ``return_edges`` (transition → place). The
+        non-consuming edges are excluded: a snapshot or a read edge moves no
+        tokens, so a cycle through one cannot feed itself; mutate edges are
+        excluded on the same conservative grounds (they modify tokens in place but
+        move none).
 
         Drain edges (``DrainEdge``) are excluded too, by hand, although a drain is
         an argument edge: it takes every token, zero or more, so it moves nothing
@@ -2117,7 +2922,7 @@ class ExecutableGraphCheck:
 
         Passing proves **no token cycles** — not termination. A transition with no
         ``ArgumentEdgeToTransition`` input other than drains (a source — possibly
-        fed only by read edges and drains, which may consume nothing) can fire
+        fed only by non-consuming edges and drains, which may consume nothing) can fire
         forever in a perfectly acyclic net. The static termination condition is
         acyclic *and* every transition consumes: pair this with
         ``assert_no_source_transitions``. Nets that legitimately run forever should
@@ -2164,8 +2969,8 @@ class ExecutableGraphCheck:
     def assert_no_source_transitions(executable_graph: ExecutableGraph) -> None:
         """Raise ValueError if any transition has no ``ArgumentEdgeToTransition``
         input, naming the offenders. Such a *source* transition consumes nothing
-        when it fires (read edges don't count — snapshots and mutates leave the
-        place untouched), so it can fire forever and even an acyclic net
+        when it fires (non-consuming edges don't count — snapshots, mutates and
+        reads leave the place untouched), so it can fire forever and even an acyclic net
         containing one never quiesces. Together with ``assert_acyclic`` this is a
         static termination proof: tokens only flow forward, and every firing
         consumes at least one.
@@ -2236,6 +3041,23 @@ def _round_robin(graph: ExecutableGraph, fireable: list[FunctionTransitionNode])
     return chosen if chosen is not None else candidates[0]
 
 
+def _a_move_of_its_own(function):
+    """A firing of a net is a move of its own: around it, ``ClosedNets.moving``
+    tells what a body holding the net changed before it from what the net did
+    itself. A firing with a selector of the caller's own, on a net a body holds,
+    is firing by name, refused to that body (``HeldByBodyError``)."""
+
+    @functools.wraps(function)
+    async def moved(*args, **kwargs):
+        graph = kwargs["executable_graph"] if "executable_graph" in kwargs else args[0]
+        if graph._holds and kwargs.get("transition_selector", args[5] if len(args) > 5 else None) is not None:
+            ClosedNets.ensure_controls(graph, "a firing chosen by a selector of the caller's own")
+        with ClosedNets.moving(graph):
+            return await function(*args, **kwargs)
+
+    return moved
+
+
 class ExecutableGraphOperations:
     """Functions that alter the executable graph.
 
@@ -2257,7 +3079,7 @@ class ExecutableGraphOperations:
         mixed_nodes_and_edges: Iterable[
             Union[
                 ListPlaceNode, SubnetPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition,
-                ReturnedEdgeFromTransition, SnapshotEdge, MutateEdge,
+                ReturnedEdgeFromTransition, SnapshotEdge, MutateEdge, ReadEdge,
             ]
         ],
         allow_token_copying: bool = False,
@@ -2267,11 +3089,14 @@ class ExecutableGraphOperations:
         record_events: bool = False,
         params: Optional[dict[str, Any]] = None,
         template: Optional[str] = None,
+        open: bool = False,
     ) -> ExecutableGraph:
         """The net of the given nodes and edges, places (subnet places among them)
-        in the order given, which is their declaration order."""
+        in the order given, which is their declaration order. ``open=True``
+        declares the net open (``ExecutableGraph.open``, since 2026-11-23): a net
+        that marks a port is then written from outside at any of its places."""
         places, transitions, edges_to, edges_from = [], [], [], []
-        snapshot_edges, mutate_edges = [], []
+        snapshot_edges, mutate_edges, read_edges = [], [], []
         for node in mixed_nodes_and_edges:
             if isinstance(node, (ListPlaceNode, SubnetPlaceNode)):
                 places.append(node)
@@ -2285,13 +3110,16 @@ class ExecutableGraphOperations:
                 snapshot_edges.append(node)
             elif isinstance(node, MutateEdge):
                 mutate_edges.append(node)
+            elif isinstance(node, ReadEdge):
+                read_edges.append(node)
             else:
                 raise ValueError(f"Unexpected node type: {type(node)}")
         graph = ExecutableGraph(
             places=places, transitions=transitions, argument_edges=edges_to, return_edges=edges_from,
-            snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, allow_token_copying=allow_token_copying,
+            snapshot_edges=snapshot_edges, mutate_edges=mutate_edges, read_edges=read_edges,
+            allow_token_copying=allow_token_copying,
             restore_tokens_on_failure=restore_tokens_on_failure, tie_break=tie_break,
-            record_events=record_events, params=dict(params or {}), template=template,
+            record_events=record_events, params=dict(params or {}), template=template, open=open,
         )
         # Declares "this net is a DAG" at build time; an accidental cycle then
         # fails here with its path named instead of hanging at run time.
@@ -2329,30 +3157,55 @@ class ExecutableGraphOperations:
         Return input tokens matched to function arguments and the input places without the removed tokens.
 
         Token ids leave with their tokens. If ``firing_ids`` is given, the ids taken
-        (per argument, in order) and the ids handed over through mutate edges are
-        recorded on it; snapshot edges touch no ids. A keyed edge (``TakeWhereEdge``,
-        ``MutateWhereEdge``) takes or hands over the oldest token its filter keeps,
+        (per argument, in order), the ids handed over through mutate edges and the
+        ids handed over through read edges are recorded on it; snapshot edges touch
+        no ids. A keyed edge (``TakeWhereEdge``, ``MutateWhereEdge``,
+        ``ReadWhereEdge``) takes or hands over the oldest token its filter keeps,
         with ``net_params`` the parameters a clause may name. A ``DrainEdge`` takes
-        every token as a list and a ``SurveyEdge`` hands over a deep copy of every
-        token, either list possibly empty.
+        every token as a list, a ``SurveyEdge`` hands over a deep copy of every
+        token, and a ``ReadAllEdge`` a new list of every token, live, each list
+        possibly empty. A ``ReadEdge`` hands over the front token, live.
+
+        A transition with bound edges has its pairing found once, before any token
+        moves (``KeyedEdges.pairing``), and each source and bound edge acts on the
+        token it chose, wherever it stands: a take pops it, a snapshot copies it,
+        a mutate or a read hands it over live. Every other token keeps its place
+        and its id.
 
         A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
+
+        With ``firing_ids``, every net carried by a token handed to the body live (by
+        every edge kind but a snapshot or a survey, which hand over copies) is held
+        for the body (``ClosedNets.lend``, since 2026-11-23), once every edge has its
+        token; the firing releases the holds when the body returns.
         """
         # Transitions with no incoming edges (generators) have no tokens to extract
         incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
             transition.name, tuple()
         )
+        params = net_params if net_params is not None else {}
+        # The token each source and bound edge gets, by argument, as the places stand now.
+        chosen = KeyedEdges.pairing(
+            transition, transition_names_to_incoming_edges, place_names_to_nodes, transition_names_to_read_edges,
+            params,
+        )
+        if chosen is None:
+            raise ValueError(f"no token of a source of {transition.name!r} has a match in every edge bound to it")
         input_edge_names_to_tokens: dict[ArgumentName, any] = dict()
         input_places = [] # if place_history_length >= 1 else None
+        lent: list = []  # the tokens the body is handed live, whose nets it holds
         for edge in incoming_edges:
             place = place_names_to_nodes[edge.place_node_name]
             place_copy = place.copy_sans_tokens()
             input_places.append(place_copy)
             argument_type = get_type_hints(transition.function).get(edge.argument)
             place_type = place.type
-            if isinstance(edge, TakeWhereEdge):
-                # A keyed take: the oldest token the filter keeps, wherever it stands.
-                index = KeyedEdges.first_kept(edge, place, net_params if net_params is not None else {})
+            if edge.argument in chosen or isinstance(edge, TakeWhereEdge):
+                # A source or a bound edge takes the token the pairing chose, and any other keyed
+                # take the oldest token its filter keeps, wherever it stands.
+                index = chosen.get(edge.argument)
+                if index is None:
+                    index = KeyedEdges.first_kept(edge, place, params)
                 if index is None:
                     raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
                 token = place.tokens.pop(index)
@@ -2361,6 +3214,7 @@ class ExecutableGraphOperations:
                 if allow_token_copying and token_history_length >= 1:
                     place_copy.tokens.append(deepcopy(token))
                 input_edge_names_to_tokens[edge.argument] = token
+                lent.append(token)
                 if firing_ids is not None:
                     firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
                 continue
@@ -2377,6 +3231,7 @@ class ExecutableGraphOperations:
                     tokens_copy = deepcopy(tokens)
                     place_copy.tokens.extend(tokens_copy)
                 input_edge_names_to_tokens[edge.argument] = tokens
+                lent.extend(tokens)
             else:  # Pass in a single token (FIFO: consume the oldest token first).
                 token = place.tokens.pop(0)
                 taken_ids = place._token_ids[:1]
@@ -2386,28 +3241,63 @@ class ExecutableGraphOperations:
                     token_copy = deepcopy(token)
                     place_copy.tokens.append(token_copy)
                 input_edge_names_to_tokens[edge.argument] = token
+                lent.append(token)
             if firing_ids is not None:
                 firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
 
-        # Read edges (non-consuming). SnapshotEdge -> deep copy (the place is left untouched);
-        # MutateEdge -> the live tokens (the transition may modify them in place). Presence is
-        # guaranteed by the fireability check, so place.tokens is non-empty here, except for a
-        # SurveyEdge, which hands over a deep copy of every token, possibly none.
+        # Non-consuming edges. SnapshotEdge -> deep copy (the place is left untouched);
+        # MutateEdge -> the live tokens (the transition may modify them in place); a read edge ->
+        # the live tokens to look at, nothing copied and no event. Presence is guaranteed by the
+        # fireability check, so place.tokens is non-empty here, except for a SurveyEdge, which
+        # hands over a deep copy of every token, and a ReadAllEdge, which hands over every token,
+        # each possibly none.
         for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
             place = place_names_to_nodes[edge.place_node_name]
             argument_type = get_type_hints(transition.function).get(edge.argument)
-            if isinstance(edge, MutateWhereEdge):
-                # A keyed mutate: the oldest token the filter keeps, live.
-                index = KeyedEdges.first_kept(edge, place, net_params if net_params is not None else {})
+            if isinstance(edge, ReadEdge):
+                # A read edge: the live tokens, which keep their places and ids. Their ids are
+                # noted for the concurrent runtime, which holds their inner nets still, and are
+                # told by no event.
+                if isinstance(edge, ReadAllEdge):
+                    indices = range(len(place.tokens))
+                    value = list(place.tokens)  # a list of the body's own, of the place's tokens
+                else:
+                    index = chosen.get(edge.argument)
+                    if index is None:
+                        index = KeyedEdges.first_kept(edge, place, params) if isinstance(edge, ReadWhereEdge) else 0
+                    if index is None:
+                        raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
+                    indices = (index,)
+                    value = place.tokens[index]
+                if firing_ids is not None:
+                    firing_ids.read.extend(
+                        (edge.place_node_name, place._token_ids[index]) for index in indices
+                        if index < len(place._token_ids)
+                    )
+                input_edge_names_to_tokens[edge.argument] = value
+                lent.extend(value if isinstance(edge, ReadAllEdge) else (value,))
+                continue
+            if edge.argument in chosen and not isinstance(edge, MutateEdge):
+                # A snapshot source: a deep copy of the token the pairing chose.
+                input_edge_names_to_tokens[edge.argument] = deepcopy(place.tokens[chosen[edge.argument]])
+                continue
+            if edge.argument in chosen or isinstance(edge, MutateWhereEdge):
+                # A mutate source or a bound mutate-where hands over the token the pairing chose,
+                # and any other keyed mutate the oldest token its filter keeps, live.
+                index = chosen.get(edge.argument)
+                if index is None:
+                    index = KeyedEdges.first_kept(edge, place, params)
                 if index is None:
                     raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
                 if firing_ids is not None and index < len(place._token_ids):
                     firing_ids.mutated.append((edge.place_node_name, place._token_ids[index]))
                 input_edge_names_to_tokens[edge.argument] = place.tokens[index]
+                lent.append(place.tokens[index])
                 continue
-            if isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
+            every = isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
                 argument_type, place.type,
-            ):
+            )
+            if every:
                 value = place.tokens  # all tokens, as a list
                 read_ids = list(place._token_ids)
             else:
@@ -2415,10 +3305,14 @@ class ExecutableGraphOperations:
                 read_ids = place._token_ids[:1]
             if firing_ids is not None and isinstance(edge, MutateEdge):
                 firing_ids.mutated.extend((edge.place_node_name, token_id) for token_id in read_ids)
+            if isinstance(edge, MutateEdge):
+                lent.extend(value if every else (value,))
             input_edge_names_to_tokens[edge.argument] = (
                 deepcopy(value) if isinstance(edge, SnapshotEdge) else value
             )
 
+        if firing_ids is not None:
+            ClosedNets.lend(firing_ids, lent)
         return input_edge_names_to_tokens, input_places
 
     def restore_argument_tokens_to_places(
@@ -2438,7 +3332,8 @@ class ExecutableGraphOperations:
         after extraction. Single tokens go back to the front of their place
         (they were consumed FIFO from the front) and whole-list extractions,
         a drain's included (possibly empty), are prepended, so the pre-firing
-        order is restored. This is
+        order is restored. A token a keyed take, a source or a bound edge took
+        from further back goes to the front too. This is
         conservation, not rollback: a body that mutated a token before
         failing leaves it mutated, and external side effects and in-place
         mutation via MutateEdge are not undone — which is why this is opt-in.
@@ -2472,8 +3367,8 @@ class ExecutableGraphOperations:
     ) -> NoReturn:
         """Raise TransitionFailedError for a firing that failed after stage 1.
 
-        The error carries the tokens consumed from input places (read-edge
-        arguments are not consumed, so they are excluded). By default the
+        The error carries the tokens consumed from input places (the arguments of
+        non-consuming edges are not consumed, so they are excluded). By default the
         tokens are NOT put back: the body may have mutated them before
         failing, and silently restoring possibly-corrupt tokens to a place is
         worse than a visible loss. With restore_tokens_on_failure=True they
@@ -2769,6 +3664,7 @@ class ExecutableGraphOperations:
         )
         return updated_places
 
+    @_a_move_of_its_own
     async def fire_one_transition(
         executable_graph: ExecutableGraph,
         place_names_to_nodes: dict[PlaceNodeName, ListPlaceNode],
@@ -2835,6 +3731,14 @@ class ExecutableGraphOperations:
         and that turn moves the ring's cursor to this net when the selector
         chooses, whatever comes of the firing. With ``descend`` off the call is a
         plain step: this net's own transitions only, the cursor untouched.
+
+        Closed nets (``ClosedNets``, since 2026-11-23): the nets the firing hands its
+        body are held until the body returns, and a refusal while they were held,
+        or a private place of a closed one found edited, fails the firing as a
+        raising body does, the error as the ``TransitionFailedError``'s cause. On a
+        net a body holds, the call is the net's own move (a body may step a net it
+        holds), and a ``transition_selector`` of the caller's is refused to that
+        body when the net is under the rule.
         """
         TokenIds.resync(executable_graph)
         NestedNets.drain(executable_graph)
@@ -2921,7 +3825,11 @@ class ExecutableGraphOperations:
                 executor=executor,
                 net_params=executable_graph.params,
             )
+            # The body returned: what the rule on closed nets refused while it held
+            # a net, or found changed there, fails the firing (``ClosedNets``).
+            ClosedNets.settle(firing_ids)
         except Exception as exception:
+            ClosedNets.release(firing_ids)
             # Raises TransitionFailedError carrying the consumed tokens;
             # restores them first when restore_tokens_on_failure is set.
             ExecutableGraphOperations.handle_failed_firing(
@@ -2935,6 +3843,7 @@ class ExecutableGraphOperations:
                 firing_ids=firing_ids,
             )
         finally:
+            ClosedNets.release(firing_ids)
             executable_graph.in_flight = set()
         duration_ms = (time.perf_counter() - started) * 1000.0
         updated_places_dict = ExecutableGraphOperations.deposit_and_record(

@@ -82,7 +82,9 @@ engine did, so user code never blocks the event loop), and a thread is not
 bound by the event loop's await points. A body handed a token through a mutate
 edge, or a whole place's live list through a ``list[...]`` mutate edge, can
 change it while a read is iterating it. The marking mid-firing is also
-inconsistent by definition (inputs taken, outputs not yet placed).
+inconsistent by definition (inputs taken, outputs not yet placed). A token handed
+to a body through a read edge (since 2026-11-23) is the body's to look at and not
+to change, so it is read live like any other token the body does not hold.
 
 So every launch writes ``launched`` and then captures a ``_Snapshot`` of the
 firing net's marking as of that ``launched``'s ``marking_version``: per place,
@@ -129,6 +131,7 @@ from pydantic import TypeAdapter
 from petritype.core import events as core_events
 from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
+    ClosedNetError,
     DrainEdge,
     ExecutableGraph,
     ExecutableGraphCheck,
@@ -154,7 +157,7 @@ from petritype.runner.translate import (
     JSON_SCALARS, Controls, Filters, Paths, Places, Serializable, StrictJson, Tokens, Topologies, TypeNames,
 )
 from petritype.runtime import (
-    ControlSpec, Disable, Enable, Extend, Fire, RunContext, Runner, SetNetParam, SetParam,
+    ControlSpec, Disable, Enable, Extend, Fire, RunContext, Runner, SetNetParam, SetParam, by_control,
 )
 
 
@@ -381,7 +384,8 @@ class _Handover:
     ``(place, id)`` pairs its argument edges take, in the order taken; ``taken``,
     per place, how many tokens leave from the front; ``mutated``, per place, the
     indices (in the place as it stands) of the tokens handed to the body through
-    mutate edges. Snapshot edges hand over deep copies and appear in none.
+    mutate edges. Snapshot edges hand over deep copies, and read edges the live
+    tokens to look at, which the body leaves as they are: both appear in none.
     Places are keyed as the firing net names them, a port by its ``Port`` pair."""
 
     consumed: list[tuple[PlaceKey, int]]
@@ -643,14 +647,12 @@ class Owner:
             marking_version=outer.marking_version, running=False,
         ).line())
 
-    def _new_net(
-        self, graph: ExecutableGraph, marking_version: int, nested_id: Optional[int] = None, subnet: bool = False,
-    ) -> _Net:
-        """What the protocol keeps about a net, outer or inner; ``subnet`` for the
-        subnet of a subnet place, whose topology shows its ports. Every synchronous
+    def _new_net(self, graph: ExecutableGraph, marking_version: int, nested_id: Optional[int] = None) -> _Net:
+        """What the protocol keeps about a net, outer or inner, whose topology
+        shows its ports whichever net it is (since 2026-11-23). Every synchronous
         body is moved to a thread here, so user code never blocks the loop the
         owner is driven from."""
-        topology = Topologies.of(graph, subnet=subnet)
+        topology = Topologies.of(graph)
         for transition in graph.transitions:
             if not inspect.iscoroutinefunction(transition.function):
                 transition.execution = "thread"
@@ -688,7 +690,7 @@ class Owner:
                 found = NestedNets.find(loaded.outer.graph, graph.net_id)
                 path = Paths.of_steps(found[0]) if found is not None else ()
             subnet = bool(path) and path[-1].token is None
-            net = self._new_net(graph, 0, nested_id=graph.net_id, subnet=subnet)
+            net = self._new_net(graph, 0, nested_id=graph.net_id)
             loaded.inner[graph.net_id] = net
             if subnet:
                 net.parent = self._net_for(self._graph_at(path[:-1]), path[:-1])
@@ -1215,18 +1217,24 @@ class Owner:
         rules: argument edges in order, each taking the oldest remaining token of
         its place, or every remaining one for a ``list[...]`` argument or a drain
         (possibly none); then the mutate edges, which take nothing and hand over the
-        oldest remaining token (or all of them) where they are. Places are keyed
-        as the edges name them, so a port by its ``Port`` pair."""
+        oldest remaining token (or all of them) where they are. Read edges take
+        nothing and change nothing, so they are in none of it. A source and a
+        bound edge (``KeyedEdges.pairing``) take or hand over the token the pairing
+        chooses, wherever it stands, as stage 1 does. Places are keyed as the
+        edges name them, so a port by its ``Port`` pair."""
         consumed: list[tuple[PlaceKey, int]] = []
         taken: dict[PlaceKey, int] = {}
         keyed_taken: dict[PlaceKey, list[int]] = {}  # per place, the indices a keyed take removes
         params = net.graph.params
+        chosen = KeyedEdges.pairing(transition, net.incoming, net.place_nodes, net.read, params) or {}
         for edge in net.incoming.get(transition.name, ()):
             key = edge.place_node_name
             place = net.place_nodes[key]
             ids = place.token_ids
-            if isinstance(edge, TakeWhereEdge):
-                index = KeyedEdges.first_kept(edge, place, params)
+            if edge.argument in chosen or isinstance(edge, TakeWhereEdge):
+                index = chosen.get(edge.argument)
+                if index is None:
+                    index = KeyedEdges.first_kept(edge, place, params)
                 if index is not None:
                     consumed.append((key, ids[index]))
                     keyed_taken.setdefault(key, []).append(index)
@@ -1242,8 +1250,10 @@ class Owner:
                 continue
             key = edge.place_node_name
             place = net.place_nodes[key]
-            if isinstance(edge, MutateWhereEdge):
-                index = KeyedEdges.first_kept(edge, place, params)
+            if edge.argument in chosen or isinstance(edge, MutateWhereEdge):
+                index = chosen.get(edge.argument)
+                if index is None:
+                    index = KeyedEdges.first_kept(edge, place, params)
                 if index is not None:
                     mutated.setdefault(key, set()).add(index)
                 continue
@@ -1693,7 +1703,10 @@ class Owner:
     def _inject(self, request_id: str, params: dict, now: datetime, out: Outgoing) -> None:
         """``inject {place, port?, token}``: a port by its pair on the net around
         its subnet, which tells the change, or by its own name on the subnet,
-        which does (§12.7); the port's subnet mints the id either way."""
+        which does (§12.7); the port's subnet mints the id either way. The runner
+        is outside every net, so a closed net takes the token only at one of its
+        ports and refuses any other place, a port pair of one of its subnet places
+        included, with ``closed_net`` (since 2026-11-23, §12.7); nothing is added."""
         place = _string(params, "place")
         port = _optional_string(params, "port")
         if "token" not in params:
@@ -1712,6 +1725,8 @@ class Owner:
             raise ProtocolError(ErrorCode.INVALID_TOKEN, f"not a {net.type_names[key]}: {error}") from error
         try:
             self._apply(net, Extend(place=key, tokens=[token]))
+        except ClosedNetError as error:  # the rule on closed nets (``ClosedNets``)
+            raise ProtocolError(ErrorCode.CLOSED_NET, str(error)) from error
         except ValueError as error:  # the strict context's own type check
             raise ProtocolError(ErrorCode.INVALID_TOKEN, str(error)) from error
         events = self._flush(now, out)
@@ -1768,7 +1783,8 @@ class Owner:
             # A plain firing of the outer net, not a deep step: no ring's cursor moves.
             self._launch(outer, transition, None, now, out, press_id=request_id)
             return
-        self._apply(outer, command)
+        # A control is the net's own, so what it gives is applied as from inside the net.
+        self._apply(outer, by_control(command))
         self._flush(now, out)
         # The nets a token it added carried are known from here, as for an ``inject``.
         self._know_new()
@@ -2241,7 +2257,9 @@ def _subnets_reached(net: _Net, transition: str) -> list[str]:
     on, of any kind, in the order its edges name them."""
     places: list[str] = []
     graph = net.graph
-    for edge in (*graph.argument_edges, *graph.return_edges, *graph.snapshot_edges, *graph.mutate_edges):
+    for edge in (
+        *graph.argument_edges, *graph.return_edges, *graph.snapshot_edges, *graph.mutate_edges, *graph.read_edges,
+    ):
         key = edge.place_node_name
         if edge.transition_node_name == transition and isinstance(key, Port) and key.place not in places:
             places.append(key.place)

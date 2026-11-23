@@ -55,7 +55,31 @@ and takes `places` in place of a filter (§12.7); that a filter leaves what
 `get_log` returns as it is (§8, §13.4); and that both runners send the
 notifications of a net a hidden token carries whole (§13.4). The same day
 it took to calling the edges that leave their token in its place
-non-consuming edges, where it had called them read edges (§5.1). Both runners
+non-consuming edges, where it had called them read edges (§5.1). Later that
+day a keyed edge's filter gained a third kind of clause, which compares a
+key of the edge's token with a key of the token the same firing gets from
+another input, shown in a topology as declared and refused in a client's
+filter, with a conformance net and a transcript for it (§5.1, §10, §11,
+§13.2, §13.5); the version stays 2 (§10). Later still that day it gained
+three input edge kinds, the read edges `read`, `read_where` and
+`read_all`, which hand a body tokens to look at without taking or copying
+them, with a conformance net and a transcript for them (§5.1, §6.3, §7.1,
+§10, §11, §12.3, §13.5), and came to say what a reader does with a clause of
+a shape it does not know (§5.1); the version stays 2 (§10). At the end of
+that day every net's topology came to show `port` on its port places, a net
+a token carries and the loaded net among them, where only a subnet's had;
+an input edge on a place whose tokens carry nets gained `reaches?`, the
+ports its body reaches in those nets, a declaration that changes nothing
+about how the net runs; and the text came to say what a reader does with a
+field it does not know, with a conformance net and a transcript for them
+(§5.1, §10, §11, §12.2, §12.7); the version stays 2 (§10). Later still that
+day a net that marks a place as a port became closed to everyone outside it,
+unless its definition declares it open: from outside a closed net a token is
+put, taken or replaced only at its ports, an `inject` at any other place
+answers the new error code `closed_net`, and the topology of a net declared
+open carries the new optional field `open`, with a conformance net and a
+transcript for them (§3, §5.1, §6, §6.4, §10, §11, §12.7); the version stays
+2 (§10). Both runners
 implement it, the Rust one (`petritype-runner`, in `../petritype-rs`) and
 the Python one (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
@@ -166,8 +190,16 @@ without parsing `message`:
 | `unknown_control` | `press` named a control the net does not declare (§6.6) |
 | `not_serializable` | the place has no JSON form, so a token cannot be injected or shown as JSON |
 | `invalid_token` | the JSON did not decode to the place's type |
+| `closed_net` | `inject` named a place of a closed net that is not one of its ports, a port pair of one of its subnet places included (§12.7, since 2026-11-23) |
 | `unsupported` | this runtime cannot do this (for example `set_param` on a net that declares no parameters by name) |
 | `internal` | anything else; `message` says what |
+
+A host that meets a code it does not know treats the response as a failed
+request with that code, keeping the code as written and reading the rest of
+the response, as it treats any error, and may map the code as it maps
+`internal` (stated since 2026-11-23, when `closed_net` came). The Rust
+runner's `protocol` types keep such a code as `ErrorCode::Other` from
+0.3.0; a client built on 0.2.x fails to read the response.
 
 ## 4. Identity over time: generations and versions
 
@@ -243,11 +275,18 @@ once per generation and lays it out.
   own (§12); `stepping?`, present exactly on a place that holds nets (a
   nested place or a subnet place), the rule by which deep stepping fires the
   nets in it, one of `"inner_first"`, `"take_turns"`, `"outer_first"` and
-  `"passive"` (§12.3); `port?`, `true` on a place of a subnet that the net
-  around the subnet can reach (§12.7), in the subnet's own topology; a net
-  that is no subnet (the loaded net, or a net a token carries) has no net
-  around it to reach its places, so its topology shows no `port`, whatever
-  its definition marks; `key_names?`, the names of the keys
+  `"passive"` (§12.3); `port?`, `true` on a place that the net's definition
+  marks as a port (§12.7), which makes the net closed unless it declares
+  itself open (`open?`, below), in the net's own topology, whichever net it is: a
+  subnet, whose ports the net around it reaches by its edges, a net a token
+  carries, whose ports an outer edge may name in `reaches` (below), or the
+  loaded net (since 2026-11-23; until then only a subnet's topology showed
+  `port`, and a net that was no subnet showed none, whatever its definition
+  marked). A place whose tokens carry nets declares no ports of its own: the
+  nets arrive in tokens as the net runs and may differ, so each token's net
+  shows its own ports when it is read by `path` or `nested_id` (§12.3), and
+  an edge's `reaches` is the outer net's statement of what it reaches;
+  `key_names?`, the names of the keys
   the place derives from its tokens, in declaration order, present only when
   the place declares keys (§13.1); `style?`, how a viewer draws the place,
   present only when the net declares one (since 2026-10-16). The one style so
@@ -270,20 +309,81 @@ once per generation and lays it out.
   subnet place, §12.7), `transition`, `direction` (`"in"` place to transition,
   `"out"` transition to place); `kind?` for input edges, one of `"take"`,
   `"take_all"`, `"snapshot"`, `"mutate"`, `"take_where"`, `"mutate_where"`,
-  `"drain"`, `"survey"` (a reader that meets another value draws a plain
-  edge), `take_where` and `mutate_where` carrying `filter` (§13.5); `slot?`
-  for output edges of a transition with more than one output. A `drain` edge
+  `"drain"`, `"survey"`, `"read"`, `"read_where"`, `"read_all"` (a reader
+  that meets another value draws a plain edge), `take_where`,
+  `mutate_where` and `read_where` carrying `filter` (§13.5), whose clauses
+  may compare with the token the same firing gets from another input of the
+  transition (since 2026-11-23, §13.2); `slot?`
+  for output edges of a transition with more than one output; `reaches?`
+  (since 2026-11-23) for an input edge, of any kind, on a place whose tokens
+  carry nets (a nested place, or a port of a subnet place that is nested
+  itself): the names of the ports its body reaches in those tokens' nets, in
+  the order the edge declares them, present only when it names one, such as
+  `{"place": "Field", "transition": "Hand Over", "direction": "in", "kind":
+  "mutate", "reaches": ["Orders In"]}`. `reaches` is a declaration, as a
+  group is: it changes nothing about how the net runs, and neither runner
+  checks, when the net is built or when the edge fires, that a token's net
+  has the ports it names; which places of that net a body may write is the
+  rule on closed nets, whatever `reaches` names (§12.7). A reader may write the names on the edge. An output edge
+  has no `reaches`. A `drain` edge
   takes every token of its place, oldest first, zero or more: unlike the
   kinds before it, it does not hold its transition back while the place is
   empty, and `consumed` may list nothing from it (since 2026-10-14). A
   `survey` edge hands the body a copy of every token of its place, zero or
   more, consuming none, and likewise never holds its transition back (since
-  2026-10-14). Non-consuming edges, the edges that leave their token in its
-  place (`snapshot`, `survey`, `mutate`, `mutate_where`), are listed: they
-  move no tokens but they are part of the net (this text called them read
-  edges until 2026-11-23). The order of `edges[]` is not
+  2026-10-14). The **read edges** hand the body tokens to look at where they
+  lie (since 2026-11-23): a `read` edge the front token of its place, a
+  `read_where` edge the oldest token its filter keeps (§13.5), and a
+  `read_all` edge every token, oldest first, zero or more. Nothing is taken
+  and nothing is copied, no id changes, no notification tells of the tokens
+  read, and `consumed` names none of them, so a token that carries a net
+  keeps its net and that net its nested id. A `read` or `read_where` edge
+  holds its transition back while its place has no such token; a `read_all`
+  edge never does. A place a read edge reads is read by no other input edge
+  of the same transition. A body leaves what it reads as it is: the Rust
+  core lends the tokens read-only, and in Python that is the net author's
+  promise, which the library cannot enforce.
+  Non-consuming edges, the edges that leave their token in its place
+  (`snapshot`, `survey`, `mutate`, `mutate_where`, `read`, `read_where`,
+  `read_all`), are listed: they move no tokens but they are part of the net
+  (this text called the first four read edges until 2026-11-23, when the
+  name passed to the last three). The order of `edges[]` is not
   significant; a reader keys an edge by its endpoints: its place, its port
   if it has one, its transition and its direction.
+- **What a reader does with what it does not know** (since 2026-11-23). A
+  reader that meets an edge whose `kind` it does not know keeps the edge,
+  draws it as a plain edge and reads the rest of the topology. A reader that
+  meets a clause of a shape it does not know in an edge's `filter` keeps the
+  edge and its `kind`, keeps the clause as it came or leaves it out, and
+  reads the rest of the topology. A reader that meets a field it does not
+  know on an edge, a place, a transition, a control or the topology itself
+  (`reaches` is one for an older reader) keeps the object, keeps the field as
+  it came or leaves it out, and reads the rest of the topology. A reader
+  never refuses a topology for a kind, a clause or a field. The Python
+  runner's wire types (`petritype.runner.protocol`) read a topology this way
+  from 0.5.0, keeping a field they do not know as it came,
+  and the Rust runner crate's protocol types from 0.3.0;
+  the types of those earlier versions refuse a whole topology that holds an
+  edge kind they do not know, and the Rust ones a clause they do not know as
+  well. With a field they do not know the two differ: the Python wire types
+  up to and including 0.4.1 refuse a whole topology that holds one,
+  `reaches` included, while the Rust ones have always ignored such a
+  field, so those of 0.2.x read the rest of the topology and drop
+  `reaches`, and from 0.3.0 they keep it (§10).
+- `open?`: `true` when the net's definition declares it open, absent
+  otherwise (since 2026-11-23). A net that marks at least one place as a port
+  (`port?`, above) and does not declare itself open is **closed**: from
+  outside it, a body of the net around it, the host's program or the runner's
+  requests, a token is put, taken or replaced only at its ports (§12.7). A net
+  declared open lets anyone outside write to any of its places, ports or not.
+  So a reader knows a net is closed when its topology shows a `port` and no
+  `open`, and open otherwise. In this version a net that marks no port is
+  open whether or not it says so; a later stage of the rule will close every
+  net that does not declare itself open, and a reader will then know a net is
+  open by `open` alone (§12.7). Each net's own topology carries its own
+  `open`: a net a token carries or a subnet shows its own when it is read by
+  `path` or `nested_id` (§12.3), and the topology of the net around it says
+  nothing of it.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
@@ -415,7 +515,7 @@ that fails counts in none of the four.
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish, and the net fires nothing more on its own; a Rust process answers it once a body it runs inline lands (§6.3) |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
-| `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3) |
+| `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3); `closed_net` at a place of a closed net that is not one of its ports (§6.4) |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
 | `press` | `{control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}` | runs a control the net declares (§6.6); emits the events of whatever it did |
@@ -494,8 +594,10 @@ before it moves to `describe`.
   Rust runner does the same for an outer body it can detach, and runs every
   other body inside the request or tick that fires it, reporting the firing
   in one piece: an outer body it cannot detach (one with a `mutate` or
-  `mutate_where` edge) as its `mutated` lines then one `fired`, and a firing
-  inside an inner net as one `nested` around `fired` (§12.4). Both of these
+  `mutate_where` edge, or, since 2026-11-23, a `read`, `read_where` or
+  `read_all` edge, whose tokens it lends where they lie) as its `mutated`
+  lines, if it has any, then one `fired`, and a firing inside an inner net
+  as one `nested` around `fired` (§12.4). Both of these
   carry the body's real `duration_ms`, which Rust builds before 0.2.0 wrote
   as 0.0; a firing whose body the runner did not run itself, one made by a
   host program's own code or by a body inside the nets of its tokens, is
@@ -521,7 +623,8 @@ before it moves to `describe`.
   net's `path` and `nested_id`. The Python runner names every body it runs,
   and from its version 0.4.1 gives the net of one in an inner net; before,
   it named such a body without its net. The Rust runner names a body it
-  detaches and an outer body with a mutate edge, which it runs inline, and
+  detaches and an outer body with a mutate or a read edge, which it runs
+  inline, and
   from its version 0.2.1 a body in an inner net too, with `path` and
   `nested_id`; earlier Rust builds named no body while an inner one ran.
   So a heartbeat that names a body means the process is busy in that body
@@ -569,6 +672,15 @@ before it moves to `describe`.
   transcripts check it. A port place takes `inject {place, port, token}` on
   the net around its subnet, or `inject {place, token}` addressed to the
   subnet (§12.7).
+- `inject` comes from outside every net (since 2026-11-23, §12.7). Into a
+  closed net, the loaded net or an inner net addressed by `path` or
+  `nested_id`, it lands only at one of the net's ports; at any other place,
+  and at a port pair of one of its subnet places, which is never one of its
+  own ports, it answers `closed_net`, and nothing is added or told. Into an
+  open net, a net that marks no port among them, it lands at any place. A
+  client that does not know `closed_net` treats the answer as a failed
+  request (§3). A control's `press` is the net's own, and what it does
+  lands at any place of its net (§6.6).
 - A parameter value decodes by its declared type: Rust's by the type
   registered for the parameter's wire name, Python's by the annotation of the
   factory parameter of that name, or, for one the factory does not annotate,
@@ -630,6 +742,10 @@ and carries the value, nothing more.
   `set_param`.
 - Controls belong to the outer net: `press` acts on the outer net only, and a
   `path` or `nested_id` is `invalid_params` (§12.3).
+- A control is the net's own, so what a press does is done from inside the
+  net: a control that injects into a place of a closed net that is not one
+  of its ports lands, where an `inject` would answer `closed_net` (§12.7,
+  since 2026-11-23).
 
 ## 7. Notifications
 
@@ -642,7 +758,7 @@ effects arrive as the usual notifications, and its answer carries the
 
 | method | params | when |
 |---|---|---|
-| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece, by a runtime that runs the body where it cannot observe it part-way (the Rust runner, for an outer body with a mutate edge and for a firing inside an inner net, §6.3) |
+| `fired` | `{transition, consumed: [[place, id]], produced: [[place, id, label, color?]], duration_ms}` | a firing reported in one piece, by a runtime that runs the body where it cannot observe it part-way (the Rust runner, for an outer body with a mutate or a read edge and for a firing inside an inner net, §6.3) |
 | `launched` | `{transition, consumed: [[place, id]]}` | a firing reported in two pieces (the Python runner for every firing, the Rust runner for an outer body it detaches, §6.3): inputs taken, body started |
 | `distributed` | `{transition, produced: [[place, id, label, color?]], duration_ms}` | the second piece: body returned, outputs placed |
 | `failed` | `{transition, error, restored, consumed: [[place, id]]}` | a body failed; `restored` says whether the consumed tokens went back (same ids, front of their places) |
@@ -857,6 +973,49 @@ enforces that by its own means (§13.4).
 - Adding an optional field, a notification, a method or an error code does
   not change the version; readers ignore what they do not know. Removing
   anything, renaming anything, or changing what a field means does.
+- A new shape of clause in a keyed edge's `filter` does not change the
+  version either. The input clause of §13.2 (since 2026-11-23) is one: it
+  is shown in a topology as declared, a reader that cannot read a clause
+  still draws its edge as the keyed edge its `kind` names, and a clause of a
+  shape the runner does not take in a client's `query` or `set_filter` was
+  already `invalid_params`, params of the wrong shape (§3).
+- A new edge `kind` does not change the version either: §5.1 has always
+  told a reader to draw a kind it does not know as a plain edge. The read
+  edges of §5.1 (`read`, `read_where`, `read_all`, since 2026-11-23) are
+  three, and a `read_where` edge's `filter` is a filter of §13.2. A reader
+  keeps an edge whose kind or whose clause it does not know and reads the
+  rest of the topology (§5.1). A reader built on types that refuse what they
+  do not know cannot read a topology that uses them: the `protocol` types
+  of petritype-runner 0.2.x (Rust) refuse a whole topology that holds the
+  input clause or a read kind, and the wire types of the Python runner up
+  to 0.4.1 refuse one that holds a read kind. A host that reads topologies
+  with such types moves to Python 0.5.0 or Rust 0.3.0, or reads the edges
+  itself.
+- `reaches` on an input edge (since 2026-11-23, §5.1) is a new optional
+  field, so it does not change the version either, and it changes nothing
+  about how a net runs. `port` on the places of every net, where only a
+  subnet's showed it, does not change the version: the field was already in
+  version 2 and means what it meant, a place the net's definition marks as a
+  port; only the rule that withheld it from a net that is no subnet went. A
+  reader built on types that refuse a field they do not know cannot read a
+  topology that carries `reaches`: the wire types of the Python runner up to
+  and including 0.4.1 refuse it whole. The `protocol` types of
+  petritype-runner (Rust) ignore a field they do not know, so those of 0.2.x
+  read such a topology and drop `reaches`, and those after 0.2.x keep it. A
+  reader that rings the ports of a subnet's topology may ring the ports of
+  any net's topology the same way.
+- Closed nets (since 2026-11-23, §5.1, §6.4, §12.7) do not change the version
+  either: they bring a new optional field, `open` on a topology, and a new
+  error code, `closed_net` (§3), and change what an `inject` may do, not the
+  shape or the meaning of anything already on the wire; `port` means what it
+  meant, a place the net's definition marks as a port. A client whose
+  `inject` a closed net refuses meets a code it may not know, which it
+  treats as a failed request (§3). A reader built on types that refuse a
+  field they do not know cannot read a topology that carries `open`: the
+  wire types of the Python runner up to and including 0.4.1 refuse it whole,
+  as they refuse `reaches`, and the Python ones after that keep it. The
+  `protocol` types of petritype-runner (Rust) 0.2.x ignore it and read the
+  rest of the topology, and those after 0.2.x read it.
 - A host learns the version from `describe` before `load`, and refuses a net
   process whose version it does not speak with a clear message. A host may
   speak several versions, choosing per net process (§9.1).
@@ -945,10 +1104,11 @@ described.
   transcripts (over a demo net with no Python twin) live in
   `../petritype-rs/petritype-runner/tests/protocol/`. The shared set lives
   here under `tests/protocol/` (four files as of 2026-10-03, fifteen as of
-  2026-11-22, each replayed by `tests/test_protocol_transcripts.py` through
-  the runner's state machine; eleven of them, `04`, `05` and `07` to `15`,
-  are also replayed over pipes against `python -m petritype.runner`, the
-  list `OVER_PIPES` there, and `01`, `02`, `03` and `06` in process only).
+  2026-11-22, nineteen as of 2026-11-23, each replayed by
+  `tests/test_protocol_transcripts.py` through the runner's state machine;
+  fifteen of them, `04`, `05` and `07` to `19`, are also replayed over pipes
+  against `python -m petritype.runner`, the list `OVER_PIPES` there, and
+  `01`, `02`, `03` and `06` in process only).
   They run
   over the **conformance net** `tests/protocol_nets/parcel_distribution.py`,
   named `parcel-distribution`, described "Sort, stage and dispatch
@@ -959,8 +1119,8 @@ described.
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
   in full; a runner that carries other nets too replays it with a registry
-  reduced to the net the transcript names. Twelve of the fifteen, `01` and
-  `05` to `15`, send `describe` and pin it in full, so over pipes they match
+  reduced to the net the transcript names. Sixteen of the nineteen, `01`
+  and `05` to `19`, send `describe` and pin it in full, so over pipes they match
   only a binary that serves their one net; the Rust example binary serves
   every conformance net and others besides, and from Rust 0.2.0 serves one
   net alone when started with `--net <name>`, which is how a host replays a
@@ -1448,7 +1608,8 @@ described.
   (above), so each failure stands as its `launched` then its `failed`, the
   step's answer carrying `failed: true`. Every failure in it is a firing of
   the loaded net with no mutate edge, which both runners report in those two
-  pieces; a failure inside an inner net, or of a body with a mutate edge, is
+  pieces; a failure inside an inner net, or of a body with a mutate or a
+  read edge, is
   one `failed` from the Rust runner (§6.3) and two pieces from the Python
   runner, so no shared transcript holds one. - A subnet's port seen from
   outside got its conformance net and transcript on 2026-11-22,
@@ -1607,6 +1768,250 @@ described.
   `fireable` naming it at the end; reads the state, whose progress names it
   in `last_fired` and `fired_counts`; and reads the log, both firings with
   their names and the inner one with its path.
+- Keyed edges that choose their token by another input (§13.2, §13.5) got
+  their conformance net and transcript on 2026-11-23,
+  `16_keyed_by_input.json` over `tests/protocol_nets/couriers.py`: the take
+  and the mutate form of a bound edge, a source token with no match passed
+  over and left where it was, a firing that fails and puts both its tokens
+  back, and a client's `query` and `set_filter` with the clause refused. Its
+  names, places, transitions, keys and seed are fixed here, since the
+  transcript depends on them:
+
+  **`couriers`** ("Orders are loaded onto the courier they name, and a call
+  sends that courier out"), hosted `manual`, with no load parameters and no
+  net parameters. Three token types, each with its object as its JSON form
+  and a label of the runtime's own: `Courier`, `{name, parcels}`, `name` a
+  string and `parcels` an integer; `Order`, `{item, courier}`, both
+  strings; and `Call`, `{courier}`, a string. The net's places, in this
+  order, all serializable: `Couriers` (`Courier`, declaring one key, `name`,
+  the courier's `name`), `Orders` (`Order`, declaring one key, `courier`,
+  the order's `courier`), `Calls` (`Call`, declaring one key, `courier`, the
+  call's `courier`), `Loaded` (`Order`, no keys) and `On Road` (`Courier`,
+  no keys). Its transitions, in this order, each declaring its source edge
+  before its bound edge, so that its `consumed` lists the source first:
+  `Load`, which takes the front of `Orders` (a `take` edge) and hands its
+  body, live, the courier the order names (a `mutate_where` edge on
+  `Couriers` whose filter is the one clause `{"key": "name", "input":
+  {"place": "Orders", "key": "courier"}}`), adds one to that courier's
+  `parcels`, in place, and produces the order unchanged into `Loaded`; and
+  `Dispatch`, which takes the front of `Calls` (a `take` edge) and takes the
+  courier the call names (a `take_where` edge on `Couriers` whose filter is
+  the one clause `{"key": "name", "input": {"place": "Calls", "key":
+  "courier"}}`), fails for a courier whose `parcels` is 0, naming the courier
+  (the Python body raises, the Rust body returns an error), and otherwise
+  produces the courier unchanged into `On Road`; the call produces nothing.
+  A failed firing puts back what it took: the Python library sets that for
+  a whole net (`restore_tokens_on_failure`) and the Rust core for each
+  transition, so the Rust net sets it on both. Seed: `Couriers` holds
+  `{"name": "Ada", "parcels": 0}`, `{"name": "Ben", "parcels": 0}` and
+  `{"name": "Dot", "parcels": 0}`, `Orders` holds `{"item": "Lamp",
+  "courier": "Cleo"}`, `{"item": "Book", "courier": "Ben"}` and `{"item":
+  "Kite", "courier": "Ada"}`, each in that order, and every other place is
+  empty. No transition has a guard or a priority, and the net chooses by the
+  default selector. The transcript reads `describe`, whose one net is
+  `{name: "couriers", description, mode: "manual", params: []}`, and loads
+  the net; reads the state, whose topology shows both clauses on their edges
+  and whose `Load` alone is fireable; steps, `Load` passing over the lamp,
+  whose courier is not there, and loading the book onto Ben, told as Ben's
+  `mutated` then the firing, which consumed the book; steps, `Load` loading
+  the kite onto Ada, after which nothing is fireable; steps, `fired: false`;
+  reads `Orders` with `get_place_tokens`, the lamp still there with the id it
+  had at load; is refused twice, a `query` and then a `set_filter` whose
+  filter is `{"clauses": [{"key": "name", "input": {"place": "Orders",
+  "key": "courier"}}]}`, each `invalid_params`; injects `{"courier": "Ben"}`
+  into `Calls`, which makes `Dispatch` fireable; steps, `Dispatch` taking the
+  call and Ben, from between Ada and Dot, and producing Ben into `On Road`;
+  injects `{"courier": "Dot"}` into `Calls`; steps, `Dispatch` failing with
+  `restored: true`, since Dot has nothing to carry; reads the state, the call
+  back at the front of `Calls` and Dot at the front of `Couriers`, before
+  Ada, each with its id; injects `{"name": "Cleo", "parcels": 0}` into
+  `Couriers`, which makes `Load` fireable beside `Dispatch`; and steps,
+  `Load`, declared first, loading the lamp onto Cleo. `Load` has a mutate
+  edge, so the Rust runner reports each firing of it in one piece and the
+  Python runner in two, and both folds give the same lines (above);
+  `Dispatch` has none, so its failure stands as its `launched` then its
+  `failed` in both.
+- Read edges (§5.1) got their conformance net and transcript on 2026-11-23,
+  `17_read_edges.json` over `tests/protocol_nets/roll_call.py`: the three
+  read kinds on a place of tokens that carry nets, each read where it lies,
+  a `read_where` edge bound to another input (§13.5), and the tokens read
+  keeping their ids, and their nets their nested ids, with no line telling
+  of them. Its names, places, transitions, keys, template and seed are fixed
+  here, since the transcript depends on them:
+
+  **`roll-call`** ("A roll call reads the squads in the barracks without
+  taking them"), hosted `manual`, with no load parameters and no net
+  parameters. A squad is a net that the template `Squad` builds, which
+  takes no parameters and builds a net with one place, `Members`, of
+  strings, serializable, holding no tokens, and no transitions; each squad
+  of the seed is built from the template and then given its members, put
+  into its `Members` in order. A squad's leader is its first member, or
+  `""` for a squad with none, its size is the number of its members, and a
+  roll line writes a squad as `<leader> <size>`, such as `Ada 2`. The net's
+  places, in this order: `Barracks`, a place of nets (nested, serializable
+  through the template, with the default stepping rule, `inner_first`),
+  whose tokens are squads, each holding one inner net, named with the empty
+  string (§12.1), declaring one key, `leader`, the squad's leader; `Calls`
+  and `Checks`, of strings, serializable; `Inspections`, of `Inspection`,
+  `{leader}`, a string, with its object as its JSON form, serializable,
+  declaring one key, `leader`, the inspection's `leader`; and `Roll`, of
+  strings, serializable. Labels are the runtime's own. Its transitions, in
+  this order, each declaring its `take` edge first and producing one string
+  into `Roll`: `Call the Roll`, which takes the front of `Calls` (a `take`
+  edge) and reads every squad in `Barracks` (a `read_all` edge), and
+  produces the caller, then `": "`, then each squad, oldest first, joined by
+  `", "`, or the caller then `": nobody"` when there is none, such as
+  `"Sarge: Ada 2, Cy 1"`; `Check the Front`, which takes the front of
+  `Checks` (a `take` edge) and reads the front squad (a `read` edge), and
+  produces `"<checker>: <leader> <size>"`, such as `"Corporal: Ada 2"`; and
+  `Inspect`, which takes the front of `Inspections` (a `take` edge) and
+  reads the squad that inspection names (a `read_where` edge on `Barracks`
+  whose filter is the one clause `{"key": "leader", "input": {"place":
+  "Inspections", "key": "leader"}}`), and produces
+  `"Inspected <leader> <size>"`, such as `"Inspected Cy 1"`. No transition
+  has a guard or a priority, no body fails, and the net chooses by the
+  default selector. Seed: `Barracks` holds two squads, the first with the
+  members `"Ada"` and `"Ben"`, the second with `"Cy"`, and every other place
+  is empty. A squad's net has no transitions, so deep stepping fires
+  nothing in it. The transcript reads `describe`, whose one net is
+  `{name: "roll-call", description, mode: "manual", params: []}`, and loads
+  the net; reads the state, whose topology shows the `read_all`, `read` and
+  `read_where` edges, the last with its clause, and whose marking shows each
+  squad with its `keys` and its `nets[]` entry, template `Squad`, its nested
+  id and `count` 2 and 1, and nothing fireable; injects `"Sarge"` into
+  `Calls` and steps, `Call the Roll` consuming the call alone and producing
+  `"Sarge: Ada 2, Cy 1"`, with no line about a squad; injects `"Corporal"`
+  into `Checks` and steps, `Check the Front` producing `"Corporal: Ada 2"`;
+  injects `{"leader": "Cy"}` into `Inspections` and steps, `Inspect`
+  producing `"Inspected Cy 1"`; reads the state, both squads where they
+  were, with the same token ids and the same nested ids, and `Roll` holding
+  the three lines; and queries with the filter `{"places": ["Roll"]}`, whose
+  matches' `json` pins the three lines in order. Every transition has a
+  read edge, so the Rust runner reports each firing in one piece and the
+  Python runner in two, and both folds give the same lines (above).
+- Ports on a net that a token carries, and the ports an edge reaches (§5.1,
+  §12.7), got their conformance net and transcript on 2026-11-23,
+  `18_ports_on_a_token.json` over `tests/protocol_nets/trays.py`: a token
+  whose net marks two places as ports, that net's own topology read by path
+  showing `port` on both, and outer edges that each declare the port their
+  body reaches with `reaches`, a declaration that changes nothing about the
+  firings. Its names, places, transitions, template, guard and seed are
+  fixed here, since the transcript depends on them:
+
+  **`trays`** ("A unit is handed an order through one tray and its shots
+  are collected from another"), hosted `manual`, with no load parameters and
+  no net parameters. A unit is a net that the template `Unit` builds, which
+  takes no parameters and builds a net with places, in this order, `Orders
+  In` and `Shots Out`, both of strings, serializable, both ports and both
+  empty, and one transition, `Fire`, which takes the front of `Orders In` (a
+  `take` edge) and produces `"Shot: <order>"` into `Shots Out`, such as
+  `"Shot: Hold the bridge"`. The net's places, in this order: `Orders`, of
+  strings, serializable; `Field`, a place of nets (nested, serializable
+  through the template, with the default stepping rule, `inner_first`),
+  whose tokens are units, each holding one inner net, named with the empty
+  string (§12.1); and `Reports`, of strings, serializable. Labels are the
+  runtime's own. Its transitions, in this order: `Hand Over`, which takes
+  the front of `Orders` (a `take` edge, declared first) and hands its body,
+  live, the front unit of `Field` (a `mutate` edge whose `reaches` is
+  `["Orders In"]`), puts the order into the unit's `Orders In`, and has no
+  output; and `Collect`, which hands its body the front unit of `Field` (a
+  `mutate` edge whose `reaches` is `["Shots Out"]`), takes every shot out of
+  the unit's `Shots Out`, oldest first, and produces them into `Reports` as
+  a batch, with the guard that the front unit's `Shots Out` holds at least
+  one shot. No transition has a priority, no body fails, and every net
+  chooses by the default selector. Seed: `Field` holds one unit, built from
+  the template and empty, and every other place is empty. The transcript
+  reads `describe`, whose one net is `{name: "trays", description, mode:
+  "manual", params: []}`, and loads the net; reads the state, whose
+  topology shows `reaches` on both `mutate` edges and no ports on `Field`,
+  and whose marking shows the unit with its `nets[]` entry, template `Unit`,
+  its nested id and `count` 0, with nothing fireable; reads the unit by path,
+  `[{"place": "Field", "token": u, "net": ""}]` with `u` the unit's token
+  id, whose topology shows `port: true` on `Orders In` and on `Shots Out`,
+  and its `Fire`; injects `"Hold the bridge"` into `Orders`, which makes
+  `Hand Over` fireable; steps, `Hand Over` putting the order into the
+  unit's `Orders In`, told as the unit's net's `added` in a `nested` line,
+  then the unit's `mutated`, then the firing, which consumed the order and
+  produced nothing, then the net's `fireable`, now empty, and the unit's net's,
+  naming `Fire`; steps, the unit's `Fire`, its net being inner first, in a
+  `nested` line, after which `Collect` is fireable; steps, `Collect` taking
+  the shot out of the unit's `Shots Out`, told as the unit's net's `removed`
+  in a `nested` line, then the unit's `mutated`, then the firing, which
+  consumed nothing and produced the shot into `Reports`; reads the unit by
+  the same path, both its trays empty; and queries with the filter
+  `{"places": ["Reports"]}`, whose one match's `json` pins `"Shot: Hold the
+  bridge"`. `Hand Over` and `Collect` have a mutate edge and `Fire` fires
+  inside a token's net, so the Rust runner reports each firing in one piece
+  and the Python runner in two, the `nested` and `mutated` lines of an outer
+  firing standing between its pieces, and both folds give the same lines
+  (above).
+- Closed nets (§5.1, §6.4, §12.7) got their conformance net and transcript
+  on 2026-11-23, `19_closed_nets.json` over
+  `tests/protocol_nets/post_office.py`: a net a token carries that marks a
+  port, and so is closed, beside the same net declared open; an outer body
+  that writes at the closed net's port and lands, and one that writes to its
+  other place and fails; and an `inject` by path at that port that lands,
+  one at the other place that is refused with `closed_net`, and the same
+  `inject` into the open net, which lands. Its
+  names, places, transitions, templates and seed are fixed here, since the
+  transcript depends on them:
+
+  **`post-office`** ("Letters are delivered to a post's inbox, and a forgery
+  written into its ledger is refused"), hosted `manual`, with no load
+  parameters and no net parameters. A post is a net that the template `Post`
+  or the template `Open Post` builds, each taking no parameters and building
+  a net with places, in this order, `Inbox`, a port, and `Ledger`, not a
+  port, both of strings, serializable and empty, and no transitions. A
+  `Post` marks a port, so it is closed; an `Open Post` is the same net
+  declared open. The net's places, in this order: `Letters` and `Forgeries`,
+  of strings, serializable; and `Posts`, a place of nets (nested,
+  serializable through the templates, with the default stepping rule,
+  `inner_first`), whose tokens are posts, each holding one inner net, named
+  with the empty string (§12.1). Labels are the runtime's own. Its
+  transitions, in this order: `Deliver`, which takes the front of `Letters`
+  (a `take` edge, declared first) and hands its body, live, the front post of
+  `Posts` (a `mutate` edge whose `reaches` is `["Inbox"]`), puts the letter
+  into the post's `Inbox`, and has no output; and `Forge`, which takes the
+  front of `Forgeries` (a `take` edge, declared first) and the front post of
+  `Posts` (a `take` edge), puts the forgery into the post's `Ledger`, and
+  would produce the post into `Posts` had that landed. The net restores
+  nothing on failure (the Python library's `restore_tokens_on_failure` is
+  off, and the Rust core restores nothing for either transition), so a
+  failed firing loses what it took. A refusal in a consuming firing costs
+  what any failure costs: the tokens it took, unless the net restores them,
+  and the Rust core cannot restore a token that carries a net. No transition
+  has a guard or a priority, and
+  every net chooses by the default selector. Seed: `Letters` holds
+  `"Dear Ada"`, `Forgeries` holds `"IOU"`, and `Posts` holds a post built by
+  `Post` and then one built by `Open Post`, both empty. A post has no
+  transitions, so deep stepping fires nothing in it. The transcript reads
+  `describe`, whose one net is `{name: "post-office", description, mode:
+  "manual", params: []}`, and loads the net; reads the state, whose marking
+  shows each post with its `nets[]` entry, template `Post` and then
+  `Open Post`, its nested id and `count` 0, with both transitions fireable;
+  reads the first post by path, `[{"place": "Posts", "token": p, "net": ""}]`
+  with `p` its token id, whose topology shows `port: true` on `Inbox` and no
+  `open`, and the second post likewise, whose topology shows `open: true`;
+  steps, `Deliver` putting the letter into the first post's `Inbox`, told as
+  that post's net's `added` in a `nested` line, then the post's `mutated`,
+  then the firing, which consumed the letter and produced nothing, then
+  `fireable` naming `Forge` alone; injects `"Note"` into the first post's
+  `Inbox` by its path, told as the post's net's `added` in a `nested` line
+  and answered `injected` with the path and the nested id; injects `"Note"`
+  into the first post's `Ledger` by the same path, answered with the error
+  `closed_net` and nothing told; injects `"Note"` into the second post's
+  `Ledger` by its path, which lands, since that post is open; reads the
+  first post by path, its `Inbox` holding the letter and then the note, and
+  its `Ledger` empty; steps, `Forge` taking the forgery and the first post
+  and failing as its body puts the forgery into the post's `Ledger`, told as
+  its `launched` then its `failed` with `restored: false` and no line from
+  the post's net, then `fireable`, now empty, the step's answer carrying
+  `failed: true`; and reads the state, `Letters` and `Forgeries` empty and
+  `Posts` holding the open post alone, its `count` 1. `Deliver` has a
+  mutate edge, so the Rust runner reports its firing in one piece and the
+  Python runner in two, the `nested` and `mutated` lines standing between
+  the pieces, and both folds give the same lines (above); `Forge` has none,
+  so its failure stands as its `launched` then its `failed` in both.
 
 ## 12. Nested nets
 
@@ -1695,6 +2100,12 @@ the list counted from 0.
   ports included, are not counted. A token without nets has no `nets` field. The
   positional `produced` entries and the `added` and `mutated` notifications
   carry no `nets`: a viewer that wants them reads the token.
+- The place that holds such tokens says nothing of the ports their nets
+  offer: the nets arrive in tokens as the net runs, and two tokens of one
+  place may carry different nets. A token's net shows its own ports, `port:
+  true` in its own topology, read by `path` or `nested_id` (§5.1, §12.3,
+  since 2026-11-23), and an input edge on the place may name the ports its
+  body reaches in them as `reaches` (§5.1, §12.7).
 - A subnet place's entry in `marking.places` carries its subnet's
   `{nested_id, path, template?, count}` as `subnet` (§12.7).
 - `describe` stays top level: it lists the nets a process can load, never
@@ -1805,12 +2216,13 @@ the list counted from 0.
 - **Reads during a firing.** What follows is what a runner does while a
   body runs off its request thread: the Python runner for every body, the
   Rust runner for an outer body it detaches. The Rust runner runs an outer
-  body with a mutate edge, and every inner body, inside the request or tick
+  body with a mutate or a read edge, and every inner body, inside the request or tick
   that fires it and answers nothing until the body lands (§6.3), so with a
   Rust process every read during such a body waits for the landing (stated
   since 2026-11-22). While an outer body runs, a read addressed to an
   inner net of a token that firing took, or holds through a mutate edge, is
-  answered after the landing, and so is a read addressed to a subnet one of
+  answered after the landing (a token it reads through a read edge is not
+  held, since the body leaves it as it is), and so is a read addressed to a subnet one of
   whose port places that firing touches; every other inner net is
   unchanged by that body, since an outer body reaches only the tokens it
   holds and an inner body only its own net, and is answered at once. A read
@@ -1971,7 +2383,8 @@ at whatever depth, and the loaded net is the one the process loaded.
   2026-11-21). `stepping` is the place's stepping rule (§12.3), and `group`
   the outer net's group the subnet place is in, when it is in one. In the
   subnet's own topology, which `get_state` addressed to the subnet returns,
-  each port place carries `port: true`. The
+  each port place carries `port: true`, as the port places of every net do
+  in its own topology (§5.1). The
   outer topology lists no other place of the subnet, and an edge of the
   outer net names a port with `port` beside `place`:
 
@@ -2162,6 +2575,81 @@ at whatever depth, and the loaded net is the one the process loaded.
   outer firing that touches one of the subnet's
   port places is in flight, a read addressed to the subnet waits for the
   landing and the subnet takes no turn (§12.3).
+- **Ports on a net a token carries** (since 2026-11-23). A net that a token
+  carries may mark places as ports too, and its own topology shows them
+  (§5.1). No edge of the net around it names one, since the net arrives in a
+  token as the net runs: a body handed the token, by a mutate edge for one,
+  reaches into its net, and the edge may declare which ports the body
+  reaches with `reaches` (§5.1), which a reader may write on the edge.
+  `reaches` is a declaration: neither runner checks that the net has the
+  ports an edge names, when the net is built or when the edge fires, so a
+  name the net does not have goes unnoticed. Which places of the net a body
+  may write is the rule on closed nets, below, whatever `reaches` names.
+- **Closed nets** (since 2026-11-23). A net whose definition marks at least
+  one place as a port, whether it is a subnet, a net a token carries or the
+  loaded net, is **closed** unless its definition declares it open (`open?`,
+  §5.1). **Outside** a net are a body, guard or key function of a transition
+  of the net around it, by any edge; the host's program and its drivers; and
+  the runner's requests. **Inside** it are its own transitions' bodies,
+  guards and keys, the controls it declares (`press`, §6.6), the tokens its
+  definition starts it with, and the runtime's own moves: a firing's inputs
+  and outputs, a failed firing's restore and a deep step's inner firings.
+  From outside a closed net:
+  - **Tokens** are put, taken, removed, replaced or mutated only at its
+    ports. A body that writes to another of its places fails its firing, an
+    ordinary failure told as `failed` with the error (§7.1), which costs what
+    any failure costs: the tokens it took, unless the net restores them (the
+    Rust core cannot restore a token that carries a net), and what the body
+    did before the refusal stays done. A call of the host's program is refused with an
+    error. The runner's `inject`, at the top level or by `path` or
+    `nested_id`, answers `closed_net` and adds nothing (§6.4). The outer
+    net's own edges on a subnet's ports are inside it, and land as before.
+  - **A port pair** names a place of the net around the subnet place, so a
+    write at `{place, port}` is judged by that net's rule first, then by the
+    subnet's at the port. A closed net refuses it from outside, since a port
+    of a subnet place is never one of its own ports; an open one lets it
+    land, the subnet's port allowing it. The net's own bodies' outputs into
+    the port are inside it, and land.
+  - **Knobs and firing by name** (setting a parameter, a transition's switch
+    or keywords, the tie-break, the stepping rule or a selector, and firing a
+    transition by name) stay with the program, its drivers and the runner,
+    on every net. A body of the net around a net that marks a port is
+    refused them while it holds the net, whether the net is closed or
+    declared open: `open` opens the places, not the knobs. A net that marks
+    no port keeps today's behaviour for them, so a body still sets its
+    parameters, as `Depart` and `Arrive` of the conformance net `transit`
+    set their cabin's `stopped` (§11).
+  - **Reading and stepping** are allowed for everyone, a body included: a
+    body may step a net it holds, whose own transitions are inside it.
+  - **Whole-state acts**, loading or importing a marking, restoring,
+    forking, resetting and saving, stay allowed for the program and for the
+    runner's `load` and `reset`: they replace the state as a whole and are
+    how a save is loaded.
+  - A body that builds a new net and puts it in place of a token's net has
+    made a new net, and the tokens that net's definition starts it with are
+    inside it.
+
+  An **open** net lets anyone outside write to any of its places, ports or
+  not. `open` is the net's own: it does not open the nets inside it, each of
+  which keeps its own rule, a net two levels down included, however it is
+  reached. Each runtime enforces the rule in its library. The Rust core
+  checks it in every method of a net that writes a token and marks each net
+  a firing lends its body. The Python library checks it in its own
+  functions, its runtime's commands and the runner, and compares, when a
+  body returns, the places of each closed net the body held with what they
+  held when it was handed the net, so a body that edits a place's list
+  directly fails as well. A Python program that edits a place's list, a
+  net's parameters or its switches directly is not caught, and neither is a
+  change made inside a token object where it lies.
+
+  **Stage two**, not yet built, will close every net that does not declare
+  itself open, a net that marks no port included. A net whose places a body
+  or the program writes from outside then marks them as ports, starts with
+  its tokens in its definition, or declares itself open. A body that sets
+  the parameters of a net that marks no port, as `transit`'s do, will be
+  refused, since every net will then be under the rule and `open` opens the
+  places, not the knobs: such a net gives that setting to a transition of
+  its own, or leaves it to the program.
 
 ## 13. Keys, queries and filters
 
@@ -2187,10 +2675,21 @@ side of `TOKEN_QUERYING_AND_FILTERING.md` (R3); both runners implement it.
 ### 13.2 Filters
 
 A filter is `{clauses?: [clause], places?: [place], prefix?: string}`; a
-clause is `{key, values: [value]}` or `{key, param}`. A `places` entry is a
-place name, or `{place, port}` for a port place of one of the net's subnet
-places, which is filtered by its own name (§12.7); other keys of that object
-are ignored (§2), and an entry of any other shape is `invalid_params`.
+clause is `{key, values: [value]}` or `{key, param}`, or, in a keyed edge's
+filter only, `{key, input: {place, port?, key}}` (since 2026-11-23). A
+`places` entry is a place name, or `{place, port}` for a port place of one
+of the net's subnet places, which is filtered by its own name (§12.7); other
+keys of that object are ignored (§2), and an entry of any other shape is
+`invalid_params`.
+
+An **input clause**, `{key, input: {place, port?, key}}`, compares the
+token's `key` with the key `input.key` of the token the same firing gets
+from the place `input.place` (with `input.port` for a port place, named as
+an edge names one, §12.7). It has a meaning only inside a firing, so it
+appears only in the `filter` of a `take_where` or `mutate_where` edge in a
+topology, shown as declared, and a client's `query` or `set_filter` whose
+filter holds one is `invalid_params`. Which token it lets a firing take is
+§13.5's.
 
 - A token matches a filter when it matches every clause (AND across
   clauses) and lies in a place `places` names, if given, whose name begins
@@ -2199,7 +2698,8 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
   value: `1` is not `"1"` and not `true`. A token in a place that does not
   declare the clause's key matches no such clause. A `{key, param}` clause
   accepts one value, the current value of the named net parameter (keyed
-  edges, §13.5).
+  edges, §13.5). An input clause accepts, inside a firing, one value, the
+  source token's `input.key`, compared by JSON type and value as above.
 - A filter with no clauses and no restriction matches every token. A key no
   place declares matches nothing and is not an error; a place in `places`
   that does not exist is `unknown_place`.
@@ -2290,12 +2790,60 @@ filter:
 
 ### 13.5 Keyed edges
 
-An input edge may take, or hand over for mutation, the oldest token
-*matching a filter* rather than the front token. A transition with such an
-edge is fireable when the place holds a matching token (and its guard
-passes); its firing takes (or mutates) the oldest matching token and leaves
-every other token where it is, with its id, so no `removed` or `added` is
-emitted for them. On the wire such an edge is `kind: "take_where"` or
-`"mutate_where"` and carries `filter`, the filter of §13.2 as declared (a
-`{key, param}` clause is shown as declared, not evaluated).
-`launched.consumed` names the token taken.
+An input edge may take, or hand over for mutation or to look at, the
+oldest token *matching a filter* rather than the front token. A transition
+with such an edge is fireable when the place holds a matching token (and
+its guard passes); its firing takes (or mutates, or reads) the oldest
+matching token and leaves every other token where it is, with its id, so
+no `removed` or `added` is emitted for them. On the wire such an edge is
+`kind: "take_where"`, `"mutate_where"` or, since 2026-11-23, `"read_where"`,
+and carries `filter`, the filter of §13.2 as declared (a `{key, param}`
+clause is shown as declared, not evaluated). `launched.consumed` names the
+token taken; a `read_where` edge takes none, and no notification tells of
+the token it reads (§5.1).
+
+A keyed edge whose filter holds input clauses (§13.2) chooses its token by
+another input of its transition (since 2026-11-23): it is a **bound edge**,
+and the input its clauses name is its **source**. A runtime refuses, when
+the net is built, a bound edge:
+
+- whose input clauses name more than one place, or a place its transition
+  does not read;
+- whose source's edge gives the body every token of its place rather than
+  one (a `take_all`, `drain`, `survey` or `read_all` edge, and in Python a
+  snapshot or mutate edge whose argument is annotated `list[T]`), so that a
+  source is a `take`, `take_where`, `snapshot`, `mutate`, `mutate_where`,
+  `read` or `read_where` edge that gives one token (the read kinds since
+  2026-11-23);
+- whose source's edge is bound itself, so that there are no chains and no
+  cycles (an edge that names its own place is its own source);
+- that names a key its own place does not declare, or an input key the
+  source's place does not declare;
+- whose place, or whose source, its transition reads through a second edge
+  (the Rust core refuses any place a transition reads twice, and both
+  runtimes any place a read edge reads, §5.1).
+
+Several edges may be bound to one source, and one filter may hold several
+input clauses naming the same source, beside constant and parameter
+clauses.
+
+**Which pair fires**: for each source, the oldest source token that has a
+match, with the oldest match for it. A source's candidates are its place's
+tokens in queue order, for a `take_where` or `mutate_where` source only
+those its own filter keeps. A candidate has a match in an edge bound to it
+when the bound place holds a token that the bound edge's whole filter keeps,
+each input clause reading the candidate, and its match is the oldest such
+token. The first candidate with a match in every edge bound to it fires
+with those matches; a candidate with none waits where it is and does not
+hold back the candidates behind it, and the sources of one transition
+choose independently. The transition is fireable when every source has
+such a pairing, its other edges hold as for any edge, and its guard passes.
+Its firing takes, copies or hands over exactly the chosen tokens, each from
+where it stands, and leaves every other token where it is, with its id;
+`launched.consumed` names the tokens taken in the order of the
+transition's input edges, a token a bound `mutate_where` edge or a
+`mutate` source hands over is told as `mutated`, as for any mutate edge,
+and a token a bound `read_where` edge or a `read` or `read_where` source
+reads is told by nothing (§5.1). A firing that fails and puts back what it took (`restored: true`,
+§7.1) puts every token it took back at the front of its place, with its id,
+the source's and the bound edge's alike.

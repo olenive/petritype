@@ -17,6 +17,12 @@ net exposes for that (``construct_graph(..., params={...})``, read as
 ``graph.params``). The program reads a subnet with ``graph.subnet(name)`` and
 steps or changes it inside ``NestedNets.subnet_scope``.
 
+A net that marks a port is closed unless it declares itself open
+(``construct_graph(..., open=True)``, since 2026-11-23): from outside it, tokens
+are put, taken and replaced only at its ports (``ClosedNetError`` otherwise), and
+a body of the net around it may not set its knobs or fire it by name
+(``HeldByBodyError``). ``ClosedNets`` says who is outside and what stays allowed.
+
 Everything here lives in ``petritype.core.executable_graph_components`` and
 ``petritype.core.events`` (the engine needs it); this module is the short
 spelling.
@@ -24,10 +30,11 @@ spelling.
 
 from petritype.core.events import InnerFiring, Nested, PathStep, Port
 from petritype.core.executable_graph_components import (
-    NESTED_NETS_METHOD, NestedNets, NetParams, Stepping, SubnetHeldError, SubnetPlaceNode,
+    NESTED_NETS_METHOD, ClosedNetError, ClosedNets, HeldByBodyError, NestedNets, NetParams, Stepping,
+    SubnetHeldError, SubnetPlaceNode,
 )
 
 __all__ = [
-    "NESTED_NETS_METHOD", "InnerFiring", "Nested", "NestedNets", "NetParams", "PathStep", "Port", "Stepping",
-    "SubnetHeldError", "SubnetPlaceNode",
+    "NESTED_NETS_METHOD", "ClosedNetError", "ClosedNets", "HeldByBodyError", "InnerFiring", "Nested", "NestedNets",
+    "NetParams", "PathStep", "Port", "Stepping", "SubnetHeldError", "SubnetPlaceNode",
 ]

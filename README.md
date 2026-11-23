@@ -134,7 +134,7 @@ A selector is just a callable over the fireable transitions, so round-robin, bot
 > Needs the `viz` extra: `pip install 'petritype[viz]'`, plus the Graphviz `dot`
 > binary on your PATH (`brew install graphviz` / `apt install graphviz`).
 
-Built-in Graphviz rendering shows the graph structure, types, and current token state — including read arcs (dashed) and, in concurrent runs, in-flight transitions highlighted while their bodies run. The example notebooks (marimo) step through and animate execution live.
+Built-in Graphviz rendering shows the graph structure, types, and current token state — including the non-consuming edges (dashed, dotted, or with dot ends) and, in concurrent runs, in-flight transitions highlighted while their bodies run. The example notebooks (marimo) step through and animate execution live.
 
 ```python
 from petritype.plotting.rustworkx_graph import RustworkxGraph
@@ -212,14 +212,14 @@ SurveyEdge('Promotions', 'Price Order', 'promotions')  # prices an order whether
 DrainEdge('Waiting', 'Go', 'cars')                     # every car waiting goes past the light at once
 ```
 
-A transition whose only argument edge is a drain consumes nothing on an empty place, so `assert_no_source_transitions` counts it as a source. The traffic light's `Go` is one: its guard, green and someone waiting, is what keeps it from firing on an empty queue. The worked examples are `examples/edges_on_empty_places/shop.py` for the survey and `examples/edges_on_empty_places/traffic_light.py` for the drain, beside a plain read; the renderer draws both edges with a hollow arrowhead.
+A third edge, `ReadAllEdge` (below), hands over every token as the survey does, without copying any. A transition whose only argument edge is a drain consumes nothing on an empty place, so `assert_no_source_transitions` counts it as a source. The traffic light's `Go` is one: its guard, green and someone waiting, is what keeps it from firing on an empty queue. The worked examples are `examples/edges_on_empty_places/shop.py` for the survey and `examples/edges_on_empty_places/traffic_light.py` for the drain, beside a plain snapshot; the renderer draws both edges with a hollow arrowhead.
 
-### Read arcs — non-consuming reads
+### Non-consuming edges
 
-A transition can *read* a place without consuming its tokens — useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Both require a token to be present for the transition to be fireable, but firing never consumes it:
+A transition can be handed a place's tokens without consuming them, through a **non-consuming edge**, one that leaves its token in its place: useful for parameters, toggles, or guard state, kept as visible, pokable nodes. Each of these requires a token to be present for the transition to be fireable, but firing never consumes it:
 
-- **`SnapshotEdge`** — the transition receives a deep-copy; the place is untouched.
-- **`MutateEdge`** — the transition receives the live tokens and may modify them in place.
+- **`SnapshotEdge`**: the transition receives a deep copy; the place is untouched.
+- **`MutateEdge`**: the transition receives the live tokens and may modify them in place.
 
 ```python
 from petritype.core.executable_graph_components import SnapshotEdge, MutateEdge
@@ -228,7 +228,25 @@ SnapshotEdge('Multiplier', 'Scale', 'factor')   # Scale reads Multiplier, never 
 MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in place
 ```
 
-Read arcs render dashed, distinct from the solid consuming / producing arrows.
+Since 2026-11-23 three **read edges** hand the body tokens to look at, live, without taking or copying them: nothing moves, no id changes, and no event tells of them.
+
+- **`ReadEdge`**: the front token; the transition waits while the place is empty.
+- **`ReadWhereEdge`**: the oldest token a filter keeps (`where=Filter(...)`, as for the keyed edges below); the transition waits while there is none.
+- **`ReadAllEdge`**: every token, oldest first, as a list, possibly empty, so it never holds the transition back; its argument is annotated `list[T]`.
+
+```python
+from petritype.core.executable_graph_components import ReadAllEdge, ReadEdge
+from petritype.core.keys import Clause, Filter, ReadWhereEdge
+
+ReadAllEdge("Barracks", "Call the Roll", "squads")      # every squad, none taken
+ReadEdge("Barracks", "Check the Front", "squad")         # the front squad
+ReadWhereEdge("Barracks", "Inspect", "squad",            # the squad the inspection names
+              where=Filter((Clause("leader", input="Inspections", input_key="leader"),)))
+```
+
+The body gets the live token, so leaving it unchanged is the author's promise, which Python cannot enforce: a body that changes what it reads changes the token in its place, and nothing tells of it. A mutate edge is the edge for changing a token. A read edge is the way to look at a token that carries a net: a snapshot copies the net under a new `net_id`, where a read edge hands over the net itself, which keeps its id. A place a read edge reads is read by no other input edge of the same transition, which the build checks. `tests/protocol_nets/roll_call.py` is a small net that uses all three on a place of squads that are nets.
+
+The renderer draws a snapshot as a dashed arrow, a mutate edge as a thicker line with dot ends, and a read edge as a dotted arrow, distinct from the solid consuming / producing arrows: a survey and a read-all have a hollow arrowhead, a read-all is labelled `*`, and a read-where carries its filter.
 
 ### Nets as tokens
 
@@ -251,6 +269,15 @@ MutateEdge("Depot", "Board Depot", "vehicle")
 ```
 
 Inner nets never touch the outer net. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
+
+A token's net may mark places as **ports**, `ListPlaceNode("Orders In", str, port=True)`, as a [subnet](#subnet-places) does, to say where the net around it may reach in: a net that marks a port is [closed](#closed-nets) to writes from outside at its other places. Since 2026-11-23 an input edge on the place of such tokens may name the ports its body reaches, given by keyword on every input edge kind:
+
+```python
+MutateEdge("Field", "Hand Over", "unit", reaches=("Orders In",))   # hands the unit an order
+MutateEdge("Field", "Collect", "unit", reaches=("Shots Out",))     # collects its shots
+```
+
+`reaches` is a declaration, as a group is: it changes nothing about firing, and nothing checks that the net has the ports named; which places of the net the body may write is the rule on [closed nets](#closed-nets). The build refuses it on a place that holds no nets and refuses an empty name. The renderer writes `reaches Orders In` as the edge label's last line, and the [protocol runner](#net-protocol--run-a-net-as-a-process) shows `port` in the token's net's own topology and `reaches` on the edge. `tests/protocol_nets/trays.py` is a small net that uses both.
 
 A renderer marks a token that holds nets with its inner nets' names and token counts (`Vehicle(name='Bus 1', ...) ⊂ cabin: 3`) rather than printing the net; to draw the net inside, render `vehicle.cabin` like any other graph.
 
@@ -277,7 +304,40 @@ ReturnedEdgeFromTransition("Enter", Port("Level 1", "Lobby"))
 ArgumentEdgeToTransition(Port("Level 1", "Exit Hall"), "Climb", "hero")
 ```
 
-A port keeps one list of tokens, in the subnet, which both nets use, and its ids are the subnet's whichever net puts a token there. A change is told once, by the net through which it was made: the outer net's firing names the port by its pair, the subnet's firing names the place by its own name and reaches the outer log as a `Nested` record whose path step names the subnet place alone, `PathStep("Level 1")`. The subnet is one net at its place's position in a deep step, under the place's stepping rule, and while a firing of the outer net with an edge on one of its ports is in flight it takes no turn. `graph.subnet("Level 1")` reads a subnet; `with NestedNets.subnet_scope(graph, "Level 1") as level:` steps or changes it from the program, refused with `SubnetHeldError` while such a firing is in flight. A subnet built through a template is saved, restored and copied with the net around it, its subnet place's entry in the marking being a list of one, the subnet in its saved form; built without one it runs, and the outer net cannot be saved. Subnets nest to any depth, and a port may hold tokens that carry nets. The Graphviz drawing shows a subnet place closed, as one rounded box with a cell per port giving the port's name and count, an edge ending at its port's cell; in the subnet's own drawing a port has a second ring. `examples/subnet_places/levels.py` is the worked example: heroes entering two levels built from one template through one port and leaving through another, which the [protocol runner](#net-protocol--run-a-net-as-a-process) serves as `levels-world`.
+A port keeps one list of tokens, in the subnet, which both nets use, and its ids are the subnet's whichever net puts a token there. A change is told once, by the net through which it was made: the outer net's firing names the port by its pair, the subnet's firing names the place by its own name and reaches the outer log as a `Nested` record whose path step names the subnet place alone, `PathStep("Level 1")`. The subnet is one net at its place's position in a deep step, under the place's stepping rule, and while a firing of the outer net with an edge on one of its ports is in flight it takes no turn. `graph.subnet("Level 1")` reads a subnet; `with NestedNets.subnet_scope(graph, "Level 1") as level:` steps or changes it from the program, refused with `SubnetHeldError` while such a firing is in flight. A subnet built through a template is saved, restored and copied with the net around it, its subnet place's entry in the marking being a list of one, the subnet in its saved form; built without one it runs, and the outer net cannot be saved. Subnets nest to any depth, and a port may hold tokens that carry nets. The Graphviz drawing shows a subnet place closed, as one rounded box with a cell per port giving the port's name and count, an edge ending at its port's cell; in the subnet's own drawing a port has a second ring, as it has in the drawing of any net that marks ports. `examples/subnet_places/levels.py` is the worked example: heroes entering two levels built from one template through one port and leaving through another, which the [protocol runner](#net-protocol--run-a-net-as-a-process) serves as `levels-world`.
+
+### Closed nets
+
+Since 2026-11-23 a net that marks a place as a port is **closed**: from outside it, tokens are put, taken and replaced only at its ports. This can break a program written before, and this section says how to put it right.
+
+**Who is outside.** A body, guard or key function of a transition of the net around it, by any edge; the program and its drivers; and the [protocol runner](#net-protocol--run-a-net-as-a-process)'s requests. Inside are the net's own transitions, the controls it declares, the tokens its definition starts it with, and the engine's own moves (a firing's inputs and outputs, a failed firing's restore, a deep step).
+
+**How to tell a net is closed.** It marks at least one place as a port and does not declare itself open: `graph.is_closed` is true. On the wire its topology shows `port` on a place and no `open` (PROTOCOL.md §5.1). A net that marks no port is open, as before.
+
+**What a refusal is.** A write from outside at a place that is not a port raises `ClosedNetError`: from `NestedNets.put` and `NestedNets.take`, from the runtime's `Extend` and `SetTokens` (raised by a strict `RunContext`, dropped and logged by any other), and as `closed_net` from the runner's `inject`, at the top level and by path. A write at `Port(subnet place, port)` belongs to the net around the subnet: a closed net refuses it, an open one lets it land. In a body the error fails the firing, at the cost of any failure: the tokens it took, unless `restore_tokens_on_failure` puts them back, and what the body did before stays done. The message names the net, the place and the act.
+
+**Three ways to make a refused write land:**
+
+1. Mark the place as a port: `ListPlaceNode("Ledger", str, port=True)`.
+2. Start the net with the token in its definition, as a seed or a template's token: `ListPlaceNode("Ledger", str, ["Opening entry"])`.
+3. Declare the net open: `construct_graph([...], open=True)`, read as `graph.open`. An open net lets anyone outside write to any of its places. It opens that net alone, not the nets inside it.
+
+```python
+post = ExecutableGraphOperations.construct_graph([
+    ListPlaceNode("Inbox", str, port=True),   # written from outside
+    ListPlaceNode("Ledger", str),             # the post's own
+])
+NestedNets.put(post, "Inbox", ["Dear Ada"])   # lands
+NestedNets.put(post, "Ledger", ["IOU"])       # ClosedNetError
+```
+
+**Knobs and firing by name stay with the program and the runner.** Setting a parameter, a transition's switch or keywords, the tie-break, a stepping rule or a selector, and firing a transition by name (`Fire`), stay with the program, its drivers and the runner on every net. A body of the net around a net that marks a port may not use them while it holds the net, closed or declared open alike, since `open` opens the places and not the knobs: `HeldByBodyError` fails its firing. A net that marks no port keeps today's behaviour, so a body still sets its parameters, as the transit example's `Depart` and `Arrive` set their cabin's `stopped`.
+
+**What stays allowed.** Reading, for everyone; stepping, a body included (a body may step a net it holds, and the net's own firings are inside it); the whole-state acts, `import_marking`, `NetJson.load_into` and `restore`, `NestedNets.fork`, saving, and the runner's `load` and `reset`; and a net's own controls, `apply_control` and the runner's `press`, whose commands land at any place.
+
+**What Python cannot catch.** The rule holds through the library's own functions, the runtime's commands and the runner. For a body there is one more check: when it returns, the private places of each closed net it held are compared with what they held when it was handed the net, so a body that edits `place.tokens` directly fails too. A change made inside a token object where it lies goes unseen, and a program that edits a place's list, `graph.params` or `graph.disabled` directly is not caught.
+
+**Stage two.** A later change will close every net that does not declare itself open, a net that marks no port included, by turning one default. A net whose places a body or the program writes from outside will then mark them as ports, start with its tokens in its definition, or declare itself open. A body that sets the parameters of a net that marks no port, as transit's do, will be refused then, `open` opening only the places, so such a net will give the setting to a transition of its own or leave it to the program.
 
 ### Groups
 
@@ -306,7 +366,18 @@ Query.matches(graph, Filter.where(class_="Mammal").in_places("Tundra"))  # AND a
 Query.distinct(graph, "class")                                           # ['Bird', 'Mammal', ...]
 ```
 
-Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. A renderer given a filter (`activation_coloured_attr_functions(graph, filter=...)`) lists only the kept tokens, heads each place with `matching / count` and says how many it hides. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live), instead of taking a whole place out and putting the rest back. `examples/token_view_filtering/wildlife.py` is the worked example.
+Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. A renderer given a filter (`activation_coloured_attr_functions(graph, filter=...)`) lists only the kept tokens, heads each place with `matching / count` and says how many it hides. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live to change, and `ReadWhereEdge` to look at), instead of taking a whole place out and putting the rest back. `examples/token_view_filtering/wildlife.py` is the worked example.
+
+Since 2026-11-23 a keyed edge can also choose its token by another input of the same firing, with a clause that compares one of its keys with a key of the token the transition gets from another place:
+
+```python
+from petritype.core.keys import Clause, Filter, MutateWhereEdge
+
+ArgumentEdgeToTransition("Orders", "Load", "order")
+MutateWhereEdge("Couriers", "Load", "courier", where=Filter((Clause("name", input="Orders", input_key="courier"),)))
+```
+
+`Load` gets an order and, live, the courier whose `name` is the order's `courier` key. Such an edge is a **bound edge** and `Orders` is its **source**: the oldest order that has a courier fires, with the oldest such courier, and an order whose courier is not there waits without holding back the orders behind it. The source gives one token (a take, take-where, snapshot, mutate, mutate-where, read or read-where edge), several edges may be bound to one source, and the build refuses anything else, naming the transition and the places. The clause has a meaning only inside a firing, so a query keeps no token through it. `tests/protocol_nets/couriers.py` is a small net that uses it in both forms. A drawing writes a keyed edge's filter on the edge (`name = Orders.courier`).
 
 ### Decorator for registration
 
@@ -365,7 +436,7 @@ await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefin
 - **Control-map** — bind UI widgets to nodes declaratively with `{name: ControlSpec}`, kept off the net; `petritype.marimo_controls` renders them and feeds their values to the inbox (needs the `marimo` extra: `pip install 'petritype[marimo]'`).
 - **Token ids and events** — every token carries a stable integer id (`place.token_ids`, handed out once and never reused), and with `record_events=True` the graph records `Fired`, `Failed`, `Added`, `Removed`, `Mutated`, `Toggled` and `ParamChanged` for `graph.drain_events()`: what fired, what it consumed and produced, by id, in both execution modes. Off by default, so existing programs see no change.
 
-Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a read-arc scaler). Open the parcel sorter with `uv run --extra examples marimo edit examples/interactive/parcel_sorter.py`, and any other notebook by its path.
+Runnable examples: `examples/execution_modes/` (sequential vs concurrent, animated) and `examples/interactive/` (live parcel sorters, a scaler on non-consuming edges). Open the parcel sorter with `uv run --extra examples marimo edit examples/interactive/parcel_sorter.py`, and any other notebook by its path.
 
 ## Net protocol — run a net as a process
 
@@ -389,8 +460,9 @@ subnet is one more inner net, its path step the subnet place alone
 (`[{"place": "Level 1"}]`); the net around it names a port with `port` beside
 `place` (`{"place": "Level 1", "port": "Lobby"}`), and a change of a port moves
 the versions of both nets that see it (PROTOCOL.md §12.7). Each net's topology
-lists its own [groups](#groups) as `groups`, with `group` on each member
-(PROTOCOL.md §5.1). A
+lists its own [groups](#groups) as `groups`, with `group` on each member, and
+marks its own port places `port: true`, whichever net it is, and an edge carries
+the ports it declares it reaches as `reaches` (PROTOCOL.md §5.1). A
 `print` in a body goes to stderr; stdout belongs to the protocol. No extra is needed: the runner is the standard library plus
 `pydantic`. Conformance is checked by the recorded transcripts under
 `tests/protocol/`, which are written to run against both runtimes.
