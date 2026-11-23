@@ -47,7 +47,12 @@ own, with a failure's `error` masked (§11). Later still that day the
 the inner net a body runs in, and both runners came to write them (Python
 from 0.4.1, Rust from 0.2.1); the text came to say what a host can conclude
 from a heartbeat and how a net is stopped during a body the Rust runner runs
-inline (§3, §6, §6.3, §7.2). Both runners implement it, the
+inline (§3, §6, §6.3, §7.2). On 2026-11-23, with nothing on the wire
+changed, it came to say what a connection's filter is: a view a client
+chooses, to be sent less, which a host cannot use to keep tokens from a
+client (§9.2, §13.4); that `distinct` reads every token by design (§13.3);
+and that both runners send the notifications of a net a hidden token
+carries whole (§13.4). Both runners implement it, the
 Rust one (`petritype-runner`, in `../petritype-rs`) and the Python one
 (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
@@ -789,7 +794,9 @@ unnamed server-sent event whose data is a JSON envelope holding `kind` and
 itself, keeping a filter per client (§13.4), rather than passing it to the
 net process; and an error may carry a `reason` of the relay's own, beyond
 the codes of §3, for what only the relay knows, such as a worker that is not
-ready.
+ready. Whichever answers `set_filter`, a filter is a view each client
+chooses for itself, and a relay that must keep some tokens from a client
+enforces that by its own means (§13.4).
 
 ## 10. Versioning
 
@@ -2206,8 +2213,10 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
 - `distinct` returns the distinct values of `key` over the tokens of the
   net, or of `places`, in order of first appearance in place order then
   token order; a key no place declares gives `[]`. It reads every token,
-  whatever filter the connection has (§13.4), so that a viewer can offer
-  every value to filter by.
+  whatever filter the connection has (§13.4), by design: a viewer offers
+  every value to filter by, those its current filter leaves out included,
+  and a connection's filter is a view the client chooses for itself
+  (§13.4).
 
 ### 13.4 A filter on the connection
 
@@ -2215,13 +2224,19 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
 |---|---|---|
 | `set_filter` | `{filter?, path?, nested_id?}` | `{marking_version}` |
 
-A host serving one net to several clients may need each to see only some
-tokens (one character's view, fog of war). `set_filter` sets, for this
-connection and the net it names, the filter every later read and
-notification of that net is projected through, `distinct` alone excepted
-(§13.3); `set_filter` without
-`filter` clears it. A net process has one connection, so one filter per
-net; a relay (§9) that serves several clients keeps a filter per client and
+A client may want to be sent only some of a net's tokens, such as those of
+one character's view. `set_filter` sets, for this connection and the net it
+names, the filter every later read and notification of that net is
+projected through, `distinct` alone excepted (§13.3); `set_filter` without
+`filter` clears it. A connection's filter is a view the client chooses for
+itself, to be sent less, and not access control: any client may set,
+change or clear its own, and what a filter leaves out can still be learned
+by other requests, such as `distinct` or a `query` given a filter of its
+own. A host that must keep some tokens from some clients enforces that
+itself, in front of the net process, and cannot rely on a filter (since
+2026-11-23; until then this text gave fog of war as a use of a filter). A
+net process has one connection, so one filter per net; a relay (§9) that
+serves several clients keeps a filter per client and
 applies this same projection itself, which tokens carrying `keys` on the
 wire make possible. A port place is projected through its subnet's filter,
 in the reads and notifications of both nets that see it (§12.7). Under a
@@ -2248,7 +2263,12 @@ filter:
   `launched` listed); the notification is sent even when a list comes out
   empty, since it moves the version.
 - `query` without a `filter` uses the connection's; `query` with one uses
-  that alone and leaves the connection's as it was.
+  that alone and leaves the connection's as it was. `distinct` reads every
+  token, as it does with no filter set (§13.3).
+- A filter covers the one net it is set on, and each inner net has its own
+  (§12.3). A filter on the loaded net leaves the `nested` notifications of
+  the nets its hidden tokens carry as they are: both runners send them
+  whole, while a change of a hidden token itself comes as `hidden`.
 - Ids and versions are unchanged by a filter: a token has the same id on
   every connection, and the versions a filtered connection sees are the net's.
 

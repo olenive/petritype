@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `PROTOCOL.md` says what a connection's filter is, with nothing on the wire changed and the protocol still version 2: a view a client chooses for itself, to be sent less, which any client may set, change or clear, so a host that must keep some tokens from some clients enforces that itself, in front of the net process (§9.2, §13.4). `distinct` reads every token whatever the filter by design (§13.3), and both runners send the `nested` notifications of a net that a hidden token carries whole, since each inner net has its own filter (§13.4).
+
 ## 0.4.1, 2026-11-22
 
 The [`v0.4.1` tag](https://github.com/olenive/petritype/tree/v0.4.1). It carries the protocol text as corrected after a host's review and the fifteen shared transcripts, for a host that replays them from a source checkout.
