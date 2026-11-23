@@ -50,11 +50,12 @@ from a heartbeat and how a net is stopped during a body the Rust runner runs
 inline (§3, §6, §6.3, §7.2). On 2026-11-23, with nothing on the wire
 changed, it came to say what a connection's filter is: a view a client
 chooses, to be sent less, which a host cannot use to keep tokens from a
-client (§9.2, §13.4); that `distinct` reads every token by design (§13.3);
-and that both runners send the notifications of a net a hidden token
-carries whole (§13.4). Both runners implement it, the
-Rust one (`petritype-runner`, in `../petritype-rs`) and the Python one
-(`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
+client (§9.2, §13.4); that `distinct` reads every token by design (§13.3)
+and takes `places` in place of a filter (§12.7); that a filter leaves what
+`get_log` returns as it is (§8, §13.4); and that both runners send the
+notifications of a net a hidden token carries whole (§13.4). Both runners
+implement it, the Rust one (`petritype-runner`, in `../petritype-rs`) and
+the Python one (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
 either as a net process since 2026-10-04. This file is the single source of
 truth for the protocol; the other repositories link here and do not
@@ -702,6 +703,9 @@ places is named by the object `{"place": subnet place, "port": port}`, as in
 
 The log belongs to a generation: a `load` and a `reset` each start with an
 empty log, and `seq` starts again at 1.
+
+The log is the net's own record: `get_log` returns the same entries
+whatever filter the connection has, in both runners (§13.4).
 
 The ring is one for the loaded net and every net inside it: a firing inside
 an inner net (§12) is an entry too, in order with the outer firings, carrying `path` and `nested_id`
@@ -2035,9 +2039,11 @@ at whatever depth, and the loaded net is the one the process loaded.
   is its subnet's, set by `set_filter` addressed to the subnet, in the reads
   and notifications of both nets; the outer net's connection filter projects
   the outer net's own places. A `query` on the outer net without a `filter`
-  therefore uses, for a port, the subnet's connection filter. A `query` or
-  `distinct` given a filter of its own applies it to every place it covers,
-  ports included.
+  therefore uses, for a port, the subnet's connection filter. A `query`
+  given a `filter` of its own applies that filter alone to every place it
+  covers, ports included. `distinct` takes `places` in place of a filter,
+  and reads every token of the places and ports it covers, whatever
+  connection filter the net or its subnets have (§13.3).
 - **One place, two views.** A port place's tokens appear in the states of
   both nets, with the same ids, minted by the subnet. A change of the place
   is told once, by the net through which it was made: an outer firing, or an
@@ -2227,16 +2233,16 @@ are ignored (§2), and an entry of any other shape is `invalid_params`.
 A client may want to be sent only some of a net's tokens, such as those of
 one character's view. `set_filter` sets, for this connection and the net it
 names, the filter every later read and notification of that net is
-projected through, `distinct` alone excepted (§13.3); `set_filter` without
-`filter` clears it. A connection's filter is a view the client chooses for
-itself, to be sent less, and not access control: any client may set,
-change or clear its own, and what a filter leaves out can still be learned
-by other requests, such as `distinct` or a `query` given a filter of its
-own. A host that must keep some tokens from some clients enforces that
-itself, in front of the net process, and cannot rely on a filter (since
-2026-11-23; until then this text gave fog of war as a use of a filter). A
-net process has one connection, so one filter per net; a relay (§9) that
-serves several clients keeps a filter per client and
+projected through, `distinct` and `get_log` excepted (§13.3, §8);
+`set_filter` without `filter` clears it. A connection's filter is a view
+the client chooses for itself, to be sent less, and not access control: any
+client may set, change or clear its own, and what a filter leaves out can
+still be learned by other requests, such as `distinct`, `get_log` or a
+`query` given a filter of its own. A host that must keep some tokens from
+some clients enforces that itself, in front of the net process, and cannot
+rely on a filter (since 2026-11-23; until then this text gave fog of war as
+a use of a filter). A net process has one connection, so one filter per
+net; a relay (§9) that serves several clients keeps a filter per client and
 applies this same projection itself, which tokens carrying `keys` on the
 wire make possible. A port place is projected through its subnet's filter,
 in the reads and notifications of both nets that see it (§12.7). Under a
@@ -2265,6 +2271,10 @@ filter:
 - `query` without a `filter` uses the connection's; `query` with one uses
   that alone and leaves the connection's as it was. `distinct` reads every
   token, as it does with no filter set (§13.3).
+- `get_log` returns the same entries as with no filter set: the log is the
+  net's own record, and its entries name every token a firing consumed or
+  produced, those the filter hides included, in both runners (stated here
+  since 2026-11-23).
 - A filter covers the one net it is set on, and each inner net has its own
   (§12.3). A filter on the loaded net leaves the `nested` notifications of
   the nets its hidden tokens carry as they are: both runners send them
