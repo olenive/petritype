@@ -53,7 +53,9 @@ chooses, to be sent less, which a host cannot use to keep tokens from a
 client (§9.2, §13.4); that `distinct` reads every token by design (§13.3)
 and takes `places` in place of a filter (§12.7); that a filter leaves what
 `get_log` returns as it is (§8, §13.4); and that both runners send the
-notifications of a net a hidden token carries whole (§13.4). Both runners
+notifications of a net a hidden token carries whole (§13.4). The same day
+it took to calling the edges that leave their token in its place
+non-consuming edges, where it had called them read edges (§5.1). Both runners
 implement it, the Rust one (`petritype-runner`, in `../petritype-rs`) and
 the Python one (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
@@ -276,8 +278,10 @@ once per generation and lays it out.
   empty, and `consumed` may list nothing from it (since 2026-10-14). A
   `survey` edge hands the body a copy of every token of its place, zero or
   more, consuming none, and likewise never holds its transition back (since
-  2026-10-14). Read edges (`snapshot`, `survey`, `mutate`) are listed: they
-  move no tokens but they are part of the net. The order of `edges[]` is not
+  2026-10-14). Non-consuming edges, the edges that leave their token in its
+  place (`snapshot`, `survey`, `mutate`, `mutate_where`), are listed: they
+  move no tokens but they are part of the net (this text called them read
+  edges until 2026-11-23). The order of `edges[]` is not
   significant; a reader keys an edge by its endpoints: its place, its port
   if it has one, its transition and its direction.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
@@ -649,7 +653,8 @@ effects arrive as the usual notifications, and its answer carries the
 | `toggled` | `{transition, enabled}` | the switch changed |
 | `param_changed` | `{param, transition?}` | `set_param` took effect |
 
-A firing that mutates through a read edge emits its `mutated`s before its
+A firing that mutates through a `mutate` or `mutate_where` edge emits its
+`mutated`s before its
 `fired` (or `distributed`, or `failed`). `fired` carries consumed and
 produced so a viewer can animate tokens from place to transition to place
 without diffing markings. Produced entries carry the label so a viewer can
@@ -2082,8 +2087,9 @@ at whatever depth, and the loaded net is the one the process loaded.
   `failed` that put back what it took (`restored: true`), and an `added`,
   `removed` or `mutated` of a token there or the `hidden` that stands in for
   one, those a connection's filter sends when a token comes into or goes out
-  of view included (§13.4). An edge that took nothing there, a read edge or a
-  drain on an empty port, changes nothing, nor does a `failed` that did not
+  of view included (§13.4). An edge that took nothing there and changed no
+  token, a `snapshot` or `survey` edge or a drain on an empty port, changes
+  nothing, nor does a `failed` that did not
   restore; under a filter what happened counts, not the tokens the
   notification lists. Each net moves by one per notification, however many
   tokens of its ports the change touched. A version stamped on a read of

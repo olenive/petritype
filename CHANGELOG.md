@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `PROTOCOL.md` calls the edges that leave their token in its place (`snapshot`, `survey`, `mutate`, `mutate_where`) non-consuming edges, where it called them read edges: a mutate edge changes its token, so the old name misled, and "read" is kept for an edge kind to come. Nothing on the wire changed.
 - `PROTOCOL.md` says what a connection's filter is, with nothing on the wire changed and the protocol still version 2: a view a client chooses for itself, to be sent less, which any client may set, change or clear, so a host that must keep some tokens from some clients enforces that itself, in front of the net process (§9.2, §13.4). `distinct` reads every token whatever the filter by design (§13.3), and takes `places` in place of a filter, as §12.7 now says; `get_log` returns the same entries whatever the filter, in both runners, since the log is the net's own record (§8, §13.4); and both runners send the `nested` notifications of a net that a hidden token carries whole, since each inner net has its own filter (§13.4).
 
 ## 0.4.1, 2026-11-22
