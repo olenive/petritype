@@ -22,3 +22,7 @@ gallery:
 # A build of the wheel and sdist into dist/
 build:
     uv build
+
+# Report on free space, build folders and dependencies; deletes nothing
+housekeeping *FLAGS:
+    @python3 scripts/housekeeping.py check --free-limit-gb 50 --python-limit-gb 2 {{FLAGS}}

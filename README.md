@@ -542,3 +542,22 @@ git clone https://github.com/olenive/petritype
 cd petritype
 uv run --extra examples marimo edit <path>   # e.g. examples/toy/state_machines/01_rooms.py
 ```
+
+## Housekeeping
+
+For working in a clone. `just housekeeping` looks at the checkout and prints one line per
+check: the free space on the disk, the size of the environment `.venv`, of `dist` and of the
+caches in the checkout, Time Machine's local snapshots, and the newer versions of the
+dependencies that `uv lock --upgrade --dry-run` finds within the requirements. It deletes
+nothing and changes nothing, and should the dry run touch `uv.lock` it puts the file back
+byte for byte. It exits with 1 when something needs attention and with 0 otherwise, so a
+scheduled run can stay quiet until then. `just housekeeping --offline` skips the dependency
+check, which needs the network.
+
+The limits are in the recipe: attention below 50 GB free and above 2 GB of build folders. To
+change one for a single run, pass it again, as in `just housekeeping --python-limit-gb 4`; to
+change it for good, edit the recipe in the `Justfile`. Time Machine snapshots are yours to
+delete: the report prints the command when it counts some.
+
+The recipe runs `scripts/housekeeping.py`, which needs Python 3.9 or newer and nothing else.
+The same file serves petritype-rs, where it also measures and cleans cargo build output.
