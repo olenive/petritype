@@ -65,7 +65,6 @@ index, and both lines pretty-printed; a line count mismatch lists every actual
 line.
 """
 
-import copy
 import importlib
 import json
 import os
@@ -548,8 +547,11 @@ CABIN = [{"place": "P", "token": "1", "net": "c"}]
 
 
 def test_the_nested_fold():
-    wrap = lambda event, path=CABIN, nid="3": {"method": "nested", "params": {
-        "path": path, "nested_id": nid, "event": event, "marking_version": 9, "running": False}}
+    def wrap(event, path=CABIN, nid="3"):
+        return {
+            "method": "nested",
+            "params": {"path": path, "nested_id": nid, "event": event, "marking_version": 9, "running": False},
+        }
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
     distributed = {"method": "distributed", "params": {"transition": "T", "produced": [], "duration_ms": 2.0, "marking_version": 2, "running": False}}
     folded = fold([wrap(launched), wrap(distributed)])
@@ -563,7 +565,8 @@ def test_the_fold_keeps_the_firings_own_lines_in_their_places():
     """The fold of PROTOCOL.md §11 (2026-10-12), as the Rust harness folds: the
     lines a firing's body causes may stand between its two pieces and keep their
     places; the ``fired`` stands where the ``distributed`` stood."""
-    stamp = lambda version: {"marking_version": version, "running": False}
+    def stamp(version):
+        return {"marking_version": version, "running": False}
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], **stamp(1)}}
     inner = {"method": "nested", "params": {"path": CABIN, "nested_id": "3", "event": {
         "method": "added", "params": {"place": "Door", "id": "1", "label": "x", **stamp(1)}}, **stamp(1)}}
@@ -584,9 +587,17 @@ def test_the_fold_keeps_the_firings_own_lines_in_their_places():
 
 
 def test_the_nested_fold_keeps_the_firings_own_lines_in_their_places():
-    wrap = lambda event, nid="3": {"method": "nested", "params": {
-        "path": [{"place": "P", "token": "1", "net": f"c{nid}"}], "nested_id": nid, "event": event,
-        "marking_version": 9, "running": False}}
+    def wrap(event, nid="3"):
+        return {
+            "method": "nested",
+            "params": {
+                "path": [{"place": "P", "token": "1", "net": f"c{nid}"}],
+                "nested_id": nid,
+                "event": event,
+                "marking_version": 9,
+                "running": False,
+            },
+        }
     launched = {"method": "launched", "params": {"transition": "T", "consumed": [["A", "1"]], "marking_version": 1, "running": False}}
     mutated = {"method": "mutated", "params": {"place": "B", "id": "4", "marking_version": 2, "running": False}}
     deeper = {"method": "added", "params": {"place": "C", "id": "1", "label": "z", "marking_version": 1, "running": False}}
@@ -847,8 +858,8 @@ class Process:
         while True:
             try:
                 line = self.lines.get(timeout=PROCESS_TIMEOUT)
-            except queue.Empty:
-                raise AssertionError(f"no line within {PROCESS_TIMEOUT}s; stderr:\n{self.stderr.decode()}")
+            except queue.Empty as err:
+                raise AssertionError(f"no line within {PROCESS_TIMEOUT}s; stderr:\n{self.stderr.decode()}") from err
             if line is None or line.get("method") != "heartbeat":
                 return line
 

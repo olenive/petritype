@@ -94,13 +94,14 @@ class ExtractImportStatements:
         for node in ast.walk(module_ast):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    import_statements.append(f"import {alias.name}")
+                    as_clause = f" as {alias.asname}" if alias.asname else ""
+                    import_statements.append(f"import {alias.name}{as_clause}")
             elif isinstance(node, ast.ImportFrom):
-                module = node.module
+                prefix = "." * node.level
+                module = f"{prefix}{node.module or ''}"
                 for alias in node.names:
-                    # TODO: Test this, does it work for "from x import y as z"
-                    # Does it work for "from x import a, b, c"?
-                    import_statements.append(f"from {module} import {alias.name}")
+                    as_clause = f" as {alias.asname}" if alias.asname else ""
+                    import_statements.append(f"from {module} import {alias.name}{as_clause}")
         return import_statements
 
 

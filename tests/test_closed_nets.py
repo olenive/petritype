@@ -179,7 +179,7 @@ class TestTheProgram:
     def test_knobs_reading_and_stepping_stay_with_the_program(self):
         graph = post(steps=True)
         NetParams.set(graph, "speed", 2)
-        graph.place_named("Ledger").tokens  # reading
+        assert graph.place_named("Ledger").tokens == []  # reading
         NestedNets.put(graph, "Inbox", ["Letter"])
         run(graph)
         assert graph.params["speed"] == 2 and tokens(graph, "Ledger") == ["Letter"], "its own move"

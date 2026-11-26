@@ -18,7 +18,6 @@ from petritype.core.executable_graph_components import (  # noqa: E402
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
-    MutateEdge,
     ReturnedEdgeFromTransition,
 )
 from petritype.runner.owner import Owner  # noqa: E402
@@ -202,7 +201,6 @@ class TestProjection:
         assert (page["count"], page["matching"], page["has_more"]) == (4, 2, True)
         page = result(await harness.send("get_place_tokens", {"place": "Wetland", "offset": 1, "limit": 1}))
         assert [t["keys"]["species"] for t in page["tokens"]] == ["Heron"] and page["has_more"] is False
-        fox = state["marking"]["places"]["Forest"]
         all_forest = result(await harness.send("set_filter")) and result(await harness.send("get_state"))
         fox_id = all_forest["marking"]["places"]["Forest"]["tokens"][1]["id"]
         await harness.send("set_filter", {"filter": BIRDS})

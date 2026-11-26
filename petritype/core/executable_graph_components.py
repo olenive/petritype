@@ -1,16 +1,18 @@
 from contextlib import contextmanager
+import contextvars
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TypeAliasType
 from types import UnionType
-from typing import Awaitable, Callable, ClassVar, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, Type, Union, Any, get_type_hints, get_origin, get_args
-from pydantic import BaseModel, PrivateAttr, model_serializer, model_validator
+from typing import Awaitable, Callable, ClassVar, Iterable, Iterator, Literal, NoReturn, Optional, Sequence, Union, Any, get_type_hints, get_origin, get_args
+from pydantic import BaseModel, Field, PrivateAttr, model_serializer, model_validator
 import asyncio
 import functools
 import inspect
 import itertools
 import time
 import warnings
+import weakref
 
 from petritype.core.data_structures import ArgumentName, FunctionName, KwArgs, PlaceNodeName, ReturnIndex
 from petritype.core.events import (
@@ -51,8 +53,50 @@ CLOSED_WITHOUT_PORTS = False
 # What every refusal of a write at a private place says, so that it says how to put it right.
 _PUT_IT_RIGHT = "mark the place as a port, start the net with the token in its definition, or declare the net open"
 
+# Identifies the firing currently executing a transition body (propagated across
+# async awaits and thread-pool offload) so ``ClosedNets.note`` scopes refusals to
+# the offending body rather than tainting concurrent peers holding the same net.
+_ACTIVE_FIRING_IDS: contextvars.ContextVar[Optional["FiringTokenIds"]] = contextvars.ContextVar(
+    "_petritype_active_firing_ids", default=None,
+)
 
-class ClosedNetError(ValueError):
+_TYPE_HINTS_CACHE: "weakref.WeakKeyDictionary[Any, tuple[Any, dict[str, Any]]]" = weakref.WeakKeyDictionary()
+
+
+def _function_type_hints(fn: Any) -> dict[str, Any]:
+    """Cached ``get_type_hints(fn)`` with safe fallback to ``__annotations__``.
+
+    Keyed weakly by ``fn`` and validated against ``__annotations__`` identity so
+    callables can be garbage-collected and rare runtime annotation mutations are
+    never stale.
+    """
+    annotations = getattr(fn, "__annotations__", None)
+    try:
+        cached = _TYPE_HINTS_CACHE.get(fn)
+    except TypeError:
+        cached = None
+    if cached is not None and cached[0] is annotations:
+        return cached[1]
+    try:
+        hints = get_type_hints(fn)
+    except Exception:
+        hints = annotations if isinstance(annotations, dict) else {}
+    try:
+        _TYPE_HINTS_CACHE[fn] = (annotations, hints)
+    except TypeError:
+        pass
+    return hints
+
+
+class PetritypeError(Exception):
+    """Base class for all Petritype library errors.
+
+    Specific error subclasses also inherit from their standard Python exception
+    type (``ValueError`` or ``RuntimeError``) for backwards compatibility.
+    """
+
+
+class ClosedNetError(PetritypeError, ValueError):
     """A write from outside a closed net at a place that is not one of its ports
     (``ClosedNets``, since 2026-11-23): putting, taking or replacing tokens there
     through the library's own functions (``NestedNets.put``, ``NestedNets.take``),
@@ -78,7 +122,7 @@ class ClosedNetError(ValueError):
         )
 
 
-class HeldByBodyError(ValueError):
+class HeldByBodyError(PetritypeError, ValueError):
     """A body of the net around a net asked to work one of its knobs, or to fire
     one of its transitions by name, while it held the net (``ClosedNets``, since
     2026-11-23): setting a parameter (``NetParams.set``, ``NestedNets.set_param``),
@@ -105,7 +149,7 @@ class HeldByBodyError(ValueError):
         )
 
 
-class TransitionFailedError(RuntimeError):
+class TransitionFailedError(PetritypeError, RuntimeError):
     """A transition body (or its output routing) raised after its input tokens
     had been consumed.
 
@@ -143,7 +187,7 @@ class TransitionFailedError(RuntimeError):
         )
 
 
-class LaunchNotificationError(RuntimeError):
+class LaunchNotificationError(PetritypeError, RuntimeError):
     """An observer raised at a sequential firing's launch notification, after the
     inputs were consumed and before the body ran (``on_launch`` in
     ``ExecutableGraphOperations.fire_one_transition``, where the Runner notifies its
@@ -167,7 +211,7 @@ class LaunchNotificationError(RuntimeError):
         )
 
 
-class SubnetHeldError(RuntimeError):
+class SubnetHeldError(PetritypeError, RuntimeError):
     """The program asked to step or change a subnet (``NestedNets.subnet_scope``)
     while a firing of the net around it on one of its ports is in flight: the
     subnet is held still until that firing lands.
@@ -197,13 +241,19 @@ class PositionalArgsBaseModel(BaseModel):
 
     def __init__(self, *args, **kwargs):
         field_names = [name for name in self.__class__.model_fields if name not in self._keyword_only]
+        if len(args) > len(field_names):
+            raise TypeError(
+                f"{self.__class__.__name__}() takes at most {len(field_names)} positional arguments "
+                f"({len(args)} given)"
+            )
         # Map positional arguments to field names
-        for i, arg in enumerate(args):
-            if i < len(field_names):
-                field_name = field_names[i]
-                if field_name not in kwargs:
-                    kwargs[field_name] = arg
-        
+        for field_name, arg in zip(field_names, args):
+            if field_name in kwargs:
+                raise TypeError(
+                    f"{self.__class__.__name__}() got multiple values for argument {field_name!r}"
+                )
+            kwargs[field_name] = arg
+
         super().__init__(**kwargs)
 
     model_config = {
@@ -246,7 +296,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
     """
     name: PlaceNodeName
     type: Any  # Temporarily accept any value
-    tokens: list[Any] = []
+    tokens: list[Any] = Field(default_factory=list)
     nested: bool = False
     stepping: Optional[Stepping] = None
     keys: Optional[dict[str, Callable[[Any], Any]]] = None
@@ -263,7 +313,6 @@ class ListPlaceNode(PositionalArgsBaseModel):
                 raise TypeError("keys is a dict of name to extractor, or a sequence of attribute names")
             values = {**values, "keys": {name: _attribute(name) for name in names}}
         return values
-    # TODO: Add validation to check that type matches tokens
     # Stable ids of the tokens, parallel to ``tokens`` (same length, same order). Assigned
     # by the graph that holds the place (``TokenIds``); empty until then. Private so that
     # ``tokens`` keeps its type and every existing reader keeps working.
@@ -281,7 +330,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
     @model_validator(mode="after")
     def validate_type_field(self):
         type_of_value = self.type
-        
+
         if type_of_value is not None:
             # A valid place type is a plain class, any subscripted generic or union (both the
             # typing.List[int] and builtin list[int] spellings, and both the Union[int, str] and
@@ -302,7 +351,7 @@ class ListPlaceNode(PositionalArgsBaseModel):
             raise NotImplementedError(
                 "Unclear at the time of writing what it means for a place node to have no type."
             )
-        
+
         return self
 
     @model_validator(mode="after")
@@ -339,9 +388,6 @@ def _attribute(name: str) -> Callable[[Any], Any]:
         return getattr(token, name)
     extract.__name__ = f"attribute_{name}"
     return extract
-
-
-# An alias to ListPlaceNode just called PlaceNode.
 
 
 class FunctionTransitionNode(PositionalArgsBaseModel):
@@ -710,9 +756,9 @@ class ExecutableGraph(BaseModel):
     # copy of every token, possibly none; MutateEdge passes the live tokens (transition may
     # modify them in place); ReadEdge, ReadWhereEdge and ReadAllEdge pass the live tokens to
     # look at, nothing copied and nothing told (since 2026-11-23).
-    snapshot_edges: Sequence[SnapshotEdge] = []
-    mutate_edges: Sequence[MutateEdge] = []
-    read_edges: Sequence[ReadEdge] = []
+    snapshot_edges: Sequence[SnapshotEdge] = Field(default_factory=list)
+    mutate_edges: Sequence[MutateEdge] = Field(default_factory=list)
+    read_edges: Sequence[ReadEdge] = Field(default_factory=list)
     step_count: int = 0
     # Name of the most recent transition fired by the last firing attempt (an
     # ``execute_graph`` call, or one sequential-Runner attempt), or None if it
@@ -738,18 +784,18 @@ class ExecutableGraph(BaseModel):
     # to drive stage/progress UI that must stay correct after the marking has
     # moved past a stage. A deep step's firing inside an inner net is counted
     # under its ``InnerFiring``.
-    fired_counts: dict[Union[str, InnerFiring], int] = {}
+    fired_counts: dict[Union[str, InnerFiring], int] = Field(default_factory=dict)
     # Names of transitions whose bodies are currently executing: they consumed their inputs but
     # have not yet deposited their outputs. Both modes maintain it. Concurrent mode holds every
     # airborne transition; sequential firing (``fire_one_transition``) holds the one running
     # transition while its body executes and empties the set when the body returns or raises.
     # Writers always assign a fresh set, so a reader on another thread sees a whole value.
     # The renderer lights these "in flight" transitions distinctly.
-    in_flight: set[str] = set()
-    transition_history: Sequence[FunctionTransitionNode] = []
-    input_place_history: Sequence[ListPlaceNode] = []
-    output_place_history: Sequence[ListPlaceNode] = []
-    token_history: Sequence[Any] = []
+    in_flight: set[str] = Field(default_factory=set)
+    transition_history: Sequence[FunctionTransitionNode] = Field(default_factory=list)
+    input_place_history: Sequence[Sequence[ListPlaceNode]] = Field(default_factory=list)
+    output_place_history: Sequence[Sequence[ListPlaceNode]] = Field(default_factory=list)
+    token_history: Sequence[Any] = Field(default_factory=list)
     transition_selector: Optional[Callable] = None
     # Tie-break for the default selector among equal-priority fireable transitions:
     # "first_declared" (default) fires the first-defined, "last_declared" the
@@ -771,10 +817,10 @@ class ExecutableGraph(BaseModel):
     # constructing a new graph.
     next_token_id: int = 1
     record_events: bool = False
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
     net_id: int = 0
     template: Optional[str] = None
-    disabled: set[str] = set()
+    disabled: set[str] = Field(default_factory=set)
     open: bool = False
     # Event records waiting to be drained; never dumped with the model.
     _events: list[Event] = PrivateAttr(default_factory=list)
@@ -792,6 +838,11 @@ class ExecutableGraph(BaseModel):
     # for its own turn), or None before the first. Moved by ring turns only, kept in
     # memory only: neither saved nor copied.
     _ring_cursor: Optional[int] = PrivateAttr(default=None)
+    # Cached topology lookup maps, invalidated automatically if topology lists/lengths or instance id change.
+    _cache_key: Optional[tuple] = PrivateAttr(default=None)
+    _places_by_name: dict[str, Union[ListPlaceNode, "SubnetPlaceNode"]] = PrivateAttr(default_factory=dict)
+    _transitions_by_name: dict[str, FunctionTransitionNode] = PrivateAttr(default_factory=dict)
+    _maps_cache: Optional[tuple[dict, dict, dict, dict]] = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -897,6 +948,27 @@ class ExecutableGraph(BaseModel):
         self._last_pick = None
         self._ring_cursor = None
 
+    def _topology_key(self) -> tuple:
+        return (
+            id(self),
+            len(self.places),
+            len(self.transitions),
+            len(self.argument_edges),
+            len(self.return_edges),
+            len(self.snapshot_edges),
+            len(self.mutate_edges),
+            len(self.read_edges),
+        )
+
+    def _ensure_caches(self) -> None:
+        key = self._topology_key()
+        if self._cache_key == key:
+            return
+        self._places_by_name = {place.name: place for place in self.places}
+        self._transitions_by_name = {transition.name: transition for transition in self.transitions}
+        self._maps_cache = None
+        self._cache_key = key
+
     def place_named(self, name: PlaceKey) -> Optional[Union[ListPlaceNode, "SubnetPlaceNode"]]:
         """The place of this net with this name, a subnet place included, or, for
         a ``Port`` pair, the port place of that subnet place, which is a place of
@@ -905,10 +977,8 @@ class ExecutableGraph(BaseModel):
         if isinstance(name, Port):
             holder = self.place_named(name.place)
             return holder.port_named(name.port) if isinstance(holder, SubnetPlaceNode) else None
-        place_names_to_nodes = {place.name: place for place in self.places}  # TODO: do we need to check every time?
-        if len(set(place_names_to_nodes.keys())) != len(place_names_to_nodes.keys()):
-            raise ValueError("Duplicate place names found!")
-        return place_names_to_nodes.get(name)
+        self._ensure_caches()
+        return self._places_by_name.get(name)
 
     def subnet(self, name: str) -> Optional["ExecutableGraph"]:
         """The net the subnet place ``name`` holds, or ``None`` if ``name`` is no
@@ -919,10 +989,8 @@ class ExecutableGraph(BaseModel):
         return place.graph if isinstance(place, SubnetPlaceNode) else None
 
     def transition_named(self, name: str) -> Optional[FunctionTransitionNode]:
-        for transition in self.transitions:
-            if transition.name == name:
-                return transition
-        return None
+        self._ensure_caches()
+        return self._transitions_by_name.get(name)
 
     @property
     def groups(self) -> tuple[str, ...]:
@@ -954,7 +1022,7 @@ class ExecutableGraph(BaseModel):
         if len(transition_names) != len(set(transition_names)):
             raise ValueError("Transition names must be unique.")
         return values
-    
+
     @model_validator(mode="before")
     def check_subnet_places(cls, values):
         """A subnet place holds a net of its own: the same net in two subnet
@@ -975,7 +1043,7 @@ class ExecutableGraph(BaseModel):
         transitions = values.get('transitions', [])
         argument_edges = values.get('argument_edges', [])
         return_edges = values.get('return_edges', [])
-        
+
         places_by_name = {place.name: place for place in places}
         transition_names = {transition.name for transition in transitions}
 
@@ -983,7 +1051,7 @@ class ExecutableGraph(BaseModel):
             _edge_place(places_by_name, edge.place_node_name, "Argument", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
                 raise ValueError(f"Argument edge references unknown transition: {edge.transition_node_name}")
-        
+
         for edge in return_edges:
             _edge_place(places_by_name, edge.place_node_name, "Return", edge.transition_node_name)
             if edge.transition_node_name not in transition_names:
@@ -1563,8 +1631,18 @@ class ClosedNets:
         return executable_graph.template if executable_graph.template is not None else f"#{executable_graph.net_id}"
 
     def note(executable_graph: ExecutableGraph, refusal: Exception) -> None:
-        """Keep ``refusal`` on each hold on the net that has none yet, so that the
-        firing whose body holds it fails with it."""
+        """Keep ``refusal`` on the active firing's hold(s) on ``executable_graph``
+        (when called from inside a running transition body), or on every hold on
+        the net when called outside a tracked firing, so concurrent peers holding
+        the same net are not cross-tainted."""
+        active = _ACTIVE_FIRING_IDS.get()
+        if active is not None:
+            scoped = [hold for hold in active.held if hold.net is executable_graph]
+            if scoped:
+                for hold in scoped:
+                    if hold.refusal is None:
+                        hold.refusal = refusal
+                return
         for hold in executable_graph._holds:
             if hold.refusal is None:
                 hold.refusal = refusal
@@ -1607,12 +1685,12 @@ class ClosedNets:
         controls = None
         if ClosedNets.under_the_rule(executable_graph):
             controls = (
-                dict(executable_graph.params),
+                _snapshot_mapping(executable_graph.params),
                 frozenset(executable_graph.disabled),
                 executable_graph.tie_break,
                 executable_graph.transition_selector,
                 tuple(getattr(place, "stepping", None) for place in executable_graph.places),
-                tuple(dict(transition.kwargs or {}) for transition in executable_graph.transitions),
+                tuple(_snapshot_mapping(transition.kwargs or {}) for transition in executable_graph.transitions),
             )
         return places, controls
 
@@ -1710,6 +1788,19 @@ class ClosedNets:
             found = hold.refusal or ClosedNets.difference(hold)
             if found is not None:
                 ClosedNets.note(executable_graph, found)
+
+
+def _snapshot_mapping(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Deep-copy values in ``mapping`` where possible so in-place mutations to mutable
+    containers inside params/kwargs are caught by ``_same_controls``; fall back to the
+    value itself when it cannot be deep-copied (e.g. functions or locks)."""
+    result: dict[str, Any] = {}
+    for key, value in mapping.items():
+        try:
+            result[key] = deepcopy(value)
+        except Exception:
+            result[key] = value
+    return result
 
 
 def _same_value(a: Any, b: Any) -> bool:
@@ -2138,6 +2229,8 @@ class NestedNets:
         recording ``Removed`` for each. Fewer than ``count`` present is an error
         (nothing is taken). A port is named by its pair, as for ``put``, and a
         closed net gives tokens up only at its ports, as ``put`` takes them."""
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"count must be a non-negative integer, got {count!r}")
         place = NestedNets.token_place(inner, place_name)
         ClosedNets.ensure_tokens(inner, place_name, "a take")
         TokenIds.resync(inner)
@@ -2388,10 +2481,9 @@ class KeyedEdges:
     def input_clauses(edge: Any) -> tuple:
         """The clauses of an edge's filter that read the token of another input,
         in declared order; empty for an edge that is not bound."""
-        where = getattr(edge, "where", None)
-        if where is None:
+        if not isinstance(edge, (TakeWhereEdge, MutateWhereEdge, ReadWhereEdge)):
             return ()
-        return tuple(clause for clause in where.clauses if getattr(clause, "input", None) is not None)
+        return tuple(clause for clause in edge.where.clauses if clause.input is not None)
 
     def source_of(edge: Any) -> Optional[PlaceKey]:
         """The place a bound edge's input clauses name, its source, or ``None``
@@ -2444,7 +2536,7 @@ class KeyedEdges:
         if any(not lookup for _clauses, lookup in lookups):
             return None
         place = place_names_to_nodes[source]
-        own = getattr(source_edge, "where", None)
+        own = source_edge.where if isinstance(source_edge, (TakeWhereEdge, MutateWhereEdge, ReadWhereEdge)) else None
         for index, token in enumerate(place.tokens):
             if own is not None and not own.keeps(place, token, params, source):
                 continue
@@ -2558,7 +2650,7 @@ class ExecutableGraphCheck:
             return True
         if isinstance(edge, (TakeWhereEdge, MutateWhereEdge, ReadEdge)):
             return False
-        argument_type = get_type_hints(function).get(edge.argument)
+        argument_type = _function_type_hints(function).get(edge.argument)
         return ExecutableGraphCheck.argument_takes_every_token(argument_type, place.type)
 
     def ensure_read_edges_stand_alone(executable_graph: ExecutableGraph) -> None:
@@ -2687,41 +2779,14 @@ class ExecutableGraphCheck:
         its source: every source must have a token with a match in each edge bound
         to it (``KeyedEdges.pairing``), asked after every edge on its own."""
         # Transitions with no incoming edges (generators) are always ready to fire
-        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
-            transition.name, tuple()
-        )
-        params = executable_graph.params if executable_graph is not None else None
-        for edge in incoming_edges:
-            if not ExecutableGraphCheck.requires_presence(edge):
-                continue
-            place = place_names_to_nodes[edge.place_node_name]
-            if len(place.tokens) == 0:
-                return False
-            if params is not None and isinstance(edge, TakeWhereEdge) and not KeyedEdges.input_clauses(edge):
-                if KeyedEdges.first_kept(edge, place, params) is None:
-                    return False
-        # Non-consuming edges (snapshot, mutate, read) require presence too, as there must be a
-        # token to hand over, but firing does not consume them. A survey and a read-all read
-        # whatever is there, possibly nothing.
-        if transition_names_to_read_edges:
-            for edge in transition_names_to_read_edges.get(transition.name, ()):
-                if not ExecutableGraphCheck.requires_presence(edge):
-                    continue
-                place = place_names_to_nodes[edge.place_node_name]
-                if len(place.tokens) == 0:
-                    return False
-                if (
-                    params is not None and isinstance(edge, (MutateWhereEdge, ReadWhereEdge))
-                    and not KeyedEdges.input_clauses(edge)
-                ):
-                    if KeyedEdges.first_kept(edge, place, params) is None:
-                        return False
-        if params is not None and KeyedEdges.pairing(
-            transition, transition_names_to_incoming_edges, place_names_to_nodes, transition_names_to_read_edges,
-            params,
-        ) is None:
-            return False
-        return True
+        return ExecutableGraphOperations.plan_stage_1(
+            transition=transition,
+            transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+            place_names_to_nodes=place_names_to_nodes,
+            transition_names_to_read_edges=transition_names_to_read_edges,
+            net_params=executable_graph.params if executable_graph is not None else None,
+            check_filters=executable_graph is not None,
+        ) is not None
 
     def transition_is_fireable(
         transition: FunctionTransitionNode,
@@ -3046,16 +3111,70 @@ def _a_move_of_its_own(function):
     tells what a body holding the net changed before it from what the net did
     itself. A firing with a selector of the caller's own, on a net a body holds,
     is firing by name, refused to that body (``HeldByBodyError``)."""
+    signature = inspect.signature(function)
 
     @functools.wraps(function)
     async def moved(*args, **kwargs):
-        graph = kwargs["executable_graph"] if "executable_graph" in kwargs else args[0]
-        if graph._holds and kwargs.get("transition_selector", args[5] if len(args) > 5 else None) is not None:
+        bound = signature.bind_partial(*args, **kwargs)
+        graph = bound.arguments["executable_graph"]
+        if graph._holds and bound.arguments.get("transition_selector") is not None:
             ClosedNets.ensure_controls(graph, "a firing chosen by a selector of the caller's own")
         with ClosedNets.moving(graph):
             return await function(*args, **kwargs)
 
     return moved
+
+
+@dataclass(frozen=True)
+class PlannedIncoming:
+    """One incoming (consuming) edge's planned extraction from its place."""
+
+    edge: ArgumentEdgeToTransition
+    place: ListPlaceNode
+    indices: tuple[int, ...]
+    takes_every: bool
+
+
+@dataclass(frozen=True)
+class PlannedRead:
+    """One non-consuming edge's planned selection from its place."""
+
+    edge: Union["SnapshotEdge", "MutateEdge", "ReadEdge"]
+    place: ListPlaceNode
+    indices: tuple[int, ...]
+    takes_every: bool
+
+
+@dataclass(frozen=True)
+class Stage1Plan:
+    """A complete, validated, pre-mutation plan for stage 1 of a transition firing.
+
+    Computed without mutating any place so that fireability checks, concurrent
+    per-token locking, handover prediction, and atomic extraction all agree on
+    the exact indices and tokens selected.
+    """
+
+    incoming: tuple[PlannedIncoming, ...]
+    reads: tuple[PlannedRead, ...]
+
+
+def _first_unconsumed_index(place: ListPlaceNode, already: set[int]) -> Optional[int]:
+    for index in range(len(place.tokens)):
+        if index not in already:
+            return index
+    return None
+
+
+def _first_kept_unconsumed_index(
+    edge: Union[TakeWhereEdge, MutateWhereEdge, ReadWhereEdge],
+    place: ListPlaceNode,
+    params: dict,
+    already: set[int],
+) -> Optional[int]:
+    for index, token in enumerate(place.tokens):
+        if index not in already and edge.where.keeps(place, token, params, edge.place_node_name):
+            return index
+    return None
 
 
 class ExecutableGraphOperations:
@@ -3129,17 +3248,163 @@ class ExecutableGraphOperations:
 
     def maps(executable_graph: ExecutableGraph) -> tuple[dict, dict, dict, dict]:
         """The four adjacency maps ``fire_one_transition`` fires on:
-        ``(place_nodes, incoming, outgoing, read)``. No validation."""
-        return (
-            MapPlaceNames.to_list_place_nodes(executable_graph),
-            MapTransitionNames.to_incoming_edges(executable_graph),
-            MapTransitionNames.to_outgoing_edges(executable_graph),
-            MapTransitionNames.to_read_edges(executable_graph),
-        )
+        ``(place_nodes, incoming, outgoing, read)``. No validation. Cached per
+        graph topology."""
+        executable_graph._ensure_caches()
+        if executable_graph._maps_cache is None:
+            executable_graph._maps_cache = (
+                MapPlaceNames.to_list_place_nodes(executable_graph),
+                MapTransitionNames.to_incoming_edges(executable_graph),
+                MapTransitionNames.to_outgoing_edges(executable_graph),
+                MapTransitionNames.to_read_edges(executable_graph),
+            )
+        return executable_graph._maps_cache
 
     def update_output_place_with_result_tokens(result: Any, place: ListPlaceNode) -> None:
         """Update the given place by appending the result token to its tokens list."""
         place.tokens.append(result)
+
+    def plan_stage_1(
+        transition: FunctionTransitionNode,
+        transition_names_to_incoming_edges: dict[str, tuple[ArgumentEdgeToTransition, ...]],
+        place_names_to_nodes: dict[PlaceKey, ListPlaceNode],
+        transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
+        net_params: Optional[dict[str, Any]] = None,
+        check_filters: bool = True,
+    ) -> Optional[Stage1Plan]:
+        """Compute the exact token indices every incoming and non-consuming edge of
+        ``transition`` will consume or read, without mutating any place.
+
+        Returns ``None`` if any edge lacks sufficient or matching unconsumed tokens
+        (including when multiple input edges share a place or a bound pairing has no
+        match). When ``check_filters`` is ``False``, keyed edges are checked by
+        presence alone (used by legacy ``sufficient_tokens_are_available`` calls
+        without a graph).
+        """
+        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
+            transition.name, tuple()
+        )
+        read_edges: tuple = (transition_names_to_read_edges or {}).get(transition.name, ())
+        params = net_params if net_params is not None else {}
+
+        if check_filters:
+            chosen = KeyedEdges.pairing(
+                transition, transition_names_to_incoming_edges, place_names_to_nodes,
+                transition_names_to_read_edges, params,
+            )
+            if chosen is None:
+                return None
+        else:
+            chosen = {}
+
+        type_hints: Optional[dict[str, Any]] = None
+
+        def arg_type(arg_name: str) -> Any:
+            nonlocal type_hints
+            if type_hints is None:
+                type_hints = _function_type_hints(transition.function)
+            return type_hints.get(arg_name)
+
+        consumed_by_place: dict[PlaceKey, set[int]] = {}
+        planned_incoming: list[PlannedIncoming] = []
+
+        for edge in incoming_edges:
+            place = place_names_to_nodes[edge.place_node_name]
+            already = consumed_by_place.setdefault(edge.place_node_name, set())
+
+            if edge.argument in chosen:
+                index = chosen[edge.argument]
+                if index in already or index >= len(place.tokens):
+                    return None
+                already.add(index)
+                planned_incoming.append(PlannedIncoming(edge, place, (index,), False))
+                continue
+
+            if isinstance(edge, TakeWhereEdge):
+                if check_filters:
+                    index = _first_kept_unconsumed_index(edge, place, params, already)
+                else:
+                    index = _first_unconsumed_index(place, already)
+                if index is None:
+                    return None
+                already.add(index)
+                planned_incoming.append(PlannedIncoming(edge, place, (index,), False))
+                continue
+
+            takes_every = isinstance(edge, DrainEdge) or ExecutableGraphCheck.argument_takes_every_token(
+                arg_type(edge.argument), place.type,
+            )
+            if takes_every:
+                remaining = tuple(i for i in range(len(place.tokens)) if i not in already)
+                if ExecutableGraphCheck.requires_presence(edge) and not remaining:
+                    return None
+                already.update(remaining)
+                planned_incoming.append(PlannedIncoming(edge, place, remaining, True))
+            else:
+                index = _first_unconsumed_index(place, already)
+                if index is None:
+                    return None
+                already.add(index)
+                planned_incoming.append(PlannedIncoming(edge, place, (index,), False))
+
+        planned_reads: list[PlannedRead] = []
+        for edge in read_edges:
+            place = place_names_to_nodes[edge.place_node_name]
+            already = consumed_by_place.get(edge.place_node_name, set())
+
+            if isinstance(edge, ReadAllEdge):
+                remaining = tuple(i for i in range(len(place.tokens)) if i not in already)
+                planned_reads.append(PlannedRead(edge, place, remaining, True))
+                continue
+
+            if isinstance(edge, ReadEdge):
+                if edge.argument in chosen:
+                    index = chosen[edge.argument]
+                    if index in already or index >= len(place.tokens):
+                        return None
+                elif isinstance(edge, ReadWhereEdge) and check_filters:
+                    index = _first_kept_unconsumed_index(edge, place, params, already)
+                    if index is None:
+                        return None
+                else:
+                    index = _first_unconsumed_index(place, already)
+                    if index is None:
+                        return None
+                planned_reads.append(PlannedRead(edge, place, (index,), False))
+                continue
+
+            if edge.argument in chosen:
+                index = chosen[edge.argument]
+                if index in already or index >= len(place.tokens):
+                    return None
+                planned_reads.append(PlannedRead(edge, place, (index,), False))
+                continue
+
+            if isinstance(edge, MutateWhereEdge):
+                if check_filters:
+                    index = _first_kept_unconsumed_index(edge, place, params, already)
+                else:
+                    index = _first_unconsumed_index(place, already)
+                if index is None:
+                    return None
+                planned_reads.append(PlannedRead(edge, place, (index,), False))
+                continue
+
+            takes_every = isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
+                arg_type(edge.argument), place.type,
+            )
+            if takes_every:
+                remaining = tuple(i for i in range(len(place.tokens)) if i not in already)
+                if ExecutableGraphCheck.requires_presence(edge) and not remaining:
+                    return None
+                planned_reads.append(PlannedRead(edge, place, remaining, True))
+            else:
+                index = _first_unconsumed_index(place, already)
+                if index is None:
+                    return None
+                planned_reads.append(PlannedRead(edge, place, (index,), False))
+
+        return Stage1Plan(incoming=tuple(planned_incoming), reads=tuple(planned_reads))
 
     def stage_1_extract_argument_tokens_from_places(
         transition: FunctionTransitionNode,
@@ -3151,165 +3416,137 @@ class ExecutableGraphOperations:
         transition_names_to_read_edges: Optional[dict[str, tuple]] = None,
         firing_ids: Optional[FiringTokenIds] = None,
         net_params: Optional[dict[str, Any]] = None,
+        plan: Optional[Stage1Plan] = None,
+        record_input_places: bool = True,
     ) -> tuple[dict[ArgumentName, any], Sequence[ListPlaceNode]]:
-        """Remove input tokens from source places
-        
-        Return input tokens matched to function arguments and the input places without the removed tokens.
+        """Remove input tokens from source places atomically.
 
-        Token ids leave with their tokens. If ``firing_ids`` is given, the ids taken
-        (per argument, in order), the ids handed over through mutate edges and the
-        ids handed over through read edges are recorded on it; snapshot edges touch
-        no ids. A keyed edge (``TakeWhereEdge``, ``MutateWhereEdge``,
-        ``ReadWhereEdge``) takes or hands over the oldest token its filter keeps,
-        with ``net_params`` the parameters a clause may name. A ``DrainEdge`` takes
-        every token as a list, a ``SurveyEdge`` hands over a deep copy of every
-        token, and a ``ReadAllEdge`` a new list of every token, live, each list
-        possibly empty. A ``ReadEdge`` hands over the front token, live.
-
-        A transition with bound edges has its pairing found once, before any token
-        moves (``KeyedEdges.pairing``), and each source and bound edge acts on the
-        token it chose, wherever it stands: a take pops it, a snapshot copies it,
-        a mutate or a read hands it over live. Every other token keeps its place
-        and its id.
-
-        A failed firing can be undone (best effort) with restore_argument_tokens_to_places.
-
-        With ``firing_ids``, every net carried by a token handed to the body live (by
-        every edge kind but a snapshot or a survey, which hand over copies) is held
-        for the body (``ClosedNets.lend``, since 2026-11-23), once every edge has its
-        token; the firing releases the holds when the body returns.
+        All selections are validated via ``plan_stage_1`` before any place is mutated,
+        so a missing or unmatched token never leaves places partially drained.
         """
-        # Transitions with no incoming edges (generators) have no tokens to extract
-        incoming_edges: tuple[ArgumentEdgeToTransition, ...] = transition_names_to_incoming_edges.get(
-            transition.name, tuple()
-        )
-        params = net_params if net_params is not None else {}
-        # The token each source and bound edge gets, by argument, as the places stand now.
-        chosen = KeyedEdges.pairing(
-            transition, transition_names_to_incoming_edges, place_names_to_nodes, transition_names_to_read_edges,
-            params,
-        )
-        if chosen is None:
-            raise ValueError(f"no token of a source of {transition.name!r} has a match in every edge bound to it")
-        input_edge_names_to_tokens: dict[ArgumentName, any] = dict()
-        input_places = [] # if place_history_length >= 1 else None
-        lent: list = []  # the tokens the body is handed live, whose nets it holds
-        for edge in incoming_edges:
-            place = place_names_to_nodes[edge.place_node_name]
-            place_copy = place.copy_sans_tokens()
-            input_places.append(place_copy)
-            argument_type = get_type_hints(transition.function).get(edge.argument)
-            place_type = place.type
-            if edge.argument in chosen or isinstance(edge, TakeWhereEdge):
-                # A source or a bound edge takes the token the pairing chose, and any other keyed
-                # take the oldest token its filter keeps, wherever it stands.
-                index = chosen.get(edge.argument)
-                if index is None:
-                    index = KeyedEdges.first_kept(edge, place, params)
-                if index is None:
-                    raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
-                token = place.tokens.pop(index)
-                taken_ids = place._token_ids[index:index + 1]
-                del place._token_ids[index:index + 1]
-                if allow_token_copying and token_history_length >= 1:
-                    place_copy.tokens.append(deepcopy(token))
-                input_edge_names_to_tokens[edge.argument] = token
-                lent.append(token)
-                if firing_ids is not None:
-                    firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
-                continue
-            # Two cases - passing a single token or passing all tokens as a list.
-            # A drain always passes the list, possibly empty.
-            if isinstance(edge, DrainEdge) or ExecutableGraphCheck.argument_takes_every_token(
-                argument_type, place_type,
-            ):  # If the argument type is a list and the type inside the list matches the place type,
-                # pass all tokens as a list.
-                tokens = place.tokens
+        if plan is None:
+            plan = ExecutableGraphOperations.plan_stage_1(
+                transition=transition,
+                transition_names_to_incoming_edges=transition_names_to_incoming_edges,
+                place_names_to_nodes=place_names_to_nodes,
+                transition_names_to_read_edges=transition_names_to_read_edges,
+                net_params=net_params,
+                check_filters=True,
+            )
+        if plan is None:
+            raise ValueError(f"insufficient or unmatched tokens for transition {transition.name!r}")
+
+        input_edge_names_to_tokens: dict[ArgumentName, any] = {}
+        input_places = []
+        lent: list = []
+
+        # Collect incoming tokens & ids by original index BEFORE mutating any place.
+        place_removals: dict[int, tuple[ListPlaceNode, set[int]]] = {}
+        incoming_extracted: list[tuple[PlannedIncoming, Any, list[int], bool]] = []
+        incoming_count_per_place: dict[int, int] = {}
+        for item in plan.incoming:
+            pid = id(item.place)
+            incoming_count_per_place[pid] = incoming_count_per_place.get(pid, 0) + 1
+
+        for item in plan.incoming:
+            place = item.place
+            pid = id(place)
+            whole_take = (
+                item.takes_every
+                and incoming_count_per_place[pid] == 1
+                and len(item.indices) == len(place.tokens)
+            )
+            if whole_take:
+                value: Any = place.tokens
+                taken_ids = list(place._token_ids)
+            elif item.takes_every:
+                value = [place.tokens[i] for i in item.indices]
+                taken_ids = [place._token_ids[i] for i in item.indices if i < len(place._token_ids)]
+            else:
+                idx = item.indices[0]
+                value = place.tokens[idx]
+                taken_ids = place._token_ids[idx:idx + 1]
+            incoming_extracted.append((item, value, taken_ids, whole_take))
+            _, removed = place_removals.setdefault(pid, (place, set()))
+            removed.update(item.indices)
+
+        # Also snapshot single-token reads by original index before removing consumed tokens.
+        single_reads: dict[int, tuple[Any, Optional[int]]] = {}
+        for idx_pos, item in enumerate(plan.reads):
+            if not item.takes_every:
+                tok_idx = item.indices[0]
+                tok = item.place.tokens[tok_idx]
+                tok_id = item.place._token_ids[tok_idx] if tok_idx < len(item.place._token_ids) else None
+                single_reads[idx_pos] = (tok, tok_id)
+
+        # Apply removals atomically now that all picks are captured.
+        whole_cleared: set[int] = {id(item.place) for item, _v, _ids, whole in incoming_extracted if whole}
+        for pid, (place, removed_indices) in place_removals.items():
+            if pid in whole_cleared:
                 place.tokens = []
-                taken_ids, place._token_ids = place._token_ids, []
+                place._token_ids = []
+            elif removed_indices:
+                for idx in sorted(removed_indices, reverse=True):
+                    del place.tokens[idx]
+                    if idx < len(place._token_ids):
+                        del place._token_ids[idx]
+
+        # Populate outputs, history copies, lent list, and firing_ids for incoming edges.
+        for item, value, taken_ids, _whole in incoming_extracted:
+            place = item.place
+            edge = item.edge
+            if record_input_places:
+                place_copy = place.copy_sans_tokens()
+                input_places.append(place_copy)
                 if allow_token_copying and token_history_length >= 1:
-                    tokens_copy = deepcopy(tokens)
-                    place_copy.tokens.extend(tokens_copy)
-                input_edge_names_to_tokens[edge.argument] = tokens
-                lent.extend(tokens)
-            else:  # Pass in a single token (FIFO: consume the oldest token first).
-                token = place.tokens.pop(0)
-                taken_ids = place._token_ids[:1]
-                del place._token_ids[:1]
-                # if place_history_length >= 1:
-                if allow_token_copying and token_history_length >= 1:
-                    token_copy = deepcopy(token)
-                    place_copy.tokens.append(token_copy)
-                input_edge_names_to_tokens[edge.argument] = token
-                lent.append(token)
+                    if item.takes_every:
+                        place_copy.tokens.extend(deepcopy(value))
+                    else:
+                        place_copy.tokens.append(deepcopy(value))
+            input_edge_names_to_tokens[edge.argument] = value
+            if item.takes_every:
+                lent.extend(value)
+            else:
+                lent.append(value)
             if firing_ids is not None:
                 firing_ids.consumed[edge.argument] = (edge.place_node_name, taken_ids)
 
-        # Non-consuming edges. SnapshotEdge -> deep copy (the place is left untouched);
-        # MutateEdge -> the live tokens (the transition may modify them in place); a read edge ->
-        # the live tokens to look at, nothing copied and no event. Presence is guaranteed by the
-        # fireability check, so place.tokens is non-empty here, except for a SurveyEdge, which
-        # hands over a deep copy of every token, and a ReadAllEdge, which hands over every token,
-        # each possibly none.
-        for edge in (transition_names_to_read_edges or {}).get(transition.name, ()):
-            place = place_names_to_nodes[edge.place_node_name]
-            argument_type = get_type_hints(transition.function).get(edge.argument)
+        # Populate non-consuming edges.
+        for idx_pos, item in enumerate(plan.reads):
+            edge = item.edge
+            place = item.place
             if isinstance(edge, ReadEdge):
-                # A read edge: the live tokens, which keep their places and ids. Their ids are
-                # noted for the concurrent runtime, which holds their inner nets still, and are
-                # told by no event.
                 if isinstance(edge, ReadAllEdge):
-                    indices = range(len(place.tokens))
-                    value = list(place.tokens)  # a list of the body's own, of the place's tokens
+                    value = list(place.tokens)
+                    read_ids = list(place._token_ids)
                 else:
-                    index = chosen.get(edge.argument)
-                    if index is None:
-                        index = KeyedEdges.first_kept(edge, place, params) if isinstance(edge, ReadWhereEdge) else 0
-                    if index is None:
-                        raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
-                    indices = (index,)
-                    value = place.tokens[index]
+                    value, tok_id = single_reads[idx_pos]
+                    read_ids = [tok_id] if tok_id is not None else []
                 if firing_ids is not None:
-                    firing_ids.read.extend(
-                        (edge.place_node_name, place._token_ids[index]) for index in indices
-                        if index < len(place._token_ids)
-                    )
+                    firing_ids.read.extend((edge.place_node_name, token_id) for token_id in read_ids)
                 input_edge_names_to_tokens[edge.argument] = value
                 lent.extend(value if isinstance(edge, ReadAllEdge) else (value,))
                 continue
-            if edge.argument in chosen and not isinstance(edge, MutateEdge):
-                # A snapshot source: a deep copy of the token the pairing chose.
-                input_edge_names_to_tokens[edge.argument] = deepcopy(place.tokens[chosen[edge.argument]])
-                continue
-            if edge.argument in chosen or isinstance(edge, MutateWhereEdge):
-                # A mutate source or a bound mutate-where hands over the token the pairing chose,
-                # and any other keyed mutate the oldest token its filter keeps, live.
-                index = chosen.get(edge.argument)
-                if index is None:
-                    index = KeyedEdges.first_kept(edge, place, params)
-                if index is None:
-                    raise ValueError(f"no token of {place.name!r} matches the keyed edge into {transition.name!r}")
-                if firing_ids is not None and index < len(place._token_ids):
-                    firing_ids.mutated.append((edge.place_node_name, place._token_ids[index]))
-                input_edge_names_to_tokens[edge.argument] = place.tokens[index]
-                lent.append(place.tokens[index])
-                continue
-            every = isinstance(edge, SurveyEdge) or ExecutableGraphCheck.argument_takes_every_token(
-                argument_type, place.type,
-            )
-            if every:
-                value = place.tokens  # all tokens, as a list
+
+            if item.takes_every:
+                value = place.tokens
                 read_ids = list(place._token_ids)
+                if firing_ids is not None and isinstance(edge, MutateEdge):
+                    firing_ids.mutated.extend((edge.place_node_name, token_id) for token_id in read_ids)
+                if isinstance(edge, MutateEdge):
+                    lent.extend(value)
+                input_edge_names_to_tokens[edge.argument] = (
+                    deepcopy(value) if isinstance(edge, SnapshotEdge) else value
+                )
             else:
-                value = place.tokens[0]  # the single token
-                read_ids = place._token_ids[:1]
-            if firing_ids is not None and isinstance(edge, MutateEdge):
-                firing_ids.mutated.extend((edge.place_node_name, token_id) for token_id in read_ids)
-            if isinstance(edge, MutateEdge):
-                lent.extend(value if every else (value,))
-            input_edge_names_to_tokens[edge.argument] = (
-                deepcopy(value) if isinstance(edge, SnapshotEdge) else value
-            )
+                value, tok_id = single_reads[idx_pos]
+                if isinstance(edge, MutateEdge):
+                    if firing_ids is not None and tok_id is not None:
+                        firing_ids.mutated.append((edge.place_node_name, tok_id))
+                    lent.append(value)
+                    input_edge_names_to_tokens[edge.argument] = value
+                else:
+                    input_edge_names_to_tokens[edge.argument] = deepcopy(value)
 
         if firing_ids is not None:
             ClosedNets.lend(firing_ids, lent)
@@ -3339,11 +3576,11 @@ class ExecutableGraphOperations:
         mutation via MutateEdge are not undone — which is why this is opt-in.
         """
         incoming_edges = transition_names_to_incoming_edges.get(transition.name, tuple())
-        for edge in incoming_edges:
+        for edge in reversed(incoming_edges):
             if edge.argument not in input_edge_names_to_tokens:
                 continue
             place = place_names_to_nodes[edge.place_node_name]
-            argument_type = get_type_hints(transition.function).get(edge.argument)
+            argument_type = _function_type_hints(transition.function).get(edge.argument)
             # Mirror the extraction cases of stage 1 (a keyed take goes back to the front).
             if isinstance(edge, DrainEdge) or (
                 not isinstance(edge, TakeWhereEdge)
@@ -3407,6 +3644,7 @@ class ExecutableGraphOperations:
         allow_token_copying: bool = False,
         executor=None,
         net_params: Optional[dict[str, Any]] = None,
+        firing_ids: Optional[FiringTokenIds] = None,
     ) -> dict[ListPlaceNode, Any]:
         """Call the transition function and match output tokens to destination places.
 
@@ -3430,18 +3668,25 @@ class ExecutableGraphOperations:
             for name in wanted:
                 if name not in merged_kwargs:
                     merged_kwargs[name] = net_params[name]
-        if inspect.iscoroutinefunction(transition.function):
-            # Async bodies already yield; "execution" does not apply.
-            result = await transition.function(**merged_kwargs)
-        elif transition.execution == "thread":
-            # Offload a blocking / CPU-bound sync body to a thread so it doesn't freeze the
-            # event loop. ``executor=None`` uses the default ThreadPoolExecutor.
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                executor, functools.partial(transition.function, **merged_kwargs)
-            )
-        else:
-            result = transition.function(**merged_kwargs)
+        active_token = _ACTIVE_FIRING_IDS.set(firing_ids) if firing_ids is not None else None
+        try:
+            if inspect.iscoroutinefunction(transition.function):
+                # Async bodies already yield; "execution" does not apply.
+                result = await transition.function(**merged_kwargs)
+            elif transition.execution == "thread":
+                # Offload a blocking / CPU-bound sync body to a thread so it doesn't freeze the
+                # event loop. Copy the contextvar context so ``ClosedNets.note`` scopes refusals
+                # to this firing inside the worker thread too.
+                loop = asyncio.get_running_loop()
+                ctx_copy = contextvars.copy_context()
+                result = await loop.run_in_executor(
+                    executor, functools.partial(ctx_copy.run, transition.function, **merged_kwargs)
+                )
+            else:
+                result = transition.function(**merged_kwargs)
+        finally:
+            if active_token is not None:
+                _ACTIVE_FIRING_IDS.reset(active_token)
         output_place_names_to_tokens: dict[PlaceNodeName, Any] = dict()
         outgoing_edges: tuple[ReturnedEdgeFromTransition, ...] = transition_names_to_outgoing_edges.get(
             transition.name, ()
@@ -3566,7 +3811,7 @@ class ExecutableGraphOperations:
         a ``Port`` pair, gets its id from the port's subnet (``TokenIds.minter``).
         Without a graph no ids are assigned and the graph's next ``TokenIds.resync``
         re-ids the places that changed.
-        
+
         Handle token copying if required.
         Handle updating ListPlaceNode with either a single token or a list of tokens.
         Handle updating multiple place nodes with the same token if copying is allowed.
@@ -3575,7 +3820,7 @@ class ExecutableGraphOperations:
         updated_places = {}
         token_usage = {}  # Maps id(token) -> list of place_names where it's used
         need_to_copy = False
-        
+
         # First pass: track token usage
         for place_name, token in output_place_names_to_tokens.items():
             if token is None:
@@ -3584,14 +3829,14 @@ class ExecutableGraphOperations:
             if token_id not in token_usage:
                 token_usage[token_id] = []
             token_usage[token_id].append(place_name)
-        
+
         # Second pass: add tokens to places
         for place_name, token in output_place_names_to_tokens.items():
             if token is None:
                 continue  # Skip None tokens
             place = place_names_to_nodes[place_name]
             token_id = id(token)
-            
+
             # Determine if we need to copy this token
             if len(token_usage[token_id]) > 1:
                 if allow_token_copying:
@@ -3601,7 +3846,7 @@ class ExecutableGraphOperations:
                         "Token is being added to multiple places but token copying is not allowed.\n"
                         f"Token: {token}, used in places: {token_usage[token_id]}"
                     )
-            
+
             # Get the token to add (copy if needed and not the first usage)
             if need_to_copy and token_usage[token_id].index(place_name) > 0:
                 token_or_list_to_add = deepcopy(token)
@@ -3785,6 +4030,11 @@ class ExecutableGraphOperations:
                 executable_graph, "behind", executor=executor,
                 allow_token_copying=allow_token_copying, restore_tokens_on_failure=restore_tokens_on_failure,
             )
+        if transition not in fireable_transitions:
+            raise ValueError(
+                f"transition_selector returned {transition!r}, which is not among the fireable transitions "
+                f"{[t.name for t in fireable_transitions]}"
+            )
         if descend:
             # This net took its turn in its ring, whatever comes of the firing.
             NestedNets.took_own_turn(executable_graph)
@@ -3799,6 +4049,7 @@ class ExecutableGraphOperations:
             transition_names_to_read_edges=transition_names_to_read_edges,
             firing_ids=firing_ids,
             net_params=executable_graph.params,
+            record_input_places=place_history_length > 0,
         )
         # Mark the chosen transition as running while its body executes, as the
         # concurrent runner does, so an observer on another thread (a heartbeat
@@ -3824,6 +4075,7 @@ class ExecutableGraphOperations:
                 allow_token_copying=allow_token_copying,
                 executor=executor,
                 net_params=executable_graph.params,
+                firing_ids=firing_ids,
             )
             # The body returned: what the rule on closed nets refused while it held
             # a net, or found changed there, fails the firing (``ClosedNets``).

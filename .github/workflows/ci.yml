@@ -15,6 +15,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # uv checks PyPI's certificate against the root bundle compiled into its
+          # binary; 0.13.4 is the first release without the compromised
+          # eMudhra/emSign roots (October 2026).
+          version: ">=0.13.4"
+          enable-cache: true
+          cache-suffix: lint
+
+      - name: Lint
+        run: uv run --extra dev ruff check petritype tests
+
   test:
     name: tests (py${{ matrix.python }})
     # Named, not `ubuntu-latest`: the Graphviz package below has this name on

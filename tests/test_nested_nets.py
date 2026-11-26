@@ -33,7 +33,6 @@ from petritype.core.executable_graph_components import (  # noqa: E402
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
-    MutateEdge,
     NestedNets,
     NetParams,
     ReturnedEdgeFromTransition,

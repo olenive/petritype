@@ -1,5 +1,8 @@
+import logging
 from importlib import util
 from importlib.abc import SourceLoader
+
+logger = logging.getLogger(__name__)
 
 
 def get_module_code(module_name):
@@ -23,7 +26,7 @@ class Description:
             )
             return module_description
         except FileNotFoundError as e:
-            print(e)
+            logger.warning("%s", e)
             return None
 
     def of_petritype_data_structures():

@@ -2,35 +2,28 @@
 Simple Graphviz Visualization used in examples.
 """
 
-import time
-
 from petritype._optional import require
 
 require("rustworkx", "viz")
-require("matplotlib", "viz")
-
-# Guarded imports: these must follow require() so an absent extra is reported
-# with the install hint rather than a bare ModuleNotFoundError.
-import matplotlib.pyplot as plt  # noqa: E402
 
 from petritype.core.executable_graph_components import (
-    ListPlaceNode, FunctionTransitionNode, ArgumentEdgeToTransition, ReturnedEdgeFromTransition,
-    ExecutableGraph, ExecutableGraphOperations, SubnetPlaceNode,
+    ListPlaceNode, FunctionTransitionNode, ExecutableGraph, ExecutableGraphOperations, SubnetPlaceNode,
 )
+from petritype.core.type_names import TypeNames
 from petritype.plotting.rustworkx_to_graphviz import NodeLabel, RustworkxToGraphviz
 
 
 class SimpleGraphvizVisualization:
 
     def place_node_label(node: ListPlaceNode) -> str:
-        label = f"{node.name}\n({node.type.__name__})"
+        label = f"{node.name}\n({TypeNames.of(node.type)})"
         value_strings = [str(x) for x in node.tokens]
         tokens_string = "\n".join(value_strings)
-        return f"{label}\n{tokens_string}"
+        return NodeLabel.escape_quoted(f"{label}\n{tokens_string}")
 
 
     def transition_node_label(node: FunctionTransitionNode) -> str:
-        return f"{node.name}\n({node.function.__qualname__})"
+        return NodeLabel.escape_quoted(f"{node.name}\n({TypeNames.callable_name(node.function)})")
 
 
     def flow_node_attr_fn(node):
@@ -84,10 +77,10 @@ class SimpleGraphvizVisualization:
     ):
         """
         Generator that executes an executable graph step by step and yields diagrams.
-        
+
         This is an async generator that yields tuples of (step_number, diagram, transitions_fired)
         for use in Jupyter notebooks with display() and clear_output().
-            
+
         Example usage in Jupyter:
             async for step, diagram, fired in SimpleGraphvizVisualization.animate_execution_generator(...):
                 clear_output(wait=True)
@@ -96,7 +89,7 @@ class SimpleGraphvizVisualization:
                 print(f"Transitions fired: {fired}")
                 if not fired:
                     break
-                time.sleep(1.0)
+                await asyncio.sleep(1.0)
         """
         for i in range(max_iterations):
             _, transitions_fired = await ExecutableGraphOperations.execute_graph(
@@ -104,7 +97,7 @@ class SimpleGraphvizVisualization:
                 stop_after_n_firings=max_transitions_per_step,
                 verbose=verbose,
             )
-            
+
             node_attr_fn, edge_attr_fn = RustworkxToGraphviz.activation_coloured_attr_functions(
                 executable_graph
             )
@@ -114,8 +107,8 @@ class SimpleGraphvizVisualization:
                 edge_attr_fn=edge_attr_fn,
                 method=method,
             )
-            
+
             yield (i, diagram, transitions_fired)
-            
+
             if not transitions_fired:
                 break

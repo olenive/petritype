@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -136,7 +135,8 @@ class TestFilteredLabel:
         from petritype.plotting.rustworkx_to_graphviz import NodeLabel, RustworkxToGraphviz
         graph = build_wildlife()
         forest = graph.place_named("Forest")
-        summarise = lambda s: s.name
+        def summarise(s):
+            return s.name
         assert NodeLabel.default_place(forest, summarise).splitlines() == [
             "Forest", "(Species)", "Robin", "Fox", "Deer", "Woodpecker",
         ]

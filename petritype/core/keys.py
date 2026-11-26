@@ -36,7 +36,7 @@ its subnet's.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence, Union
+from typing import Any, Mapping, Optional, Sequence, Union
 
 from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
@@ -85,6 +85,20 @@ class Keys:
             keys[name] = value
         return keys
 
+    def one(place: ListPlaceNode, token: Any, key: str) -> KeyValue:
+        """One key of ``token`` as ``place`` derives it now, without running
+        other key extractors. ``KeyError`` if the place does not declare ``key``;
+        ``TypeError`` if the extractor gives anything but a string, an integer or
+        a boolean."""
+        extract = (place.keys or {})[key]
+        value = extract(token)
+        if not is_key_value(value):
+            raise TypeError(
+                f"key {key!r} of a token in {place.name!r} is {type(value).__name__}; "
+                f"a key is a string, an integer or a boolean"
+            )
+        return value
+
 
 # --- filters ---------------------------------------------------------------------------------
 
@@ -114,6 +128,7 @@ class Clause:
     param: Optional[str] = None
     input: Optional[PlaceKey] = None
     input_key: Optional[str] = None
+    _typed_values: frozenset[tuple[type, KeyValue]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         given = sum((bool(self.values), self.param is not None, self.input is not None))
@@ -128,6 +143,7 @@ class Clause:
                 raise TypeError("a clause's input is a place's name or a Port pair")
             if not isinstance(self.input_key, str):
                 raise TypeError("a clause's input_key is a key's name")
+        object.__setattr__(self, "_typed_values", frozenset((type(value), value) for value in self.values))
 
     def accepts(self, keys: Mapping[str, KeyValue], params: Mapping[str, Any]) -> bool:
         """Whether a token with these keys passes, with ``params`` the net's
@@ -140,7 +156,7 @@ class Clause:
         value = keys[self.key]
         if self.param is not None:
             return self.param in params and same_value(value, params[self.param])
-        return any(same_value(value, accepted) for accepted in self.values)
+        return is_key_value(value) and (type(value), value) in self._typed_values
 
 
 @dataclass(frozen=True)
@@ -254,14 +270,17 @@ class Query:
         its pair), in order of first appearance in place order then token order,
         ports included; ``[]`` for a key no place declares."""
         seen: list[KeyValue] = []
+        seen_typed: set[tuple[type, KeyValue]] = set()
         for place_key, place in MapPlaceNames.to_list_place_nodes(graph).items():
             if places is not None and place_key not in places:
                 continue
             if not place.keys or key not in place.keys:
                 continue
             for token in place.tokens:
-                value = Keys.of(place, token)[key]
-                if not any(same_value(value, known) for known in seen):
+                value = Keys.one(place, token, key)
+                typed = (type(value), value)
+                if typed not in seen_typed:
+                    seen_typed.add(typed)
                     seen.append(value)
         return seen
 

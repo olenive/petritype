@@ -1,88 +1,156 @@
-from typing import Any, Type, Union, get_origin, get_args, TypeAliasType
+from collections.abc import ItemsView, Iterable, Iterator, Mapping
 from types import UnionType
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    Tuple,
+    Type,
+    TypeAliasType,
+    Union,
+    get_args,
+    get_origin,
+)
 
 
 class CompareTypes:
 
     def between_value_and_type(value: Any, type_: Type) -> bool:
         """
-        Strict type checking that treats int and float as distinct types.
-        Unlike typeguard's check_type, this does NOT accept int as float.
+        Strict type checking that treats int, float, and bool as distinct types.
+        Unlike typeguard's check_type, this does NOT accept int as float,
+        and unlike plain isinstance(), this does NOT accept bool as int.
         """
         if type_ is Any:
             return True
-    
-        # Handle None tokens gracefully
-        if value is None:
-            if type_ is None:
-                return True
-            # Check if the place type is Optional or Union with None
-            if get_origin(type_) in (Union, UnionType) and type(None) in get_args(type_):
-                return True
-            return False
-    
-        # Handle TypeAliasType
+
+        # Handle None and type(None)
+        if type_ is None or type_ is type(None):
+            return value is None
+
+        # Handle TypeAliasType (PEP 695 `type X = ...`)
         if isinstance(type_, TypeAliasType):
             return CompareTypes.between_value_and_type(value, type_.__value__)
-        
+
         origin = get_origin(type_)
-        
-        # Handle Union types
+
+        # Handle Annotated[T, ...]
+        if origin is Annotated:
+            args = get_args(type_)
+            if args:
+                return CompareTypes.between_value_and_type(value, args[0])
+            return False
+
+        # Handle Literal[...] with strict type equality (bool != int, int != float)
+        if origin is Literal:
+            return any(
+                type(value) is type(arg) and value == arg
+                for arg in get_args(type_)
+            )
+
+        # Handle Union types (Union[A, B], Optional[A], A | B)
         if origin in (Union, UnionType):
             return any(
                 CompareTypes.between_value_and_type(value, arg)
                 for arg in get_args(type_)
             )
-        
-        # Handle parameterized generics (list[int], dict[str, int], tuple[str, str], etc.)
+
+        # Handle parameterized generics (tuple, list, dict, set, frozenset,
+        # Sequence, Mapping, Collection, Iterable, Callable, etc.)
         if origin is not None:
-            # First check if the value is an instance of the origin type
+            if not isinstance(origin, type):
+                return False
+
             if not isinstance(value, origin):
                 return False
-            
+
             args = get_args(type_)
-            if not args:
-                return True
-            
-            # Check tuple types
+
+            # Check tuple types before `if not args` because tuple[()] has args == ()
             if origin is tuple:
-                if not isinstance(value, tuple):
-                    return False
+                if type_ is Tuple:
+                    return True
+                if not args or args == ((),):
+                    return len(value) == 0
+                if len(args) == 2 and args[1] is Ellipsis:
+                    inner_type = args[0]
+                    return all(
+                        CompareTypes.between_value_and_type(item, inner_type)
+                        for item in value
+                    )
                 if len(args) != len(value):
                     return False
                 return all(
                     CompareTypes.between_value_and_type(v, t)
                     for v, t in zip(value, args)
                 )
-            
-            # Check list types
-            if origin is list:
-                if not isinstance(value, list):
-                    return False
-                if not args:
+
+            if not args:
+                return True
+
+            # Check type[T]
+            if origin is type and len(args) == 1:
+                target = args[0]
+                if target is Any:
+                    return True
+                if isinstance(target, type):
+                    if target is int and value is bool:
+                        return False
+                    return issubclass(value, target)
+                if get_origin(target) in (Union, UnionType):
+                    return any(
+                        CompareTypes.between_value_and_type(value, type[a])
+                        for a in get_args(target)
+                    )
+                return True
+
+            # Check mapping types (dict, Mapping, MutableMapping, defaultdict, etc.)
+            if issubclass(origin, Mapping):
+                if len(args) == 2:
+                    key_type, val_type = args
+                    return all(
+                        CompareTypes.between_value_and_type(k, key_type)
+                        and CompareTypes.between_value_and_type(v, val_type)
+                        for k, v in value.items()
+                    )
+                if len(args) == 1:
+                    key_type = args[0]
+                    return all(
+                        CompareTypes.between_value_and_type(k, key_type)
+                        for k in value
+                    )
+                return True
+
+            # Check ItemsView[K, V]
+            if issubclass(origin, ItemsView) and len(args) == 2:
+                key_type, val_type = args
+                return all(
+                    CompareTypes.between_value_and_type(k, key_type)
+                    and CompareTypes.between_value_and_type(v, val_type)
+                    for k, v in value
+                )
+
+            # Check single-parameter iterables (list, set, frozenset, Sequence,
+            # Collection, Iterable, deque, KeysView, ValuesView, etc.)
+            if issubclass(origin, Iterable) and not issubclass(origin, Iterator) and len(args) == 1:
+                # Do not consume one-shot iterators/generators
+                if isinstance(value, Iterator):
                     return True
                 inner_type = args[0]
                 return all(
                     CompareTypes.between_value_and_type(item, inner_type)
                     for item in value
                 )
-            
-            # Check dict types
-            if origin is dict:
-                if not isinstance(value, dict):
-                    return False
-                if len(args) != 2:
-                    return True
-                key_type, val_type = args
-                return all(
-                    CompareTypes.between_value_and_type(k, key_type) and
-                    CompareTypes.between_value_and_type(v, val_type)
-                    for k, v in value.items()
-                )
-        
-        # Strict type check: int and float are different
-        # Use type() instead of isinstance() for strict checking because isinstance(True, int) is True.
-        return type(value) is type_ or isinstance(value, type_)
+
+            # Other parameterized generics (e.g. Callable[[int], str], Iterator[int],
+            # Container[int], custom Generic[T]): origin check already passed.
+            return True
+
+        # Strict check: reject bool when int is expected (bool subclasses int in Python).
+        if type_ is int and isinstance(value, bool):
+            return False
+
+        return isinstance(value, type_)
 
     def between_annotations(annotation1: Type, annotation2: Type) -> bool:
         if annotation1 == annotation2:
@@ -128,8 +196,8 @@ class CompareTypes:
 
         Handles both symmetric cases (list[T] vs list[T]) and asymmetric cases
         where one is a list and the other is the element type (T vs list[T]).
-        
-        For Petri nets: checks if a token of type T can be extracted from a 
+
+        For Petri nets: checks if a token of type T can be extracted from a
         place holding list[T], or vice versa.
         """
         origin1 = get_origin(annotation1)
@@ -143,12 +211,12 @@ class CompareTypes:
             inner_type1 = args1[0]
             inner_type2 = args2[0]
             return CompareTypes.between_annotations(inner_type1, inner_type2)
-        
+
         # Case 2: One is a list, one is not - compare element type with non-list type
         if origin1 is list and origin2 is not list and len(args1) == 1:
             inner_type1 = args1[0]
             return CompareTypes.between_annotations(inner_type1, annotation2)
-        
+
         if origin2 is list and origin1 is not list and len(args2) == 1:
             inner_type2 = args2[0]
             return CompareTypes.between_annotations(annotation1, inner_type2)

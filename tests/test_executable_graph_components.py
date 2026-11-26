@@ -138,7 +138,7 @@ class TestExecutableGraphCheck:
         ]
         result = ExecutableGraphCheck.value_and_places_types_match([], places)
         assert list(result) == places
-    
+
     def test_value_and_places_types_match_with_empty_list_debug_01a(self):
 
         class A(BaseModel):
@@ -225,7 +225,7 @@ class TestExecutableGraphOperations:
 
     def test_add_tokens_to_places_empty_list_to_unparameterised_list_type(self):
         """Test adding an empty list to a place with type=list (unparameterised).
-        
+
         This is the follow-up test case for test_value_and_places_types_match_when_comparing_an_empty_list_case_02.
         When a place has type=list (not list[T]), an empty list token is appended as a single element.
         """
@@ -247,7 +247,7 @@ class TestExecutableGraphOperations:
             "place2": ListPlaceNode(name='place2', type=list[str], tokens=[["a", "b"], ["c"]])
         }
         tokens_to_add = {'place1': [], 'place2': []}
-        result = ExecutableGraphOperations.add_tokens_to_places(
+        ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, place_names_to_nodes, allow_token_copying=False
         )
         assert place_names_to_nodes['place1'].tokens == [[1, 2], [3, 4], []]
@@ -333,7 +333,7 @@ class TestExecutableGraphOperations:
         self, place_configs, tokens_dict, expected_results
     ):
         """Test adding different tokens to multiple places."""
-        places = {name: ListPlaceNode(name=name, type=ptype, tokens=[]) 
+        places = {name: ListPlaceNode(name=name, type=ptype, tokens=[])
                   for name, ptype in place_configs}
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_dict, places, allow_token_copying=False
@@ -388,11 +388,11 @@ class TestExecutableGraphOperations:
         place = ListPlaceNode(name='place1', type=place_type, tokens=initial_tokens.copy())
         place_names_to_nodes = {'place1': place}
         tokens_to_add = {}
-        
+
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, place_names_to_nodes, allow_token_copying=allow_copying
         )
-        
+
         assert place.tokens == initial_tokens
         assert len(result) == 0
 
@@ -412,11 +412,11 @@ class TestExecutableGraphOperations:
         place = ListPlaceNode(name='place1', type=place_type, tokens=initial_tokens.copy())
         place_names_to_nodes = {'place1': place}
         tokens_to_add = {'place1': None}
-        
+
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, place_names_to_nodes, allow_token_copying=allow_copying
         )
-        
+
         # None should be skipped, tokens unchanged
         assert place.tokens == initial_tokens
         assert len(result) == 0
@@ -536,11 +536,11 @@ class TestExecutableGraphOperations:
         place2 = ListPlaceNode(name='place2', type=MyModel, tokens=[])
         place_names_to_nodes = {'place1': place1, 'place2': place2}
         tokens_to_add = {'place1': original_model, 'place2': original_model}
-        
+
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, place_names_to_nodes, allow_token_copying=True
         )
-        
+
         assert place1.tokens == [original_model]
         assert place2.tokens == [original_model]
         # Verify deep copy - modify one shouldn't affect the other
@@ -583,30 +583,30 @@ class TestExecutableGraphOperations:
         places = {}
         tokens_to_add = {}
         expected_values = {}
-        
+
         for place_name, model_params in place_configs_and_models:
             model_instance = MyModel(**model_params)
             places[place_name] = ListPlaceNode(name=place_name, type=MyModel, tokens=[])
             tokens_to_add[place_name] = model_instance
             expected_values[place_name] = model_params
-        
+
         result = ExecutableGraphOperations.add_tokens_to_places(
             tokens_to_add, places, allow_token_copying=False
         )
-        
+
         # Verify each place has the correct token
         for place_name, expected_params in expected_values.items():
             assert len(places[place_name].tokens) == 1
             assert places[place_name].tokens[0].a == expected_params['a']
             assert places[place_name].tokens[0].b == expected_params['b']
-        
+
         assert len(result) == len(place_configs_and_models)
-        
+
         # Verify that modifying one place's token doesn't affect others
         first_place = list(places.keys())[0]
         places[first_place].tokens[0].a = 9999
         places[first_place].tokens[0].b = 'modified'
-        
+
         # Check that other places remain unchanged
         for i, (place_name, expected_params) in enumerate(expected_values.items()):
             if i > 0:  # Skip the first place we just modified
@@ -615,7 +615,7 @@ class TestExecutableGraphOperations:
 
     def test_add_tokens_to_places_with_empty_list_and_non_list_place_type(self):
         """Test adding an empty list to a place that expects non-list type.
-        
+
         The list is unrolled but since it's empty, no tokens are added.
         """
         place = ListPlaceNode(name='place1', type=int, tokens=[1, 2, 3])

@@ -12,11 +12,9 @@ from __future__ import annotations
 
 import inspect
 import json
-import re
-import types
-from typing import Any, Callable, Literal, Optional, TypeAliasType, Union, get_args, get_origin, get_type_hints
+from typing import Any, Callable, Optional, Union, get_origin, get_type_hints
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel
 
 from petritype.core import serialisation as _serialisation
 from petritype.core.events import PathStep, PlaceKey, Port
@@ -26,9 +24,10 @@ from petritype.core.executable_graph_components import (
 )
 from petritype.core.keys import Clause, Filter, Keys, is_key_value
 from petritype.core.serialisation import JsonForm
-from petritype.runner.protocol import ErrorCode, ProtocolError
 from petritype.core.type_comparisons import CompareTypes
+from petritype.core.type_names import TypeNames
 from petritype.runner import protocol as wire
+from petritype.runner.protocol import ErrorCode, ProtocolError
 
 
 # The wire cap on a label, in Unicode scalar values, *including* the marker
@@ -57,36 +56,6 @@ JSON_SCALARS = _serialisation.JSON_SCALARS
 # The control kinds whose ``config.value`` is an initial value (§5.1); a button's and a
 # text's ``value``, if any, stays off the wire.
 KINDS_WITH_INITIAL = frozenset({"toggle", "slider", "select"})
-
-
-class TypeNames:
-    """Functions that spell Python types for display."""
-
-    def of(annotation: Any) -> str:
-        """Short text for a type or annotation: class names without module paths,
-        generics with their arguments, unions with ``|``. A string annotation
-        (postponed evaluation) is returned as written."""
-        if annotation is inspect.Parameter.empty:
-            return "Any"
-        if isinstance(annotation, str):
-            return annotation
-        if annotation is None or annotation is type(None):
-            return "None"
-        if annotation is Ellipsis:
-            return "..."
-        if isinstance(annotation, TypeAliasType):
-            return annotation.__name__
-        origin, args = get_origin(annotation), get_args(annotation)
-        if origin is Union or origin is types.UnionType:
-            return " | ".join(TypeNames.of(arg) for arg in args)
-        if origin is Literal:
-            return f"Literal[{', '.join(repr(arg) for arg in args)}]"
-        if origin is not None and args:
-            return f"{TypeNames.of(origin)}[{', '.join(TypeNames.of(arg) for arg in args)}]"
-        name = getattr(annotation, "__name__", None)
-        if isinstance(name, str):
-            return name
-        return re.sub(r"(?:\w+\.)+(\w+)", r"\1", str(annotation))
 
 
 class Labels:

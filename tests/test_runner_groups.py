@@ -6,7 +6,6 @@ conformance net ``groups``; these tests add a net a token carries, the nested id
 a net with no groups, and that a firing names no group.
 """
 
-import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,12 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from petritype import petri_net  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
-    ArgumentEdgeToTransition,
     ExecutableGraph,
     ExecutableGraphOperations,
-    FunctionTransitionNode,
     ListPlaceNode,
-    ReturnedEdgeFromTransition,
 )
 from petritype.runner.owner import Owner  # noqa: E402
 from petritype.runner.registry import Registry  # noqa: E402

@@ -20,9 +20,9 @@ from petritype.core.data_structures import (
 # Relationship Edges
 type DataForTypeNodes = dict[TypeName, TypeVariableWithAnnotations]
 type DataForFunctionNodes = dict[FunctionFullName, FunctionWithAnnotations]
-type TypeToTypeEdges = dict[tuple[tuple[TypeName, TypeName], TypeRelationship]]
-type TypeToFunctionEdges = dict[tuple[tuple[TypeName, FunctionFullName], TypeRelationship]]
-type FunctionToTypeEdges = dict[tuple[tuple[FunctionFullName, TypeName], TypeRelationship]]
+type TypeToTypeEdges = dict[tuple[TypeName, TypeName], TypeRelationship]
+type TypeToFunctionEdges = dict[tuple[TypeName, FunctionFullName], TypeRelationship]
+type FunctionToTypeEdges = dict[tuple[FunctionFullName, TypeName], TypeRelationship]
 
 
 class RelationshipEdges:
@@ -81,7 +81,7 @@ class RelationshipEdges:
                     for subtype in arg_subtypes:
                         if subtype not in ignored_types and subtype == type_variable.name:
                             from_to = (type_variable.name, function.function_full_name)
-                            out[from_to] = TypeRelationship.TAKES_AS_EXACT_TYPE_OF_ARGUMENT
+                            out[from_to] = TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT
         return out
 
     def function_to_type(

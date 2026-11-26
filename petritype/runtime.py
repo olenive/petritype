@@ -92,8 +92,13 @@ from petritype.core.executable_graph_components import (
     HeldByBodyError,
     MapPlaceNames,
     MapTransitionNames,
+    MutateEdge,
     NestedNets,
-    NetParams,
+    PetritypeError,
+    ReadAllEdge,
+    ReadEdge,
+    SnapshotEdge,
+    Stage1Plan,
     SubnetPlaceNode,
     TokenIds,
     default_transition_selector,
@@ -164,7 +169,7 @@ class RunSummary(BaseModel):
     fired: dict[Union[str, InnerFiring], int]
 
 
-class TooManyFiringsError(RuntimeError):
+class TooManyFiringsError(PetritypeError, RuntimeError):
     """``RunContext.error_after_n_firings`` was spent and the net attempted another
     firing. Raised *before* the offending firing consumes anything. ``summary`` is a
     ``RunSummary`` of what the interrupted call had executed (attached when the error
@@ -615,7 +620,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
             return _reject(ctx, f"the net declares no parameter {cmd.param!r}")
         if not _controls_allowed(ctx, cmd, f"setting parameter {cmd.param!r}"):
             return False
-        NetParams.set(graph, cmd.param, cmd.value)
+        graph.params[cmd.param] = cmd.value
+        GraphEvents.record(graph, ParamChanged(None, cmd.param))
         return True
 
     if isinstance(cmd, (Enable, Disable)):
@@ -746,8 +752,143 @@ async def _fire_one(ctx: RunContext, place_nodes: dict, incoming: dict, outgoing
     return True
 
 
+@dataclass(frozen=True)
+class _Claims:
+    """Per-token and whole-place reader/writer claims for one concurrent firing.
+
+    ``need_*`` are checked atomically against all currently active ``hold_*``
+    claims before launch (preventing concurrent data races and preserving strict
+    FIFO head-of-line waiting without lock deadlocks). ``hold_*`` stay active
+    while the body runs: consumed tokens are removed synchronously at launch and
+    snapshots deep-copy synchronously at launch, so only live ``MutateEdge``
+    (exclusive) and ``ReadEdge`` (shared) claims remain held in flight.
+    """
+
+    need_exclusive_tokens: frozenset[tuple[PlaceKey, int]] = frozenset()
+    need_shared_tokens: frozenset[tuple[PlaceKey, int]] = frozenset()
+    need_exclusive_places: frozenset[PlaceKey] = frozenset()
+    need_shared_places: frozenset[PlaceKey] = frozenset()
+    hold_exclusive_tokens: frozenset[tuple[PlaceKey, int]] = frozenset()
+    hold_shared_tokens: frozenset[tuple[PlaceKey, int]] = frozenset()
+    hold_exclusive_places: frozenset[PlaceKey] = frozenset()
+    hold_shared_places: frozenset[PlaceKey] = frozenset()
+
+
+def _claims_from_plan(plan: Stage1Plan) -> _Claims:
+    """Derive reader/writer claims from a validated ``Stage1Plan``."""
+    need_ex_tok: set[tuple[PlaceKey, int]] = set()
+    need_sh_tok: set[tuple[PlaceKey, int]] = set()
+    need_ex_place: set[PlaceKey] = set()
+    need_sh_place: set[PlaceKey] = set()
+    hold_ex_tok: set[tuple[PlaceKey, int]] = set()
+    hold_sh_tok: set[tuple[PlaceKey, int]] = set()
+    hold_ex_place: set[PlaceKey] = set()
+    hold_sh_place: set[PlaceKey] = set()
+
+    for item in plan.incoming:
+        key = item.edge.place_node_name
+        if item.takes_every:
+            need_ex_place.add(key)
+        else:
+            idx = item.indices[0]
+            if idx < len(item.place._token_ids):
+                need_ex_tok.add((key, item.place._token_ids[idx]))
+            else:
+                need_ex_place.add(key)
+
+    for item in plan.reads:
+        edge = item.edge
+        key = edge.place_node_name
+        if isinstance(edge, MutateEdge):
+            if item.takes_every:
+                need_ex_place.add(key)
+                hold_ex_place.add(key)
+            else:
+                idx = item.indices[0]
+                if idx < len(item.place._token_ids):
+                    pair = (key, item.place._token_ids[idx])
+                    need_ex_tok.add(pair)
+                    hold_ex_tok.add(pair)
+                else:
+                    need_ex_place.add(key)
+                    hold_ex_place.add(key)
+        elif isinstance(edge, ReadEdge):
+            if isinstance(edge, ReadAllEdge) or item.takes_every:
+                need_sh_place.add(key)
+                hold_sh_place.add(key)
+            else:
+                idx = item.indices[0]
+                if idx < len(item.place._token_ids):
+                    pair = (key, item.place._token_ids[idx])
+                    need_sh_tok.add(pair)
+                    hold_sh_tok.add(pair)
+                else:
+                    need_sh_place.add(key)
+                    hold_sh_place.add(key)
+        elif isinstance(edge, SnapshotEdge):
+            if item.takes_every:
+                need_sh_place.add(key)
+            else:
+                idx = item.indices[0]
+                if idx < len(item.place._token_ids):
+                    need_sh_tok.add((key, item.place._token_ids[idx]))
+                else:
+                    need_sh_place.add(key)
+
+    return _Claims(
+        need_exclusive_tokens=frozenset(need_ex_tok),
+        need_shared_tokens=frozenset(need_sh_tok),
+        need_exclusive_places=frozenset(need_ex_place),
+        need_shared_places=frozenset(need_sh_place),
+        hold_exclusive_tokens=frozenset(hold_ex_tok),
+        hold_shared_tokens=frozenset(hold_sh_tok),
+        hold_exclusive_places=frozenset(hold_ex_place),
+        hold_shared_places=frozenset(hold_sh_place),
+    )
+
+
+def _conflicts(claims: _Claims, flight_state: dict) -> bool:
+    """True iff ``claims`` conflicts with any lock held by an in-flight firing."""
+    if not flight_state:
+        return False
+    held_ex_tok: set[tuple[PlaceKey, int]] = set()
+    held_sh_tok: set[tuple[PlaceKey, int]] = set()
+    held_ex_place: set[PlaceKey] = set()
+    held_sh_place: set[PlaceKey] = set()
+    for _transition, _args, _firing_ids, active in flight_state.values():
+        held_ex_tok.update(active.hold_exclusive_tokens)
+        held_sh_tok.update(active.hold_shared_tokens)
+        held_ex_place.update(active.hold_exclusive_places)
+        held_sh_place.update(active.hold_shared_places)
+    if not (held_ex_tok or held_sh_tok or held_ex_place or held_sh_place):
+        return False
+    held_ex_tok_places = {place for place, _ in held_ex_tok}
+    held_sh_tok_places = {place for place, _ in held_sh_tok}
+
+    for place in claims.need_exclusive_places:
+        if (
+            place in held_ex_place
+            or place in held_sh_place
+            or place in held_ex_tok_places
+            or place in held_sh_tok_places
+        ):
+            return True
+    for place in claims.need_shared_places:
+        if place in held_ex_place or place in held_ex_tok_places:
+            return True
+    for pair in claims.need_exclusive_tokens:
+        place = pair[0]
+        if pair in held_ex_tok or pair in held_sh_tok or place in held_ex_place or place in held_sh_place:
+            return True
+    for pair in claims.need_shared_tokens:
+        place = pair[0]
+        if pair in held_ex_tok or place in held_ex_place:
+            return True
+    return False
+
+
 def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: dict, incoming: dict,
-            outgoing: dict, read: dict) -> tuple[asyncio.Future, FiringTokenIds, dict]:
+            outgoing: dict, read: dict, *, plan: Optional[Stage1Plan] = None) -> tuple[asyncio.Future, FiringTokenIds, dict]:
     """Concurrent-mode launch: consume the inputs synchronously (no await, so peers
     can't grab the same tokens), then start the body as a background task. The task
     resolves to ``(outputs, duration_ms)``, timed around the body itself rather than
@@ -764,6 +905,8 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
             firing_ids=firing_ids,
             # The parameters a keyed edge's clause may name, as the fireability check read them.
             net_params=ctx.graph.params,
+            plan=plan,
+            record_input_places=False,
         )
 
     async def timed_body():
@@ -774,8 +917,10 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
                 tokens_kwargs=args,
                 transition_names_to_outgoing_edges=outgoing,
                 place_names_to_nodes=place_nodes,
+                allow_token_copying=ctx.graph.allow_token_copying,
                 executor=ctx.thread_pool,
                 net_params=ctx.graph.params,
+                firing_ids=firing_ids,
             )
             ClosedNets.settle(firing_ids)
             return outputs, (time.perf_counter() - started) * 1000.0
@@ -783,6 +928,85 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
             ClosedNets.release(firing_ids)
 
     return asyncio.ensure_future(timed_body()), firing_ids, args
+
+
+def _launch_sweep(
+    ctx: RunContext,
+    place_nodes: dict,
+    incoming: dict,
+    outgoing: dict,
+    read: dict,
+    in_flight: dict[asyncio.Future, str],
+    flight_state: dict[asyncio.Future, tuple],
+    remaining_cap: Optional[int] = None,
+) -> int:
+    """Launch as many non-conflicting transitions as possible in one concurrent
+    sweep, honouring ``priority``, ``tie_break``, ``transition_selector``,
+    ``disabled``, guards, and per-token reader/writer locks.
+
+    Repeatedly computes all launchable (non-airborne, non-disabled,
+    non-conflicting, token-ready, guard-passing) transitions, asks the graph's
+    selector to pick one, checks the fuse, and launches it atomically until no
+    launchable transition remains or ``remaining_cap`` is reached.
+    """
+    graph = ctx.graph
+    airborne = set(in_flight.values())
+    selector = graph.transition_selector or default_transition_selector
+    launched = 0
+
+    while remaining_cap is None or launched < remaining_cap:
+        candidates: list[FunctionTransitionNode] = []
+        plans_and_claims: dict[str, tuple[Stage1Plan, _Claims]] = {}
+        for transition in graph.transitions:
+            if (
+                transition.name in airborne
+                or transition.name in ctx.disabled
+                or transition.name in graph.disabled
+            ):
+                continue
+            plan = ExecutableGraphOperations.plan_stage_1(
+                transition=transition,
+                transition_names_to_incoming_edges=incoming,
+                place_names_to_nodes=place_nodes,
+                transition_names_to_read_edges=read,
+                net_params=graph.params,
+                check_filters=True,
+            )
+            if plan is None:
+                continue
+            claims = _claims_from_plan(plan)
+            if _conflicts(claims, flight_state):
+                continue
+            if transition.guard is not None and not bool(transition.guard(graph)):
+                continue
+            candidates.append(transition)
+            plans_and_claims[transition.name] = (plan, claims)
+
+        if not candidates:
+            break
+        chosen = selector(graph, candidates)
+        if chosen is None:
+            break
+        if chosen not in candidates:
+            raise ValueError(
+                f"transition_selector returned {chosen!r}, which is not among the launchable transitions "
+                f"{[t.name for t in candidates]}"
+            )
+        if _fuse_spent(ctx):
+            _blow_fuse(ctx, chosen.name)
+        plan, claims = plans_and_claims[chosen.name]
+        task, firing_ids, args = _launch(
+            ctx, chosen, place_nodes, incoming, outgoing, read, plan=plan,
+        )
+        in_flight[task] = chosen.name
+        flight_state[task] = (chosen, args, firing_ids, claims)
+        airborne.add(chosen.name)
+        launched += 1
+        ctx.n_fired += 1
+
+    if launched:
+        NestedNets.took_own_turn(graph)
+    return launched
 
 
 def _complete(ctx: RunContext, task: asyncio.Future, transition: FunctionTransitionNode, consumed: dict,
@@ -824,14 +1048,32 @@ def _land(graph: ExecutableGraph, task: asyncio.Future, transition: FunctionTran
         place_names_to_nodes=place_nodes,
         firing_ids=firing_ids,
         duration_ms=duration_ms,
+        allow_token_copying=graph.allow_token_copying,
     )
 
 
 def _release_all(flight_state: dict) -> None:
     """The holds of every firing still in flight, released as a concurrent loop
     ends, so that no net is left held by a body that will never be awaited."""
-    for _transition, _args, firing_ids in flight_state.values():
-        ClosedNets.release(firing_ids)
+    for entry in flight_state.values():
+        ClosedNets.release(entry[2])
+
+
+async def _cancel_and_cleanup(in_flight: dict, flight_state: dict, graph: ExecutableGraph) -> None:
+    """Cancel all in-flight tasks, await cancellation of non-thread tasks so their
+    cleanup blocks run before holds are released, release any remaining holds, and
+    clear ``graph.in_flight``."""
+    pending = list(in_flight)
+    for task in pending:
+        task.cancel()
+    awaitable = [
+        task for task in pending
+        if task in flight_state and flight_state[task][0].execution != "thread"
+    ]
+    if awaitable:
+        await asyncio.gather(*awaitable, return_exceptions=True)
+    _release_all(flight_state)
+    graph.in_flight = set()
 
 
 def _held(flight_state: dict) -> frozenset:
@@ -839,8 +1081,8 @@ def _held(flight_state: dict) -> frozenset:
     mutate edge or a read edge (since 2026-11-23): tokens still in their places,
     whose inner nets no inner firing may touch while such a body runs."""
     return frozenset(
-        pair for _transition, _args, firing_ids in flight_state.values()
-        for pair in (*firing_ids.mutated, *firing_ids.read)
+        pair for entry in flight_state.values()
+        for pair in (*entry[2].mutated, *entry[2].read)
     )
 
 
@@ -1053,36 +1295,23 @@ class Runner:
                 inner_turn = not capped and await _fire_inner(ctx, "ahead", _held(flight_state))
                 if inner_turn:
                     launched_this_call += 1
-                airborne = set(in_flight.values())
                 launched_this_sweep = 0
                 if not capped and not inner_turn:
-                    for transition in graph.transitions:
-                        if transition.name in airborne or transition.name in ctx.disabled:
-                            continue  # already running, or toggled off via Disable
-                        if ExecutableGraphCheck.transition_is_fireable(
-                            transition=transition,
-                            executable_graph=graph,
-                            transition_names_to_incoming_edges=incoming,
-                            place_names_to_nodes=place_nodes,
-                            transition_names_to_read_edges=read,
-                        ):
-                            if _fuse_spent(ctx):
-                                _blow_fuse(ctx, transition.name)
-                            task, firing_ids, args = _launch(ctx, transition, place_nodes, incoming, outgoing, read)
-                            in_flight[task] = transition.name
-                            flight_state[task] = (transition, args, firing_ids)
-                            airborne.add(transition.name)
-                            launched_this_call += 1
-                            launched_this_sweep += 1
-                            ctx.n_fired += 1
-                            if (
-                                stop_after_n_firings is not None
-                                and launched_this_call >= stop_after_n_firings
-                            ):
-                                capped = True
-                                break
-                    if launched_this_sweep:
-                        NestedNets.took_own_turn(graph)  # the sweep was the outer net's turn
+                    remaining_cap = (
+                        stop_after_n_firings - launched_this_call
+                        if stop_after_n_firings is not None
+                        else None
+                    )
+                    launched_this_sweep = _launch_sweep(
+                        ctx, place_nodes, incoming, outgoing, read,
+                        in_flight, flight_state, remaining_cap=remaining_cap,
+                    )
+                    launched_this_call += launched_this_sweep
+                    if (
+                        stop_after_n_firings is not None
+                        and launched_this_call >= stop_after_n_firings
+                    ):
+                        capped = True
 
                 if set(in_flight.values()) != graph.in_flight:
                     graph.in_flight = set(in_flight.values())
@@ -1115,7 +1344,7 @@ class Runner:
                     continue
                 for task in done:
                     in_flight.pop(task)
-                    fired_transition, consumed, firing_ids = flight_state.pop(task)
+                    fired_transition, consumed, firing_ids, _claims = flight_state.pop(task)
                     if task.exception() is not None:
                         graph.in_flight = set(in_flight.values())
                     # Raises TransitionFailedError carrying the consumed tokens if the
@@ -1128,10 +1357,7 @@ class Runner:
             # in-flight bodies. asyncio.wait does not cancel what it waits on, and
             # an abandoned task's outputs would never be deposited — silent token
             # loss on top of whatever interrupted the run.
-            for task in in_flight:
-                task.cancel()
-            _release_all(flight_state)
-            graph.in_flight = set()
+            await _cancel_and_cleanup(in_flight, flight_state, graph)
 
     async def _tick_sequential(ctx: RunContext, tick: float) -> None:
         place_nodes, incoming, outgoing, read = _prepare(ctx.graph)
@@ -1163,32 +1389,17 @@ class Runner:
                 TokenIds.resync(graph)
 
                 inner_turn = await _fire_inner(ctx, "ahead", _held(flight_state))
-                airborne = set(in_flight.values())
-                launched_this_sweep = 0
-                for transition in [] if inner_turn else graph.transitions:
-                    if transition.name in airborne or transition.name in ctx.disabled:
-                        continue
-                    if ExecutableGraphCheck.transition_is_fireable(
-                        transition=transition,
-                        executable_graph=graph,
-                        transition_names_to_incoming_edges=incoming,
-                        place_names_to_nodes=place_nodes,
-                        transition_names_to_read_edges=read,
-                    ):
-                        if _fuse_spent(ctx):
-                            _blow_fuse(ctx, transition.name)
-                        task, firing_ids, args = _launch(ctx, transition, place_nodes, incoming, outgoing, read)
-                        in_flight[task] = transition.name
-                        flight_state[task] = (transition, args, firing_ids)
-                        airborne.add(transition.name)
-                        ctx.n_fired += 1
-                        launched_this_sweep += 1
-                if launched_this_sweep:
-                    NestedNets.took_own_turn(graph)  # the sweep was the outer net's turn
+                launched_this_sweep = (
+                    0
+                    if inner_turn
+                    else _launch_sweep(
+                        ctx, place_nodes, incoming, outgoing, read, in_flight, flight_state,
+                    )
+                )
 
                 for task in [t for t in in_flight if t.done()]:
                     in_flight.pop(task)
-                    fired_transition, consumed, firing_ids = flight_state.pop(task)
+                    fired_transition, consumed, firing_ids, _claims = flight_state.pop(task)
                     # Raises TransitionFailedError carrying the consumed tokens if the
                     # body failed; restores them first when graph.restore_tokens_on_failure is set.
                     _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
@@ -1205,7 +1416,4 @@ class Runner:
                 if await _sleep_or_stop(ctx, tick):
                     return
         finally:
-            for task in in_flight:
-                task.cancel()
-            _release_all(flight_state)
-            graph.in_flight = set()
+            await _cancel_and_cleanup(in_flight, flight_state, graph)

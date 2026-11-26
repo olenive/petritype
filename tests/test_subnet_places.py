@@ -504,7 +504,9 @@ def test_a_failed_firing_inside_a_subnet_is_told_as_an_inner_failure():
 # --- the in-flight rule ------------------------------------------------------------------------
 
 
-def walking_world(door=(), lobby=(hero("Ada"),)):
+def walking_world(door=(), lobby=None):
+    if lobby is None:
+        lobby = (hero("Ada"),)
     return world(
         FunctionTransitionNode("Enter", same),
         ArgumentEdgeToTransition("Door", "Enter", "hero"),

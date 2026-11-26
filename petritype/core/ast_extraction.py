@@ -11,7 +11,9 @@ from petritype.helpers.structures import SafeMerge
 
 class ASTAnnAssign:
 
-    def extract_types(node: ast.AnnAssign, excluded_types: set[TypeName] = set()) -> set[TypeName]:
+    def extract_types(node: ast.AnnAssign, excluded_types: set[TypeName] | None = None) -> set[TypeName]:
+        if excluded_types is None:
+            excluded_types = set()
         if not isinstance(excluded_types, set):
             raise ValueError("Expected a set of excluded types but got: " + str(type(excluded_types)))
         if not isinstance(node, ast.AnnAssign):
@@ -76,13 +78,8 @@ class ASTFunction:
         return {arg.arg: ast.unparse(arg.annotation) if arg.annotation else None for arg in func_def.args.args}
 
     def return_annotation(func_def: ast.FunctionDef) -> Optional[str]:
-        if func_def.returns:
-            if isinstance(func_def.returns, ast.Name):
-                return func_def.returns.id
-            elif isinstance(func_def.returns, ast.Subscript):
-                return ast.unparse(func_def.returns)
-            elif isinstance(func_def.returns, ast.Constant):
-                return ast.unparse(func_def.returns)
+        if func_def.returns is not None:
+            return ast.unparse(func_def.returns)
         return None
 
     def names_and_annotations(
@@ -113,7 +110,16 @@ class ASTClass:
     def is_decorated_as_dataclass(class_node: Any) -> bool:
         if not isinstance(class_node, ast.ClassDef):
             return False
-        return any(decorator.id == "dataclass" for decorator in class_node.decorator_list)
+
+        def is_dataclass_decorator(decorator: ast.expr) -> bool:
+            target = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if isinstance(target, ast.Name):
+                return target.id == "dataclass"
+            if isinstance(target, ast.Attribute):
+                return target.attr == "dataclass"
+            return False
+
+        return any(is_dataclass_decorator(decorator) for decorator in class_node.decorator_list)
 
     def is_dataclass(class_node: ClassDef) -> bool:
         # TODO: What about inheriting from dataclass rather than using a decorator?
@@ -123,10 +129,14 @@ class ASTClass:
         if ASTClass.is_dataclass(class_node):
             return True
         # Check if the class inherits from a pydantic BaseModel.
-        if class_node.bases:
-            for base in class_node.bases:
-                if base.id == "BaseModel":
-                    return True
+        for base in class_node.bases:
+            target = base
+            while isinstance(target, ast.Subscript):
+                target = target.value
+            if isinstance(target, ast.Name) and target.id == "BaseModel":
+                return True
+            if isinstance(target, ast.Attribute) and target.attr == "BaseModel":
+                return True
         return False
 
     def functions(class_node: ClassDef) -> tuple[ast.FunctionDef, ...]:
@@ -149,7 +159,7 @@ class ASTClass:
 
     def parent_type(class_def: ClassDef) -> Optional[TypeName]:
         if isinstance(class_def, ast.ClassDef) and class_def.bases:
-            return class_def.bases[0].id
+            return ast.unparse(class_def.bases[0])
         return None
 
     def attribute_types(class_def: ClassDef) -> ArgumentTypes:

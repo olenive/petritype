@@ -34,7 +34,9 @@ def petri_net(
         name: Unique identifier for this net. Used in URLs and commands.
         mode: Execution mode:
             - "manual": User triggers each step (default)
-            - "24/7": Runs continuously, auto-restarts on failure
+            - "24/7": Runs continuously (auto-restarting on failure is a host/supervisor
+              responsibility rather than built into the in-process runner, which stops
+              on transition failure)
             - "batch": Runs once to completion, then stops
             - "cron": Runs on schedule (requires `schedule` parameter)
         description: Human-readable description shown in UI.

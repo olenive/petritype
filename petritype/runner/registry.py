@@ -11,6 +11,7 @@ function, factory_params}`` form by importing ``module`` and looking up
 
 from __future__ import annotations
 
+import functools
 import importlib
 import importlib.metadata
 import inspect
@@ -57,6 +58,14 @@ class NetEntry:
     controls: Any = None
     # ``@petri_net(place_styles=...)``: ``{place name: PlaceStyle}``.
     place_styles: Optional[dict] = None
+
+
+@functools.lru_cache(maxsize=None, typed=True)
+def _cached_adapter(annotation: Any) -> Optional[TypeAdapter]:
+    try:
+        return TypeAdapter(annotation)
+    except Exception:
+        return None
 
 
 class NetEntries:
@@ -188,9 +197,12 @@ class NetEntries:
         if annotation is inspect.Parameter.empty or isinstance(annotation, str):
             return None
         try:
-            return TypeAdapter(annotation)
-        except Exception:
-            return None
+            return _cached_adapter(annotation)
+        except TypeError:
+            try:
+                return TypeAdapter(annotation)
+            except Exception:
+                return None
 
     def decode(spec: ParamSpec, value: Any) -> Any:
         """``value`` validated against the parameter's annotation in strict JSON

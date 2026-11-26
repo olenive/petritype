@@ -40,7 +40,10 @@ the saved form of a net that a nested token carries (nets as tokens, R5).
 
 from __future__ import annotations
 
+import copy
+import functools
 import json
+import math
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, TypeAdapter
@@ -49,7 +52,6 @@ from petritype.core.events import Resynced
 from petritype.core.executable_graph_components import (
     ExecutableGraph,
     GraphEvents,
-    ListPlaceNode,
     SubnetPlaceNode,
     TokenIds,
 )
@@ -57,6 +59,15 @@ from petritype.core.executable_graph_components import (
 JSON_SCALARS = (bool, int, float, str)
 
 SAVED_KEYS = ("template", "marking", "params", "enabled")
+
+
+@functools.lru_cache(maxsize=None)
+def _model_has_json_schema(cls: type[BaseModel]) -> bool:
+    try:
+        cls.model_json_schema()
+    except Exception:
+        return False
+    return True
 
 
 class JsonForm:
@@ -82,11 +93,7 @@ class JsonForm:
         if JsonForm.scalar(place_type) is not None:
             return True
         if issubclass(place_type, BaseModel):
-            try:
-                place_type.model_json_schema()
-            except Exception:
-                return False
-            return True
+            return _model_has_json_schema(place_type)
         return False
 
     def encode(token: Any) -> Any:
@@ -96,6 +103,13 @@ class JsonForm:
         ``decode`` accepts."""
         if isinstance(token, BaseModel):
             return token.model_dump(mode="json", by_alias=True)
+        token_type = type(token)
+        if token_type in (bool, int, str):
+            return token
+        if token_type is float:
+            if not math.isfinite(token):
+                raise ValueError(f"Out of range float values are not JSON compliant: {token!r}")
+            return token
         return json.loads(json.dumps(token, allow_nan=False))
 
     def validate(target: Any, value: Any) -> Any:
@@ -384,7 +398,7 @@ class NetJson:
         NetJson._apply_marking(graph, marking)
         if params is None:
             return
-        graph.params.update(params)
+        graph.params.update(copy.deepcopy(params))
         graph.disabled = {name for name, on in enabled.items() if not on}
         # The tie-break's and the ring's cursors are not saved: a loaded net
         # starts its rounds afresh.

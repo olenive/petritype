@@ -4,8 +4,12 @@
 default:
     @{{just_executable()}} --list
 
-# Everything to run before a release, in order: test, notebooks, gallery, build
-check: test notebooks gallery build
+# Everything to run before a release, in order: lint, test, notebooks, gallery, build
+check: lint test notebooks gallery build
+
+# Lint with ruff
+lint:
+    uv run --extra dev ruff check petritype tests
 
 # The unit suite
 test:

@@ -8,6 +8,8 @@ Petritype turns [Petri nets](https://en.wikipedia.org/wiki/Petri_net) into a pra
 
 <p align="center"><img src="https://raw.githubusercontent.com/olenive/petritype/main/images/docs/illustrations/readme_example/animation.gif" alt="Pipeline animation" width="380"></p>
 
+**Contents:** [Core Idea](#core-idea) · [Quickstart](#quickstart) · [Key Features](#key-features) ([Input edges at a glance](#input-edges-at-a-glance), [Nets as tokens](#nets-as-tokens), [Subnet places](#subnet-places), [Closed nets](#closed-nets), [Token keys](#token-keys-and-queries)) · [Runtime](#runtime--observable-interactive-nets) · [Net protocol](#net-protocol--run-a-net-as-a-process) · [Installation](#installation) · [Examples](#examples)
+
 ## Core Idea
 
 A Petri net has two kinds of nodes connected by directed edges:
@@ -15,7 +17,7 @@ A Petri net has two kinds of nodes connected by directed edges:
 - **Places** (blue ovals) — typed containers that hold tokens
 - **Transitions** (green rectangles) — functions that consume tokens from input places and produce tokens into output places
 
-A transition can only fire when all of its input places have tokens available, though a [drain or survey edge](#edges-that-accept-an-empty-place) accepts an empty place. When it fires, it pops tokens from input places, calls its function, and routes the result to output places based on type matching. The current set of tokens across all places represents the live state of the system.
+A transition can only fire when all of its input places have tokens available, though a [drain, survey, or read-all edge](#edges-that-accept-an-empty-place) accepts an empty place. When it fires, it pops tokens from input places, calls its function, and routes the result to output places based on type matching. The current set of tokens across all places represents the live state of the system.
 
 Petritype adds a type system on top of this: each place declares the Python type it accepts, and every token is checked against that type. This means the graph itself encodes the shape of your data pipeline — what types flow where, what each function expects, and where different outcomes end up.
 
@@ -52,7 +54,7 @@ graph, fired = asyncio.run(
 print(graph.place_named('Output').tokens)  # [2, 4, 6]
 ```
 
-`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find fireable transitions, select one, fire it, repeat.
+`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find fireable transitions, select one, fire it, repeat. All primary node, edge, runtime, and error types are also re-exported directly from the top-level `petritype` package (`from petritype import ExecutableGraphOperations, ListPlaceNode, FunctionTransitionNode, Runner, RunContext, ExecutionMode, PetritypeError, ...`).
 
 ## Key Features
 
@@ -85,6 +87,8 @@ except TransitionFailedError as e:
 ```
 
 *Expected* failures are the body's job: catch them and return an error token, and type-based routing (e.g. `-> Receipt | FailedOrder`) delivers it to an error-handling place. If your tokens are immutable or bodies don't mutate them before failing, `restore_tokens_on_failure=True` (on `construct_graph` or per `execute_graph` call) opts into putting consumed tokens back.
+
+All library-specific exceptions (`TransitionFailedError`, `ClosedNetError`, `HeldByBodyError`, `LaunchNotificationError`, `SubnetHeldError`, `TooManyFiringsError`) inherit from `PetritypeError` as well as their standard `ValueError` or `RuntimeError` base, so callers can catch `PetritypeError` cleanly without catching unrelated Python errors.
 
 ### Async execution
 
@@ -180,6 +184,23 @@ graph = ExecutableGraphOperations.construct_graph([...], allow_token_copying=Tru
 
 This is useful when the same piece of data needs to flow down multiple independent paths — for example, a configuration token consumed by both a planning stage and a data-fetching stage.
 
+### Input edges at a glance
+
+Petritype provides ten input edge classes depending on whether a transition consumes tokens, mutates them in place, reads them live or as deep copies, filters by keys, or accepts an empty place:
+
+| Edge class | Consumes? | Deep-copies? | Accepts empty? | Filter / bound? | Concurrent lock | Graphviz style |
+| --- | :---: | :---: | :---: | :---: | --- | --- |
+| `ArgumentEdgeToTransition` | Yes | No | No | No | Exclusive (token or place in list-mode) | Solid arrow |
+| `TakeWhereEdge` | Yes | No | No | Yes | Exclusive (matched token) | Solid arrow + filter |
+| `DrainEdge` | Yes (all) | No | Yes (`[]`) | No | Exclusive (whole place) | Solid hollow arrow |
+| `SnapshotEdge` | No | Yes | No | No | Shared check at launch (none held) | Dashed arrow |
+| `SurveyEdge` | No | Yes (all) | Yes (`[]`) | No | Shared check at launch (none held) | Dashed hollow arrow |
+| `MutateEdge` | No | No (live) | No | No | Exclusive (token or place in list-mode) | Bold dot-ended line |
+| `MutateWhereEdge` | No | No (live) | No | Yes | Exclusive (matched token) | Bold dot-ended + filter |
+| `ReadEdge` | No | No (live) | No | No | Shared (front token) | Dotted arrow |
+| `ReadWhereEdge` | No | No (live) | No | Yes | Shared (matched token) | Dotted arrow + filter |
+| `ReadAllEdge` | No | No (live, all) | Yes (`[]`) | No | Shared (whole place) | Dotted hollow arrow (`*`) |
+
 ### List-mode transitions
 
 If a transition argument is typed as `list[T]` and the input place holds tokens of type `T`, all tokens are passed as a list in a single call — useful for batch operations.
@@ -228,7 +249,7 @@ SnapshotEdge('Multiplier', 'Scale', 'factor')   # Scale reads Multiplier, never 
 MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in place
 ```
 
-Since 2026-11-23 three **read edges** hand the body tokens to look at, live, without taking or copying them: nothing moves, no id changes, and no event tells of them.
+Three **read edges** hand the body tokens to look at, live, without taking or copying them: nothing moves, no id changes, and no event tells of them.
 
 - **`ReadEdge`**: the front token; the transition waits while the place is empty.
 - **`ReadWhereEdge`**: the oldest token a filter keeps (`where=Filter(...)`, as for the keyed edges below); the transition waits while there is none.
@@ -270,7 +291,7 @@ MutateEdge("Depot", "Board Depot", "vehicle")
 
 Inner nets never touch the outer net. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
 
-A token's net may mark places as **ports**, `ListPlaceNode("Orders In", str, port=True)`, as a [subnet](#subnet-places) does, to say where the net around it may reach in: a net that marks a port is [closed](#closed-nets) to writes from outside at its other places. Since 2026-11-23 an input edge on the place of such tokens may name the ports its body reaches, given by keyword on every input edge kind:
+A token's net may mark places as **ports**, `ListPlaceNode("Orders In", str, port=True)`, as a [subnet](#subnet-places) does, to say where the net around it may reach in: a net that marks a port is [closed](#closed-nets) to writes from outside at its other places. An input edge on the place of such tokens may name the ports its body reaches, given by keyword on every input edge kind:
 
 ```python
 MutateEdge("Field", "Hand Over", "unit", reaches=("Orders In",))   # hands the unit an order
@@ -308,7 +329,7 @@ A port keeps one list of tokens, in the subnet, which both nets use, and its ids
 
 ### Closed nets
 
-Since 2026-11-23 a net that marks a place as a port is **closed**: from outside it, tokens are put, taken and replaced only at its ports. This can break a program written before, and this section says how to put it right.
+A net that marks a place as a port is **closed**: from outside it, tokens are put, taken and replaced only at its ports.
 
 **Who is outside.** A body, guard or key function of a transition of the net around it, by any edge; the program and its drivers; and the [protocol runner](#net-protocol--run-a-net-as-a-process)'s requests. Inside are the net's own transitions, the controls it declares, the tokens its definition starts it with, and the engine's own moves (a firing's inputs and outputs, a failed firing's restore, a deep step).
 
@@ -335,7 +356,7 @@ NestedNets.put(post, "Ledger", ["IOU"])       # ClosedNetError
 
 **What stays allowed.** Reading, for everyone; stepping, a body included (a body may step a net it holds, and the net's own firings are inside it); the whole-state acts, `import_marking`, `NetJson.load_into` and `restore`, `NestedNets.fork`, saving, and the runner's `load` and `reset`; and a net's own controls, `apply_control` and the runner's `press`, whose commands land at any place.
 
-**What Python cannot catch.** The rule holds through the library's own functions, the runtime's commands and the runner. For a body there is one more check: when it returns, the private places of each closed net it held are compared with what they held when it was handed the net, so a body that edits `place.tokens` directly fails too. A change made inside a token object where it lies goes unseen, and a program that edits a place's list, `graph.params` or `graph.disabled` directly is not caught.
+**What Python cannot catch.** The rule holds through the library's own functions, the runtime's commands and the runner. For a body there is one more check: when it returns, the private places and knobs (including mutable containers inside `params` and `transition.kwargs`) of each closed net it held are compared with what they held when it was handed the net, so a body that edits `place.tokens` or `params` directly fails too. A change made inside a token object where it lies goes unseen, and a program that edits a place's list, `graph.params` or `graph.disabled` directly is not caught.
 
 **Stage two.** A later change will close every net that does not declare itself open, a net that marks no port included, by turning one default. A net whose places a body or the program writes from outside will then mark them as ports, start with its tokens in its definition, or declare itself open. A body that sets the parameters of a net that marks no port, as transit's do, will be refused then, `open` opening only the places, so such a net will give the setting to a transition of its own or leave it to the program.
 
@@ -368,7 +389,7 @@ Query.distinct(graph, "class")                                           # ['Bir
 
 Key values are strings, integers or booleans, derived from the value whenever they are read, so a token mutated in place has new keys. A renderer given a filter (`activation_coloured_attr_functions(graph, filter=...)`) lists only the kept tokens, heads each place with `matching / count` and says how many it hides. The same filters drive the net protocol's `query`, `distinct` and per-connection projections (`set_filter`), and **keyed input edges**: `TakeWhereEdge("Forest", "Migrate", "species", where=Filter.where(class_="Bird"))` consumes the oldest matching token and leaves every other token where it is, with its id (`MutateWhereEdge` hands it over live to change, and `ReadWhereEdge` to look at), instead of taking a whole place out and putting the rest back. `examples/token_view_filtering/wildlife.py` is the worked example.
 
-Since 2026-11-23 a keyed edge can also choose its token by another input of the same firing, with a clause that compares one of its keys with a key of the token the transition gets from another place:
+A keyed edge can also choose its token by another input of the same firing, with a clause that compares one of its keys with a key of the token the transition gets from another place:
 
 ```python
 from petritype.core.keys import Clause, Filter, MutateWhereEdge
@@ -395,7 +416,7 @@ def health_check() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([...])
 ```
 
-Modes: `manual` (default), `24/7` (continuous), `batch` (run once), `cron` (scheduled).
+Modes: `manual` (default), `24/7` (continuous; auto-restarting on failure is a host/supervisor responsibility), `batch` (run once), `cron` (scheduled).
 
 A net can also declare, beside it, the controls a viewer shows for it and how its places are drawn. The traffic light (`examples/edges_on_empty_places/traffic_light.py`) declares two buttons and fills its light with the light's colour:
 
@@ -427,7 +448,9 @@ ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT, observers=(render,)
 await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefinitely(ctx, tick=0.1)
 ```
 
-- **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs independent transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes.
+- **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs non-conflicting transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes. In `CONCURRENT` mode:
+  - **Per-token reader/writer locking** prevents data races on shared places: concurrent `ReadEdge`s (and launch-time `SnapshotEdge`s) share a token in parallel, while `MutateEdge`s and consuming edges take exclusive per-token claims (`(place, token_id)`) so distinct tokens in the same place (e.g. via keyed edges) still run concurrently. Whole-place edges (`DrainEdge`, `SurveyEdge`, `ReadAllEdge`, and list-mode edges) take place-level claims. Claims are checked atomically before launch (preventing lock deadlocks) with strict FIFO head-of-line waiting.
+  - **Selector & priority ordering** matches sequential mode: each concurrent launch sweep repeatedly picks the next launchable, non-conflicting transition via `transition_selector` or the default selector (`priority` + `tie_break`) until none remain.
 - **Observation** — `observers` are plain callables handed the *live graph* after each state change, so any renderer (a marimo notebook, a web frontend) can redraw at its own pace. In-flight transitions are exposed via `graph.in_flight`, so a renderer could for example highlight them by changing their colour while their bodies run. Observers are notified as a transition goes in flight in sequential mode too, so a renderer can show it working while its body runs: a sequential run calls them at the initial marking, then for each firing once at launch and once after it completes, and at the launch call `graph.in_flight` names the transition, its consumed tokens are out of their places, and `last_fired`, `step_count`, `fired_counts` and the log still read as they did before the firing. An inline body holds the event loop until it returns, so an observer's own work finishes before the body starts and anything it only schedules runs after the body returns; an async body lets that work run at its awaits, and a body marked `execution="thread"` leaves the loop free. To know *what fired since you last looked*, snapshot `graph.fired_counts` and diff it at the next notification with `fired_since(previous, current)` — lossless in every mode, unlike `graph.last_fired`, which names only one completion per concurrent batch.
 - **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` / `Fire` (transitions; `Fire` fires one now if it is fireable), `SetNetParam` (the net's own parameters). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
 - **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
@@ -487,7 +510,7 @@ It has been particularly useful for processes involving many calls to stateful e
 
 A [Petri net](https://en.wikipedia.org/wiki/Petri_net) is a bipartite directed graph used to model concurrent processes. It was originally developed by Carl Adam Petri in 1962 and has been applied across chemistry, logistics, manufacturing, protocol verification, and many other fields.
 
-The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is fireable when all its input places contain at least one token (and its guard, if any, passes), though here a [drain or survey edge](#edges-that-accept-an-empty-place) accepts an empty place. Petri net texts say "enabled" for what this library calls "fireable"; "enabled" here is the on/off switch set by the `Enable` / `Disable` commands. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
+The graph has two types of nodes — **places** and **transitions** — connected by directed edges (arcs). Places hold **tokens** representing the state of the system. A transition is fireable when all its input places contain at least one token (and its guard, if any, passes), though here a [drain, survey, or read-all edge](#edges-that-accept-an-empty-place) accepts an empty place. Petri net texts say "enabled" for what this library calls "fireable"; "enabled" here is the on/off switch set by the `Enable` / `Disable` commands. When a transition fires, it removes tokens from its inputs and adds tokens to its outputs.
 
 What makes Petri nets powerful is that they can model concurrency, synchronisation, and resource contention in a way that is both formally analysable and visually intuitive.
 
@@ -512,7 +535,7 @@ Optional features live behind extras:
 
 | Extra | Provides | Install |
 | --- | --- | --- |
-| `viz` | Graphviz rendering (`petritype.plotting`) | `pip install 'petritype[viz]'` |
+| `viz` | Graphviz rendering (`petritype.plotting`: `rustworkx` + `pillow`) | `pip install 'petritype[viz]'` |
 | `marimo` | Interactive notebook controls (`petritype.marimo_controls`) | `pip install 'petritype[marimo]'` |
 | `examples` | Dependencies for running the example notebooks (see [Examples](#examples)) | `pip install 'petritype[examples]'` |
 

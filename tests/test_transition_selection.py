@@ -1,7 +1,6 @@
 """Tests for transition_selector and activation_function features."""
 
 import pytest
-import asyncio
 from petritype.core.executable_graph_components import (
     ExecutableGraph,
     FunctionTransitionNode,

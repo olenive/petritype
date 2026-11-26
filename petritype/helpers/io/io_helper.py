@@ -1,7 +1,10 @@
+import logging
 import os
 import shutil
 import pickle
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class IOHelper:
@@ -32,7 +35,7 @@ class IOHelper:
             raise FileExistsError(f"Attempted to move {source_path} but destination {destination_path} already exists")
         else:
             if verbose:
-                print(f"Moving {source_path} to {destination_path}")
+                logger.info("Moving %s to %s", source_path, destination_path)
             IOHelper.make_directory(os.path.dirname(destination_path), verbose=verbose)
             shutil.move(source_path, destination_path)
 
@@ -51,7 +54,7 @@ class IOHelper:
     def make_directory(path_to_directory: str, verbose=False) -> None:
         if not (os.path.exists(path_to_directory)):
             if verbose:
-                print(f"Making directory: {path_to_directory}")
+                logger.info("Making directory: %s", path_to_directory)
             os.makedirs(path_to_directory)
 
     def pickle(data: Any, file_path: str) -> None:
@@ -73,4 +76,4 @@ class IOHelper:
             shutil.rmtree(path)
         except OSError as e:
             if verbose:
-                print("Failed to remove directory: %s - %s." % (e.filename, e.strerror))
+                logger.warning("Failed to remove directory: %s - %s.", e.filename, e.strerror)

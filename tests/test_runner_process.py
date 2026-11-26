@@ -99,8 +99,8 @@ class Runner:
     def next_line(self):
         try:
             return self.lines.get(timeout=TIMEOUT)
-        except queue.Empty:
-            raise AssertionError(f"no line within {TIMEOUT}s; stderr:\n{self.stderr.decode()}")
+        except queue.Empty as err:
+            raise AssertionError(f"no line within {TIMEOUT}s; stderr:\n{self.stderr.decode()}") from err
 
     def until(self, predicate) -> list[dict]:
         """Lines up to and including the first that satisfies ``predicate``."""

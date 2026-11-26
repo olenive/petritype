@@ -120,6 +120,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -132,24 +133,22 @@ from petritype.core import events as core_events
 from petritype.core.events import PlaceKey, Port
 from petritype.core.executable_graph_components import (
     ClosedNetError,
-    DrainEdge,
     ExecutableGraph,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
-    KeyedEdges,
     ListPlaceNode,
     MapPlaceNames,
     MapTransitionNames,
-    MutateWhereEdge,
+    MutateEdge,
     NestedNets,
+    ReadEdge,
     SubnetPlaceNode,
-    TakeWhereEdge,
     TokenIds,
     TransitionFailedError,
     default_transition_selector,
 )
-from petritype.core.keys import Filter, Query
+from petritype.core.keys import Filter, KeyValue, Keys, Query
 from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
 from petritype.runner.registry import NetEntries, NetEntry, Registry
@@ -388,12 +387,14 @@ class _Handover:
     tokens to look at, which the body leaves as they are: both appear in none.
     Places are keyed as the firing net names them, a port by its ``Port`` pair."""
 
-    consumed: list[tuple[PlaceKey, int]]
-    taken: dict[PlaceKey, int]
-    mutated: dict[PlaceKey, set[int]]
+    consumed: list[tuple[PlaceKey, int]] = field(default_factory=list)
+    taken: dict[PlaceKey, int] = field(default_factory=dict)
+    mutated: dict[PlaceKey, set[int]] = field(default_factory=dict)
     # Per place, the indices (in the place as it stands) a keyed take removes, which
     # need not be at the front.
     keyed_taken: dict[PlaceKey, list[int]] = field(default_factory=dict)
+    # Per place, the indices (in the place as it stands) handed over through read edges.
+    read: dict[PlaceKey, set[int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -787,6 +788,23 @@ class Owner:
 
         visit(loaded.outer.graph, ())
 
+    def _prune_inner(self) -> None:
+        """Evict records of inner nets that are no longer live in the loaded net
+        tree, preserving any net held by an airborne firing."""
+        loaded = self._loaded
+        if loaded is None or not loaded.inner:
+            return
+        live = _nets_of(loaded.outer.graph)
+        flight = loaded.in_flight
+        if flight is not None:
+            if flight.net_id is not None:
+                live.add(flight.net_id)
+            live.update(flight.held_nets)
+            live.update(net_id for net_id in flight.snapshots if net_id is not None)
+        for net_id in list(loaded.inner):
+            if net_id not in live:
+                del loaded.inner[net_id]
+
     def _net_by_id(self, net_id: Optional[int]) -> Optional[_Net]:
         """The net with this id if it is the outer one, already known, or live
         somewhere inside; ``None`` for an id that names no net any more."""
@@ -1038,15 +1056,17 @@ class Owner:
             values = Query.distinct(net.graph, key, places)
             version = net.marking_version
         else:
-            from petritype.core.keys import Keys, same_value
-            values = []
+            values: list[KeyValue] = []
+            seen_typed: set[tuple[type, KeyValue]] = set()
             for name, view in snapshot.places.items():
                 place = net.place_nodes[name]
                 if (places is not None and name not in places) or not place.keys or key not in place.keys:
                     continue
                 for token in view.tokens:
-                    value = Keys.of(place, token)[key]
-                    if not any(same_value(value, known) for known in values):
+                    value = Keys.one(place, token, key)
+                    typed = (type(value), value)
+                    if typed not in seen_typed:
+                        seen_typed.add(typed)
                         values.append(value)
             version = snapshot.marking_version
         out.lines.append(Lines.result(request_id, wire.DistinctResult(
@@ -1180,6 +1200,13 @@ class Owner:
                 for index in indices:
                     if index < view.count:
                         view.eager[index] = view.entry(index)
+            for place_name, indices in handover.read.items():
+                if place_name not in net.nested_places:
+                    continue
+                view = places[place_name]
+                for index in indices:
+                    if index < view.count:
+                        view.eager[index] = view.entry(index)
             for place_name, count in handover.taken.items():
                 view = places[place_name]
                 view.ids, view.tokens = view.ids[count:], view.tokens[count:]
@@ -1189,7 +1216,11 @@ class Owner:
                 gone = set(indices)
                 view.ids = [token_id for index, token_id in enumerate(view.ids) if index not in gone]
                 view.tokens = [token for index, token in enumerate(view.tokens) if index not in gone]
-                view.eager = {}
+                view.eager = {
+                    index - sum(1 for removed in gone if removed < index): entry
+                    for index, entry in view.eager.items()
+                    if index not in gone
+                }
                 view._kept = None
             transitions = self._states_without(net, handover)
             if airborne is not None:
@@ -1213,69 +1244,72 @@ class Owner:
         )
 
     def _handed_over(self, net: _Net, transition: FunctionTransitionNode) -> _Handover:
-        """What firing ``transition`` now will take and hand over, by stage 1's own
-        rules: argument edges in order, each taking the oldest remaining token of
-        its place, or every remaining one for a ``list[...]`` argument or a drain
-        (possibly none); then the mutate edges, which take nothing and hand over the
-        oldest remaining token (or all of them) where they are. Read edges take
-        nothing and change nothing, so they are in none of it. A source and a
-        bound edge (``KeyedEdges.pairing``) take or hand over the token the pairing
-        chooses, wherever it stands, as stage 1 does. Places are keyed as the
-        edges name them, so a port by its ``Port`` pair."""
+        """What firing ``transition`` now will take and hand over, computed via
+        stage 1's own planner (``ExecutableGraphOperations.plan_stage_1``).
+        Returns an empty ``_Handover`` if the transition cannot currently fire.
+        Places are keyed as the edges name them, so a port by its ``Port`` pair."""
+        plan = ExecutableGraphOperations.plan_stage_1(
+            transition=transition,
+            transition_names_to_incoming_edges=net.incoming,
+            place_names_to_nodes=net.place_nodes,
+            transition_names_to_read_edges=net.read,
+            net_params=net.graph.params,
+            check_filters=True,
+        )
+        if plan is None:
+            return _Handover()
+
         consumed: list[tuple[PlaceKey, int]] = []
-        taken: dict[PlaceKey, int] = {}
-        keyed_taken: dict[PlaceKey, list[int]] = {}  # per place, the indices a keyed take removes
-        params = net.graph.params
-        chosen = KeyedEdges.pairing(transition, net.incoming, net.place_nodes, net.read, params) or {}
-        for edge in net.incoming.get(transition.name, ()):
-            key = edge.place_node_name
-            place = net.place_nodes[key]
-            ids = place.token_ids
-            if edge.argument in chosen or isinstance(edge, TakeWhereEdge):
-                index = chosen.get(edge.argument)
-                if index is None:
-                    index = KeyedEdges.first_kept(edge, place, params)
-                if index is not None:
+        taken_indices: dict[PlaceKey, list[int]] = {}
+        for item in plan.incoming:
+            key = item.edge.place_node_name
+            ids = item.place.token_ids
+            for index in item.indices:
+                if index < len(ids):
                     consumed.append((key, ids[index]))
-                    keyed_taken.setdefault(key, []).append(index)
-                continue
-            start = taken.get(key, 0)
-            takes_all = isinstance(edge, DrainEdge) or Topologies.takes_all(transition.function, edge.argument, place)
-            end = len(ids) if takes_all else min(start + 1, len(ids))
-            consumed.extend((key, token_id) for token_id in ids[start:end])
-            taken[key] = max(start, end)
+            if item.indices:
+                taken_indices.setdefault(key, []).extend(item.indices)
+
+        taken: dict[PlaceKey, int] = {}
+        keyed_taken: dict[PlaceKey, list[int]] = {}
+        for key, indices in taken_indices.items():
+            ordered = sorted(indices)
+            if ordered == list(range(len(ordered))):
+                taken[key] = len(ordered)
+            else:
+                keyed_taken[key] = ordered
+
         mutated: dict[PlaceKey, set[int]] = {}
-        for edge in net.graph.mutate_edges:
-            if edge.transition_node_name != transition.name:
+        read: dict[PlaceKey, set[int]] = {}
+        for item in plan.reads:
+            if not item.indices:
                 continue
-            key = edge.place_node_name
-            place = net.place_nodes[key]
-            if edge.argument in chosen or isinstance(edge, MutateWhereEdge):
-                index = chosen.get(edge.argument)
-                if index is None:
-                    index = KeyedEdges.first_kept(edge, place, params)
-                if index is not None:
-                    mutated.setdefault(key, set()).add(index)
-                continue
-            count = len(place.token_ids)
-            start = taken.get(key, 0)
-            takes_all = Topologies.takes_all(transition.function, edge.argument, place)
-            end = count if takes_all else min(start + 1, count)
-            mutated.setdefault(key, set()).update(range(start, end))
-        return _Handover(consumed=consumed, taken=taken, mutated=mutated, keyed_taken=keyed_taken)
+            key = item.edge.place_node_name
+            if isinstance(item.edge, MutateEdge):
+                mutated.setdefault(key, set()).update(item.indices)
+            elif isinstance(item.edge, ReadEdge):
+                read.setdefault(key, set()).update(item.indices)
+
+        return _Handover(consumed=consumed, taken=taken, mutated=mutated, keyed_taken=keyed_taken, read=read)
 
     def _held(
         self, net: _Net, transition: FunctionTransitionNode, handover: _Handover,
     ) -> tuple[set[int], set[tuple[Optional[int], str, int]]]:
         """What a firing of ``transition`` in ``net`` holds until it lands, for the
         reads that wait (§12.3): the tokens it takes or holds through mutate edges,
-        each named by the net whose place holds it, and the inner nets inside
-        them, at any depth; and the subnet of every subnet place one of whose
-        ports the transition has an edge on, any edge (§12.7)."""
+        and the nested tokens it receives through read edges (whose inner nets the
+        body may step), each named by the net whose place holds it, and the inner
+        nets inside them, at any depth; and the subnet of every subnet place one of
+        whose ports the transition has an edge on, any edge (§12.7)."""
         nets: set[int] = set()
         tokens: set[tuple[Optional[int], str, int]] = set()
         pairs: list[tuple[PlaceKey, int]] = list(handover.consumed)
         for key, indices in handover.mutated.items():
+            ids = net.place_nodes[key].token_ids
+            pairs.extend((key, ids[index]) for index in indices if index < len(ids))
+        for key, indices in handover.read.items():
+            if key not in net.nested_places:
+                continue
             ids = net.place_nodes[key].token_ids
             pairs.extend((key, ids[index]) for index in indices if index < len(ids))
         for key, token_id in pairs:
@@ -1338,7 +1372,9 @@ class Owner:
         for transition in graph.transitions:
             priority = None
             try:
-                priority = float(transition.priority(graph)) if transition.priority is not None else 0.0
+                value = float(transition.priority(graph)) if transition.priority is not None else 0.0
+                if math.isfinite(value):
+                    priority = value
             except Exception:
                 priority = None
             states[transition.name] = wire.TransitionState(
@@ -1531,10 +1567,11 @@ class Owner:
         # A body that resized a place through a whole-list mutate edge is repaired
         # here, so the landing's lines already say so.
         TokenIds.resync(net.graph)
-        events = self._flush(now, out)
+        events = self._flush(now, out, prune=False)
         # The nets inside the tokens this firing produced are known from its landing.
         self._know_new()
         fired, failed, path = self._firing_of(events, flight)
+        self._prune_inner()
         if fired is not None or failed is not None:
             announced, landed = list(flight.consumed), list((fired or failed).consumed)
             if announced != landed:
@@ -1920,7 +1957,7 @@ class Owner:
 
     # --- events ---
 
-    def _flush(self, now: datetime, out: Outgoing) -> list:
+    def _flush(self, now: datetime, out: Outgoing, *, prune: bool = True) -> list:
         """Drain the outer graph's events (inner nets' included, wrapped as
         ``Nested``) and write one notification per event, each state
         notification raising its net's ``marking_version`` by one; then
@@ -1974,6 +2011,8 @@ class Owner:
             self._report_fireable(outer, out)
             for inner in touched:
                 self._report_fireable(inner, out)
+            if prune:
+                self._prune_inner()
         return events
 
     def _cross(self, net: _Net, notification: wire.Notification, changed) -> list[_Net]:
@@ -2281,8 +2320,13 @@ def _lifted(net: _Net, handover: _Handover) -> Optional[_Handover]:
         taken={Port(place, key): count for key, count in handover.taken.items() if at_port(key) and count},
         mutated={Port(place, key): indices for key, indices in handover.mutated.items() if at_port(key) and indices},
         keyed_taken={Port(place, key): indices for key, indices in handover.keyed_taken.items() if at_port(key)},
+        read={
+            Port(place, key): indices
+            for key, indices in handover.read.items()
+            if at_port(key) and key in net.nested_places and indices
+        },
     )
-    if not (lifted.consumed or lifted.taken or lifted.mutated or lifted.keyed_taken):
+    if not (lifted.consumed or lifted.taken or lifted.mutated or lifted.keyed_taken or lifted.read):
         return None
     return lifted
 

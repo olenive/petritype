@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional, Union, Sequence, Iterable
 
 from pydantic import BaseModel
@@ -17,6 +18,8 @@ from petritype.core.executable_graph_components import (
     ReadWhereEdge, ReturnedEdgeFromTransition, SnapshotEdge, SubnetPlaceNode, SurveyEdge, TakeWhereEdge,
 )
 from petritype.core.relationship_graph_components import TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges
+
+logger = logging.getLogger(__name__)
 
 
 class RustworkxArgumentEdgeData(BaseModel):
@@ -113,13 +116,13 @@ class RustworkxGraph:
                 index_from: NodeIndex = node_names_to_node_indices[name_from]
             except KeyError:
                 # NOTE: This often occurs when name_from is a common type that is not included in COMMON_TYPES.
-                print(f"KeyError: {name_from}")
+                logger.debug("KeyError: %s", name_from)
                 continue
             try:
                 index_to: NodeIndex = node_names_to_node_indices[name_to]
             except KeyError:
                 # NOTE: This often occurs when name_to is a common type that is not included in COMMON_TYPES.
-                print(f"KeyError: {name_to}")
+                logger.debug("KeyError: %s", name_to)
                 continue
             out.append((index_from, index_to, relationship))
         return tuple(out)

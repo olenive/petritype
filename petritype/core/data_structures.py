@@ -1,5 +1,5 @@
 import ast
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from pydantic.functional_validators import AfterValidator
 
 from typing import Annotated, Any, Optional, Sequence
@@ -77,7 +77,7 @@ class TypeRelationship(Enum):
     CONTAINS_AS_SUBTYPE = "contains as subtype"
     CONTAINS_AS_ATTRIBUTE_TYPE = "contains as attribute type"
     CONTAINS_AS_ATTRIBUTE_SUBTYPE = "contains as attribute subtype"
-    # CONTAINED_IN_ATTRIBUTE_TYPE = "in attribute type"
+    CONTAINED_IN_ATTRIBUTE_TYPE = "in attribute type"
     # CONTAINED_IN_ATTRIBUTE_SUBTYPE = "in attribute subtype"
     CHILD_OF = "child of"
     PARENT_OF = "parent of"
@@ -91,9 +91,10 @@ class TypeRelationship(Enum):
 
 
 # Types for mapping graph data to specific IDs used by a graph library.
-def ensure_index_is_non_negative(value: int) -> ValidationError:
+def ensure_index_is_non_negative(value: int) -> int:
     if value < 0:
         raise ValueError("The index value must be non-negative.")
+    return value
 
 
 type NodeIndex = Annotated[int, AfterValidator(ensure_index_is_non_negative)]

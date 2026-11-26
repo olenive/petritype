@@ -19,7 +19,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "petritype"
 
 # module path (relative to petritype/) -> third-party roots it may import
 EXTRA_DEPENDENCIES = {
-    "plotting": {"rustworkx", "matplotlib", "PIL"},
+    "plotting": {"rustworkx", "PIL"},
     "marimo_controls.py": {"marimo"},
 }
 BASE_DEPENDENCIES = {"pydantic"}

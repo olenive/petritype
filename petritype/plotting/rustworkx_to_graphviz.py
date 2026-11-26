@@ -18,6 +18,7 @@ from petritype.core.keys import Filter
 from petritype.core.relationship_graph_components import (
     FunctionToTypeEdges, TypeToFunctionEdges, TypeToTypeEdges
 )
+from petritype.core.type_names import TypeNames
 from petritype.plotting.rustworkx_graph import (
     RustworkxArgumentEdgeData, RustworkxGraph, RustworkxReadEdgeData, RustworkxReturnedEdgeData
 )
@@ -57,21 +58,27 @@ class NodeLabel:
         the header reads ``matching / count`` and a last line says how many the
         filter hides, so a hidden token is never mistaken for an absent one;
         ``params`` are the net's, for a clause that names one."""
+        type_name = TypeNames.of(node.type)
         if filter is None:
-            label = f"{node.name}\n({node.type.__name__})"
+            label = f"{node.name}\n({type_name})"
             value_strings = [token_summariser(x) for x in node.tokens]
         else:
             kept = [x for x in node.tokens if filter.keeps(node, x, params or {})]
-            label = f"{node.name}\n({node.type.__name__}) {len(kept)} / {len(node.tokens)}"
+            label = f"{node.name}\n({type_name}) {len(kept)} / {len(node.tokens)}"
             value_strings = [token_summariser(x) for x in kept]
             hidden = len(node.tokens) - len(kept)
             if hidden:
                 value_strings.append(f"({hidden} hidden by filter)")
         tokens_string = "\n".join(value_strings)
-        return f"{label}\n{tokens_string}"
+        return NodeLabel.escape_quoted(f"{label}\n{tokens_string}")
 
     def default_transition(node: FunctionTransitionNode) -> str:
-        return f"{node.name}\n({node.function.__qualname__})"
+        return NodeLabel.escape_quoted(f"{node.name}\n({TypeNames.callable_name(node.function)})")
+
+    def escape_quoted(text: str) -> str:
+        """Escape the characters a Graphviz quoted string gives a meaning
+        (``\\`` and ``"``) with a backslash, preserving line breaks."""
+        return "".join("\\" + character if character in '\\"' else character for character in text)
 
     def record_text(text: str) -> str:
         """Text for one field of a Graphviz record label: the characters a record
@@ -86,8 +93,7 @@ class NodeLabel:
         characters a quoted string gives a meaning (``\\`` and ``"``) escaped with
         a backslash, and each line break written as ``\\n``, so a name is drawn as
         it is, whatever characters it holds."""
-        escaped = "".join("\\" + character if character in '\\"' else character for character in text)
-        return escaped.replace("\n", "\\n")
+        return NodeLabel.escape_quoted(text).replace("\n", "\\n")
 
     def port_cells(places) -> dict[Port, str]:
         """For every port of every subnet place among ``places``, the record field

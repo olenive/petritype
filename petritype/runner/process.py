@@ -241,7 +241,7 @@ class Frames:
         without ``indent`` escapes every newline inside a string, so none can
         appear inside an object."""
         return b"".join(
-            (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8") for line in lines
+            (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8") for line in lines
         )
 
     def iso(moment: datetime) -> str:

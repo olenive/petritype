@@ -13,13 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from examples.token_view_filtering.wildlife import Species, build_wildlife, wildlife  # noqa: E402
 from petritype.core.events import Fired, Mutated  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
-    ArgumentEdgeToTransition,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
     NetParams,
-    ReturnedEdgeFromTransition,
     TransitionFailedError,
 )
 from petritype.core.keys import Clause, Filter, MutateWhereEdge, TakeWhereEdge  # noqa: E402
