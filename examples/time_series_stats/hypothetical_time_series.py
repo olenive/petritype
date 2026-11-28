@@ -62,6 +62,7 @@ class ExponentialMovingAverageOfInterval:
 
 class SimulateData:
 
+    @staticmethod
     def copy_parameters(parameters: TimeSeriesGeneratingParameters) -> TimeSeriesGeneratingParameters:
         return TimeSeriesGeneratingParameters(
             start=parameters.start,
@@ -73,6 +74,7 @@ class SimulateData:
             seed=parameters.seed,
         )
 
+    @staticmethod
     def sample_uniform_unix_timestamps(start: datetime, end: datetime, n: int, rng: Generator) -> np.ndarray:
         if start > end:
             raise ValueError("The start timestamp must be smaller than the end timestamp.")
@@ -80,6 +82,7 @@ class SimulateData:
         end_timestamp = end.timestamp() * 1000  # Convert to milliseconds
         return np.sort(rng.uniform(low=start_timestamp, high=end_timestamp, size=n))
 
+    @staticmethod
     def sine_wave(
         x: np.ndarray,
         period_ms=(7 * 60 * 60 * 1000),  # 7 hours in milliseconds
@@ -87,10 +90,12 @@ class SimulateData:
         """Generates a sine wave value for a given x in milliseconds with a period of 7 hours by default."""
         return np.sin(x * 2 * np.pi / period_ms)
 
+    @staticmethod
     def add_noise(y: np.ndarray, noise_std: float, rng: Generator) -> np.ndarray:
         """Adds Gaussian noise to the input signal y with a specified standard deviation."""
         return y + rng.normal(scale=noise_std, size=len(y))
 
+    @staticmethod
     def generate_sine_wave_with_noise(
         *,
         start: datetime,
@@ -107,6 +112,7 @@ class SimulateData:
         noisy_values = SimulateData.add_noise(sine_wave_values, noise_std * amplitude, rng)
         return timestamps, noisy_values
 
+    @staticmethod
     def generate_sine_wave_with_noise_from_parameters(parameters: TimeSeriesGeneratingParameters) -> TimeSeriesInterval:
         rng = Generator(SFC64(parameters.seed))
         timestamps, values = SimulateData.generate_sine_wave_with_noise(
@@ -124,6 +130,7 @@ class SimulateData:
 
 class SeriesStatistics:
 
+    @staticmethod
     def exponentially_decaying_weighting_in_time_window(
         time_points: Sequence[datetime],
         start_of_window: datetime,
@@ -142,6 +149,7 @@ class SeriesStatistics:
         weights = np.exp(-distances_from_end_of_window * decay_parameter)
         return time_points_in_window, weights
 
+    @staticmethod
     def exponentially_decaying_mean_weighted_values_in_time_window(
         time_points: Sequence[datetime],
         values: np.ndarray,
@@ -158,6 +166,7 @@ class SeriesStatistics:
         weighted_average = np.average(values_at_time_points_in_window, weights=weights)
         return time_points_in_window, weighted_average
 
+    @staticmethod
     def rolling_window_ends(
         start_time: datetime, end_time: datetime, window_size: timedelta, step_size: timedelta
     ) -> Sequence[datetime]:
@@ -168,6 +177,7 @@ class SeriesStatistics:
             window_end += step_size
         return out
 
+    @staticmethod
     def rolling_window_starts_and_ends(
         start_time: datetime, end_time: datetime, window_size: timedelta, step_size: timedelta
     ) -> Sequence[tuple[datetime, datetime]]:
@@ -178,6 +188,7 @@ class SeriesStatistics:
             window_end += step_size
         return out
 
+    @staticmethod
     def exponential_moving_average(
         measurement_times: Sequence[datetime],
         values: Sequence[float],
@@ -202,6 +213,7 @@ class SeriesStatistics:
             window_ends.append(end)
         return window_ends, mean_weighted_values
 
+    @staticmethod
     def datetime_interval_ema(
         interval: TimeSeriesInterval,
         decay_parameter: float,

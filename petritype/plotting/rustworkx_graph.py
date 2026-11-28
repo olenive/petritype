@@ -106,6 +106,7 @@ class RustworkxReadEdgeData(BaseModel):
 
 class RustworkxGraph:
 
+    @staticmethod
     def type_relationship_edges(
         node_names_to_type_relationships: TypeToTypeEdges | TypeToFunctionEdges | FunctionToTypeEdges,
         node_names_to_node_indices: dict[Union[TypeName, FunctionFullName], int]
@@ -127,6 +128,7 @@ class RustworkxGraph:
             out.append((index_from, index_to, relationship))
         return tuple(out)
 
+    @staticmethod
     def argument_edges_to_transitions(
         edges_to_transitions: Iterable[ArgumentEdgeToTransition],
         place_names_to_indices: dict[PlaceKey, NodeIndex],
@@ -150,6 +152,7 @@ class RustworkxGraph:
             ))
         return tuple(out)
 
+    @staticmethod
     def returned_edges_from_transitions(
         edges_from_transitions: Iterable[ReturnedEdgeFromTransition],
         place_names_to_indices: dict[PlaceKey, NodeIndex],
@@ -170,6 +173,7 @@ class RustworkxGraph:
             ))
         return tuple(out)
 
+    @staticmethod
     def read_edges_to_transitions(
         snapshot_edges: Iterable[SnapshotEdge],
         mutate_edges: Iterable[MutateEdge],
@@ -199,12 +203,24 @@ class RustworkxGraph:
                 ))
         return tuple(out)
 
+    @staticmethod
+    def is_open(pydigraph: PyDiGraph) -> bool:
+        """Whether the net a rustworkx graph shows is declared open, as
+        ``from_executable_graph`` records it in the graph's ``attrs``; False for a
+        graph built any other way."""
+        attrs = getattr(pydigraph, "attrs", None)
+        return isinstance(attrs, dict) and attrs.get("open") is True
+
+    @staticmethod
     def from_executable_graph(executable_graph: ExecutableGraph) -> PyDiGraph:
         """The net as a rustworkx graph: one node per place and per transition, one
         edge per edge. A subnet place is one node, its ports are not nodes of their
         own: an edge on a port joins the subnet place's node, and its data keeps the
-        port's ``Port`` pair, so a drawing can end it at the port's cell."""
-        graph = PyDiGraph()
+        port's ``Port`` pair, so a drawing can end it at the port's cell. The graph's
+        ``attrs`` are ``{"open": executable_graph.open}`` (since 2026-11-28), so a
+        drawing made from it alone can draw an open net's places, its ports apart,
+        dashed (``is_open``)."""
+        graph = PyDiGraph(attrs={"open": executable_graph.open})
         place_node_indices = graph.add_nodes_from(executable_graph.places)
         transition_node_indices = graph.add_nodes_from(executable_graph.transitions)
         place_names_to_indices: dict[PlaceKey, NodeIndex] = {}

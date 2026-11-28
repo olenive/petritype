@@ -61,17 +61,25 @@ KINDS_WITH_INITIAL = frozenset({"toggle", "slider", "select"})
 class Labels:
     """Functions that render a token as the protocol's short ``label`` (§5.3)."""
 
+    @staticmethod
     def cut(text: str) -> str:
         """``text`` capped at ``LABEL_CAP`` characters, marker included."""
         if len(text) <= LABEL_CAP:
             return text
         return text[: LABEL_CAP - len(CUT_MARKER)] + CUT_MARKER
 
+    @staticmethod
     def full(token: Any) -> str:
-        """The uncut rendering: the pydantic JSON dump if it works, else ``repr``."""
+        """The uncut rendering: the pydantic JSON dump if it works, else ``repr``.
+        A model that holds a NaN or an infinity gets ``repr`` too (since
+        2026-11-27): the dump writes each as ``null``, which reads as a value
+        that is missing, and ``repr`` writes ``nan`` and ``inf``."""
         if isinstance(token, BaseModel):
             try:
-                return token.model_dump_json()
+                text = token.model_dump_json()
+                # The dump can only have misstated a float where it wrote a null.
+                if "null" not in text or _serialisation._unwritable_float(token.model_dump(mode="json")) is None:
+                    return text
             except Exception:
                 pass
         try:
@@ -79,6 +87,7 @@ class Labels:
         except Exception:
             return f"<{type(token).__name__}>"
 
+    @staticmethod
     def of(token: Any) -> str:
         return Labels.cut(Labels.full(token))
 
@@ -86,6 +95,7 @@ class Labels:
 class Colors:
     """Functions that resolve a token's ``.color`` to a CSS hex string."""
 
+    @staticmethod
     def of(token: Any) -> Optional[str]:
         """A ``#``-prefixed ``.color`` as given, a known name from ``COLOR_NAMES``,
         else ``None`` (no ``color`` on the wire). The server fell back to grey for
@@ -108,16 +118,19 @@ class Places:
     the library spells ``Port(subnet place, port)`` and the wire as ``port``
     beside ``place`` (PROTOCOL.md §12.7)."""
 
+    @staticmethod
     def ref(key: PlaceKey) -> Union[str, dict]:
         """A place where the wire names it by position, in a ``consumed`` or
         ``produced`` entry: its name, or ``{"place", "port"}`` for a port."""
         return {"place": key.place, "port": key.port} if isinstance(key, Port) else key
 
+    @staticmethod
     def split(key: PlaceKey) -> tuple[str, Optional[str]]:
         """``(place, port)`` for an object that names a place: the port ``None``
         for a place of the net's own."""
         return (key.place, key.port) if isinstance(key, Port) else (key, None)
 
+    @staticmethod
     def from_wire(raw: Any, what: str) -> PlaceKey:
         """A place a request names in a list (a filter's ``places``, ``distinct``'s
         ``places``): a name, or ``{"place", "port"}`` for a port, other keys of the
@@ -130,6 +143,7 @@ class Places:
             ErrorCode.INVALID_PARAMS, f'{what} is a list of place names and {{"place", "port"}} objects',
         )
 
+    @staticmethod
     def words(key: PlaceKey) -> str:
         """A place for a message: ``'Door'``, or ``port 'Lobby' of 'Level 1'``."""
         return f"port {key.port!r} of {key.place!r}" if isinstance(key, Port) else repr(key)
@@ -138,6 +152,7 @@ class Places:
 class Tokens:
     """Functions that put a token on the wire."""
 
+    @staticmethod
     def entry(
         token_id: int, token: Any, place_type_name: str, nets: Optional[list[wire.NestedNet]] = None,
         keys: Optional[dict] = None,
@@ -155,6 +170,7 @@ class Tokens:
             nets=nets or None,
         )
 
+    @staticmethod
     def keys(place: ListPlaceNode, token: Any) -> Optional[dict]:
         """The token's keys when its place declares some, else ``None``; a key
         that will not derive is left out rather than failing the read."""
@@ -165,6 +181,7 @@ class Tokens:
         except Exception:
             return {}
 
+    @staticmethod
     def nets(token: Any, prefix: tuple[wire.PathStep, ...], place: str, token_id: int) -> list[wire.NestedNet]:
         """The ``nets`` of a nested token: one entry per inner net, its path the
         path of the net the token is in (``prefix``, empty for the loaded net)
@@ -181,6 +198,7 @@ class Tokens:
             ))
         return entries
 
+    @staticmethod
     def produced(place: PlaceKey, token_id: int, token: Any, keys: Optional[dict] = None) -> list[Any]:
         """A ``fired.produced`` element: ``[place, id, label, color?]``, or with
         ``keys`` ``[place, id, label, color | null, keys]`` (§7.1); a port's
@@ -193,6 +211,7 @@ class Tokens:
             element.append(color)
         return element
 
+    @staticmethod
     def json_value(token: Any) -> Any:
         """The token as plain JSON (for a serializable place). Raises if it has none."""
         return JsonForm.encode(token)
@@ -205,14 +224,17 @@ class Paths:
     by a token, ``{place, token, net}``, or a subnet, ``{place}``. No character
     in a name means anything, so a path is never spelt as text."""
 
+    @staticmethod
     def step(place: str, token_id: int, net: str) -> wire.PathStep:
         """The step to the net named ``net`` in the token ``token_id`` of ``place``."""
         return wire.PathStep(place=place, token=str(token_id), net=net)
 
+    @staticmethod
     def subnet_step(place: str) -> wire.PathStep:
         """The step to the subnet of the subnet place ``place``: the place alone."""
         return wire.PathStep(place=place)
 
+    @staticmethod
     def parse(raw: Any) -> tuple[wire.PathStep, ...]:
         """A request's ``path`` as steps, or ``invalid_params`` for a shape that is
         not one: a value that is not a list, a step that is not an object or has
@@ -243,6 +265,7 @@ class Paths:
             steps.append(wire.PathStep(place=step["place"], token=step.get("token"), net=step.get("net")))
         return tuple(steps)
 
+    @staticmethod
     def of_step(step: PathStep) -> wire.PathStep:
         """A step of the library's own path (``NestedNets.walk``, ``find``, the
         ``Nested`` records and an ``InnerFiring``) as the wire spells it: the same
@@ -252,10 +275,12 @@ class Paths:
             return Paths.subnet_step(step.place)
         return Paths.step(step.place, step.token, step.net)
 
+    @staticmethod
     def of_steps(steps: tuple[PathStep, ...]) -> tuple[wire.PathStep, ...]:
         """A path of the library's own (``of_step``) as the wire's steps."""
         return tuple(Paths.of_step(step) for step in steps)
 
+    @staticmethod
     def to_wire(steps: tuple[wire.PathStep, ...]) -> list[dict]:
         """The steps as JSON, for a result built as a plain dict."""
         return [step.wire() for step in steps]
@@ -265,9 +290,11 @@ class StrictJson:
     """Validate wire input as the JSON it arrived as, in pydantic's strict mode
     (``JsonForm.validate``; the rationale is there)."""
 
+    @staticmethod
     def validate(target: Any, value: Any) -> Any:
         return JsonForm.validate(target, value)
 
+    @staticmethod
     def message(error: ValueError) -> str:
         return JsonForm.message(error)
 
@@ -275,9 +302,11 @@ class StrictJson:
 class Serializable:
     """Functions that decide and use a place's JSON form (``JsonForm``)."""
 
+    @staticmethod
     def place_type(place_type: Any) -> bool:
         return JsonForm.place_type(place_type)
 
+    @staticmethod
     def decode(place_type: Any, payload: Any) -> Any:
         return JsonForm.decode(place_type, payload)
 
@@ -285,6 +314,7 @@ class Serializable:
 class Filters:
     """Functions that read a filter off the wire and write one (§13.2)."""
 
+    @staticmethod
     def from_wire(raw: Any, place_names: Optional[set[PlaceKey]] = None) -> Filter:
         """A ``Filter`` from ``{clauses?, places?, prefix?}``; ``invalid_params``
         for a shape that is not one, ``unknown_place`` for a place not of the net.
@@ -329,6 +359,7 @@ class Filters:
             raise ProtocolError(ErrorCode.INVALID_PARAMS, '"prefix" is a string')
         return Filter(tuple(clauses), places, prefix)
 
+    @staticmethod
     def places(raw: Any, place_names: Optional[set[PlaceKey]], what: str) -> tuple[PlaceKey, ...]:
         """A list of places a request names, each a name or ``{"place", "port"}``
         (``Places.from_wire``), checked against ``place_names`` when given:
@@ -344,6 +375,7 @@ class Filters:
                 raise ProtocolError(ErrorCode.UNKNOWN_PLACE, f"no place named {Places.words(missing[0])}")
         return keys
 
+    @staticmethod
     def to_wire(filter: Filter) -> dict:
         """A filter as declared (§13.2): a parameter clause unevaluated, and an
         input clause as ``{key, input: {place, port?, key}}``, its place named as
@@ -355,6 +387,7 @@ class Filters:
             out["prefix"] = filter.prefix
         return out
 
+    @staticmethod
     def clause_to_wire(clause: Clause) -> dict:
         """``{key, values}``, ``{key, param}`` or ``{key, input: {place, port?, key}}``."""
         if clause.input is not None:
@@ -372,6 +405,7 @@ class Filters:
 class Details:
     """Functions that introspect a transition's function for ``detail``."""
 
+    @staticmethod
     def signature(function: Callable) -> str:
         """``(parcel: Parcel) -> Sorted``: parameters with short type names and
         defaults, and the return type."""
@@ -392,6 +426,7 @@ class Details:
             text += f" -> {TypeNames.of(signature.return_annotation)}"
         return text
 
+    @staticmethod
     def of(function: Callable) -> dict:
         """``{function_name, signature?, docstring?}``; a key that cannot be had is
         left out."""
@@ -411,16 +446,19 @@ class Controls:
     ``press`` carries (PROTOCOL.md §5.1, §6). A control is a ``ControlSpec`` (read by
     its fields, so this module needs no runtime import)."""
 
+    @staticmethod
     def wire(controls: dict, graph: ExecutableGraph) -> list[wire.Control]:
         """The control-map as ``topology.controls``, in declaration order: ``node``,
         ``action`` and ``config`` left out when absent or empty, and ``config.value``
         when the kind has no initial value (``KINDS_WITH_INITIAL``). ``ValueError`` for a
-        ``node`` that is no place or transition of the net or a ``config`` that is not
-        plain JSON, and pydantic's (a ``ValueError`` too) for a kind or an action outside
+        control named by the empty string (since 2026-11-28), a ``node`` that is no place
+        or transition of the net or a ``config`` that is not plain JSON, and pydantic's (a ``ValueError`` too) for a kind or an action outside
         the vocabulary."""
         nodes = {place.name for place in graph.places} | {transition.name for transition in graph.transitions}
         controls_on_the_wire = []
         for name, spec in controls.items():
+            if name == "":
+                raise ValueError("a control is named by the empty string; a name holds at least one character")
             config = dict(spec.config or {})
             if spec.kind not in KINDS_WITH_INITIAL:
                 config.pop("value", None)
@@ -436,6 +474,7 @@ class Controls:
             ))
         return controls_on_the_wire
 
+    @staticmethod
     def value(spec: Any, params: dict) -> Any:
         """The value a ``press`` of ``spec`` carries, checked by its kind: none for a
         ``button``, which hands ``to_command`` ``True`` (clicked, as a notebook's button
@@ -480,6 +519,7 @@ class Controls:
 class Topologies:
     """Functions that read a net's shape (PROTOCOL.md §5.1)."""
 
+    @staticmethod
     def declare(topology: wire.Topology, controls: list[wire.Control], place_styles: Optional[dict]) -> None:
         """Put on ``topology`` what a net's entry declares beside the net: its
         ``controls`` (left out when there are none) and the ``style`` of each place in
@@ -495,6 +535,7 @@ class Topologies:
                 places[name].style = wire.PlaceStyle(fill=getattr(style, "fill", None))
         topology.controls = controls or None
 
+    @staticmethod
     def takes_all(function: Callable, argument: str, place: ListPlaceNode) -> bool:
         """Whether an argument edge hands the body every token as a list, by the
         same test stage 1 applies."""
@@ -507,6 +548,7 @@ class Topologies:
             annotation_maybe_in_list=argument_type,
         )
 
+    @staticmethod
     def place(place: ListPlaceNode, port: bool = False, group: Optional[str] = None) -> wire.Place:
         """One place as the topology lists it; ``port`` for a port place in its
         own net's topology, and ``group`` the group it is in there. A port
@@ -522,6 +564,7 @@ class Topologies:
             group=group,
         )
 
+    @staticmethod
     def of(graph: ExecutableGraph) -> wire.Topology:
         """The net's shape. A place whose tokens hold nets carries ``nested`` and its
         ``stepping`` rule, the default included (§12.3). A subnet place is listed

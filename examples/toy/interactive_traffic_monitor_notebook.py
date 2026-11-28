@@ -155,7 +155,7 @@ async def _(ExecutableGraphOperations, contextlib, graph, io, set_tick, step):
 @app.cell
 def _(UserRequest, graph, inject, level, set_tick):
     if inject.value:
-        graph.place_named("Requests").tokens.append(UserRequest(level=level.value))
+        graph.place("Requests").tokens.append(UserRequest(level=level.value))
         set_tick(lambda v: v + 1)
     return
 
@@ -164,9 +164,9 @@ def _(UserRequest, graph, inject, level, set_tick):
 def _(ANOMALY_THRESHOLD, get_tick, graph, mo):
     get_tick()  # re-render whenever an action bumps the tick
 
-    requests = graph.place_named("Requests").tokens
-    readings = graph.place_named("Readings").tokens
-    log = graph.place_named("Log").tokens
+    requests = graph.place("Requests").tokens
+    readings = graph.place("Readings").tokens
+    log = graph.place("Log").tokens
 
     def _row(c):
         flag = "🚨" if c.verdict == "ANOMALY" else ""

@@ -1,15 +1,17 @@
 """``petritype.runner``'s wire shapes, registry and translation, without an owner."""
 
 import types
+from typing import Annotated, Optional
 
 import pytest
 from pydantic import BaseModel
 
 from petritype import petri_net
+from petritype.core.serialisation import JsonForm
 from petritype.runner import protocol as wire
 from petritype.runner.protocol import ErrorCode, Lines, Malformed, ProtocolError, Request, Requests
-from petritype.runner.registry import NetEntries, Registry
-from petritype.runner.translate import Colors, Labels, Serializable, TypeNames
+from petritype.runner.registry import NetEntries, ParamSpec, Registry
+from petritype.runner.translate import Colors, Labels, Serializable
 
 
 # --- wire shapes ---------------------------------------------------------------------------
@@ -140,6 +142,14 @@ def test_bind_validates_against_annotations():
         NetEntries.bind(entry, {})
 
 
+def test_adapter_handles_unhashable_annotation():
+    unhashable = Annotated[int, {"meta": "unhashable"}]
+    spec = ParamSpec(name="x", type_name="int", required=True, annotation=unhashable)
+    adapter = NetEntries.adapter(spec)
+    assert adapter is not None
+    assert adapter.validate_python(5) == 5
+
+
 # --- translation ---------------------------------------------------------------------------
 
 
@@ -159,13 +169,6 @@ def test_colors():
     assert Colors.of(Tok("mauve")) is None
     assert Colors.of(Tok(None)) is None
     assert Colors.of(3) is None
-
-
-def test_type_names():
-    assert TypeNames.of(int) == "int"
-    assert TypeNames.of(list[int]) == "list[int]"
-    assert TypeNames.of(int | None) == "int | None"
-    assert TypeNames.of(dict[str, tuple[int, ...]]) == "dict[str, tuple[int, ...]]"
 
 
 def test_serializable_and_decode():
@@ -209,3 +212,69 @@ def test_a_subclass_of_a_scalar_has_its_scalars_json_form():
     for place_type, payload in [(Colour, 7), (Colour, "purple"), (Colour, None), (Count, "3"), (Count, True)]:
         with pytest.raises(ValueError):
             Serializable.decode(place_type, payload)
+
+
+def test_json_form_encode_of_scalars_and_their_subclasses():
+    """Each JSON scalar encodes as itself, a non-finite float is refused, and a
+    subclass of ``int`` encodes as a plain ``int`` (a subclass of ``str``: see
+    ``test_a_subclass_of_a_scalar_has_its_scalars_json_form``)."""
+    class Score(int):
+        pass
+
+    assert JsonForm.encode(True) is True
+    assert JsonForm.encode(False) is False
+    assert type(JsonForm.encode(42)) is int and JsonForm.encode(42) == 42
+    assert type(JsonForm.encode("abc")) is str and JsonForm.encode("abc") == "abc"
+    assert type(JsonForm.encode(3.25)) is float and JsonForm.encode(3.25) == 3.25
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            JsonForm.encode(bad)
+
+    encoded_score = JsonForm.encode(Score(7))
+    assert type(encoded_score) is int and encoded_score == 7
+
+
+class Reading(BaseModel):
+    sensor: str
+    value: float
+    note: Optional[str] = None
+
+
+class Batch(BaseModel):
+    readings: list[Reading]
+    limits: dict[str, float] = {}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_model_that_holds_a_float_json_cannot_write_has_no_json_form(bad):
+    """Written out, the field would be spelt ``null``, which says something else and
+    does not load back; a bare float that is one is refused the same way."""
+    with pytest.raises(ValueError, match="value"):
+        JsonForm.encode(Reading(sensor="b", value=bad))
+    with pytest.raises(ValueError, match=r"readings\[1\]\.value"):
+        JsonForm.encode(Batch(readings=[Reading(sensor="a", value=1.0), Reading(sensor="b", value=bad)]))
+    with pytest.raises(ValueError, match="limits.high"):
+        JsonForm.encode(Batch(readings=[], limits={"low": 0.0, "high": bad}))
+
+
+def test_a_model_with_an_empty_optional_field_keeps_its_json_form():
+    assert JsonForm.encode(Reading(sensor="a", value=1.5)) == {"sensor": "a", "value": 1.5, "note": None}
+    assert JsonForm.encode(Batch(readings=[Reading(sensor="a", value=1.5)])) == {
+        "readings": [{"sensor": "a", "value": 1.5, "note": None}], "limits": {},
+    }
+
+
+@pytest.mark.parametrize("bad, spelt", [(float("nan"), "nan"), (float("inf"), "inf"), (float("-inf"), "-inf")])
+def test_the_label_of_a_model_that_holds_such_a_float_is_its_repr(bad, spelt):
+    """The JSON dump writes the field as ``null``, which reads as a value that is
+    missing, so the label is the ``repr``, which writes the float."""
+    reading = Reading(sensor="b", value=bad)
+    assert Labels.of(reading) == repr(reading) == f"Reading(sensor='b', value={spelt}, note=None)"
+    batch = Batch(readings=[Reading(sensor="a", value=1.0), reading])
+    assert Labels.of(batch) == repr(batch) and f"value={spelt}" in Labels.of(batch)
+
+
+def test_the_label_of_any_other_model_is_its_json_dump_an_empty_field_included():
+    assert Labels.of(Reading(sensor="a", value=1.5)) == '{"sensor":"a","value":1.5,"note":null}'
+    assert Labels.of(Reading(sensor="a", value=1.5, note="ok")) == '{"sensor":"a","value":1.5,"note":"ok"}'

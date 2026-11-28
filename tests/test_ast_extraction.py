@@ -1,5 +1,16 @@
 import ast
-from petritype.core.ast_extraction import ASTModule, ASTType, TypeAnnotation
+import inspect
+
+import pytest
+
+from petritype.core.ast_extraction import (
+    ASTAnnAssign,
+    ASTClass,
+    ASTFunction,
+    ASTModule,
+    ASTType,
+    TypeAnnotation,
+)
 from petritype.core.data_structures import COMMON_TYPES, ImportPath, TypeVariableWithAnnotations
 
 
@@ -118,6 +129,122 @@ class TestASTModule:
         tree = ast.parse(code)
         result = ASTModule.type_aliases_to_nodes(tree)
         assert result == dict()
+
+    def test_relevant_types_and_conversion_end_to_end(self):
+        code = (
+            "import dataclasses\n"
+            "import pydantic\n"
+            "from typing import Generic, TypeVar\n\n"
+            "T = TypeVar('T')\n\n"
+            "@dataclasses.dataclass(frozen=True)\n"
+            "class FrozenDC:\n"
+            "    value: int\n\n"
+            "class QualifiedModel(pydantic.BaseModel):\n"
+            "    name: str\n\n"
+            "class Container(Generic[T]):\n"
+            "    item: T\n"
+        )
+        tree = ast.parse(code)
+        relevant = ASTModule.relevant_types(tree)
+        assert set(relevant.keys()) == {"FrozenDC", "QualifiedModel"}
+        model_var = ASTType.to_type_variables_with_annotations(
+            relevant["QualifiedModel"], module_path_components=("m",)
+        )
+        assert model_var.parent_type == "pydantic.BaseModel"
+        assert model_var.attribute_types == {"name": "str"}
+
+
+class TestASTAnnAssign:
+
+    def test_extract_types_has_non_mutable_default(self):
+        sig = inspect.signature(ASTAnnAssign.extract_types)
+        assert sig.parameters["excluded_types"].default is None
+
+        node = ast.parse("x: dict[str, MyType]").body[0]
+        assert isinstance(node, ast.AnnAssign)
+        assert ASTAnnAssign.extract_types(node) == {"dict", "str", "MyType"}
+        assert ASTAnnAssign.extract_types(node, excluded_types=None) == {"dict", "str", "MyType"}
+        assert ASTAnnAssign.extract_types(node, excluded_types={"dict", "str"}) == {"MyType"}
+        with pytest.raises(ValueError, match="Expected a set"):
+            ASTAnnAssign.extract_types(node, excluded_types=["str"])  # type: ignore[arg-type]
+
+
+class TestASTClass:
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("@dataclass\nclass A:\n    x: int", True),
+            ("@dataclass(frozen=True)\nclass A:\n    x: int", True),
+            ("@dataclasses.dataclass\nclass A:\n    x: int", True),
+            ("@dataclasses.dataclass(frozen=True, slots=True)\nclass A:\n    x: int", True),
+            ("@pydantic.dataclasses.dataclass()\nclass A:\n    x: int", True),
+            ("@other\nclass A:\n    x: int", False),
+            ("@other(flag=True)\nclass A:\n    x: int", False),
+            ("@pkg.other\nclass A:\n    x: int", False),
+            ("@decorators[0]\nclass A:\n    x: int", False),
+            ("@factory()(arg)\nclass A:\n    x: int", False),
+            ("class A:\n    x: int", False),
+        ],
+    )
+    def test_is_decorated_as_dataclass_handles_all_decorator_forms(self, code, expected):
+        class_node = ast.parse(code).body[0]
+        assert ASTClass.is_decorated_as_dataclass(class_node) is expected
+        assert ASTClass.is_dataclass(class_node) is expected
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("class A(BaseModel):\n    x: int", True),
+            ("class A(pydantic.BaseModel):\n    x: int", True),
+            ("class A(Generic[T]):\n    x: int", False),
+            ("class A(Generic[T], BaseModel):\n    x: int", True),
+            ("class A(Generic[T], pydantic.BaseModel):\n    x: int", True),
+            ("class A(BaseModel, Generic[T]):\n    x: int", True),
+            ("class A(pydantic.BaseModel[T]):\n    x: int", True),
+            ("class A(get_base()):\n    x: int", False),
+            ("@dataclass(frozen=True)\nclass A:\n    x: int", True),
+            ("@dataclasses.dataclass\nclass A(Generic[T]):\n    x: int", True),
+        ],
+    )
+    def test_is_a_relevant_type_handles_attribute_and_subscript_bases(self, code, expected):
+        class_node = ast.parse(code).body[0]
+        assert ASTClass.is_a_relevant_type(class_node) is expected
+
+    @pytest.mark.parametrize(
+        ("code", "expected_parent"),
+        [
+            ("class A(Parent):\n    pass", "Parent"),
+            ("class A(pydantic.BaseModel):\n    pass", "pydantic.BaseModel"),
+            ("class A(Generic[T]):\n    pass", "Generic[T]"),
+            ("class A(typing.Generic[T]):\n    pass", "typing.Generic[T]"),
+            ("class A:\n    pass", None),
+        ],
+    )
+    def test_parent_type_handles_attribute_and_subscript_bases(self, code, expected_parent):
+        class_node = ast.parse(code).body[0]
+        assert ASTClass.parent_type(class_node) == expected_parent
+
+
+class TestASTFunction:
+
+    @pytest.mark.parametrize(
+        ("code", "expected_return"),
+        [
+            ("def f() -> int:\n    pass", "int"),
+            ("def f() -> list[int]:\n    pass", "list[int]"),
+            ("def f() -> None:\n    pass", "None"),
+            ("def f() -> int | str:\n    pass", "int | str"),
+            ("def f() -> Foo | None:\n    pass", "Foo | None"),
+            ("def f() -> typing.Any:\n    pass", "typing.Any"),
+            ("def f() -> pkg.sub.MyType:\n    pass", "pkg.sub.MyType"),
+            ("def f() -> pkg.MyType | None:\n    pass", "pkg.MyType | None"),
+            ("def f():\n    pass", None),
+        ],
+    )
+    def test_return_annotation_handles_binop_and_attribute(self, code, expected_return):
+        func_node = ast.parse(code).body[0]
+        assert ASTFunction.return_annotation(func_node) == expected_return
 
 
 class TestASTType:

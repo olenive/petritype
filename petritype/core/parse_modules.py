@@ -14,6 +14,7 @@ class ParsedModule(BaseModel):
 
 class ParseModule:
 
+    @staticmethod
     def from_file(path_to_file: str, import_path_components: Sequence[str]) -> ParsedModule:
         with open(path_to_file, "r") as file:
             code = file.read()
@@ -26,6 +27,7 @@ class ParseModule:
 
 class ExtractFunctions:
 
+    @staticmethod
     def from_selected_classes_in_parsed_module(
         *,
         parsed_module: ParsedModule,
@@ -46,6 +48,7 @@ class ExtractFunctions:
                 )
         return functions
 
+    @staticmethod
     def from_selected_classes_in_parsed_modules(
         *,
         parsed_modules: Sequence[ParsedModule],
@@ -66,6 +69,7 @@ class ExtractFunctions:
 
 class ExtractTypes:
 
+    @staticmethod
     def from_parsed_module(
         parsed_module: ParsedModule,
     ) -> Sequence[TypeVariableWithAnnotations]:
@@ -77,6 +81,7 @@ class ExtractTypes:
         ]
         return types
 
+    @staticmethod
     def from_parsed_modules(
         parsed_modules: Sequence[ParsedModule],
     ) -> Sequence[TypeVariableWithAnnotations]:
@@ -88,6 +93,7 @@ class ExtractTypes:
 
 class ExtractImportStatements:
 
+    @staticmethod
     def from_parsed_module(parsed_module: ParsedModule) -> Sequence[str]:
         module_ast = ast.parse(parsed_module.code)
         import_statements = []
@@ -107,6 +113,7 @@ class ExtractImportStatements:
 
 class ExtractClassCode:
 
+    @staticmethod
     def from_parsed_module(
         parsed_module: ParsedModule,
         class_name: str,

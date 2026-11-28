@@ -11,17 +11,18 @@ The outer net runs them as part of running itself, in the order the place's
 ``"take_turns"``, ``"outer_first"`` or ``"passive"``), gathers their events into
 its own log as ``Nested`` records with the path to the net they happened in, a
 tuple of ``PathStep`` values, tells a firing inside as an ``InnerFiring``, and
-lets its bodies reach inside the tokens they hold with ``NestedNets.put``,
-``take`` and ``set_param``. ``NetParams`` are the net-level parameters an inner
-net exposes for that (``construct_graph(..., params={...})``, read as
-``graph.params``). The program reads a subnet with ``graph.subnet(name)`` and
-steps or changes it inside ``NestedNets.subnet_scope``.
+lets its bodies reach inside the tokens they hold with ``NestedNets.put`` and
+``take``, at the ports their edges name in ``reaches``. ``NetParams`` are the
+net-level parameters an inner net exposes to the program and the runner
+(``construct_graph(..., params={...})``, read as ``graph.params``). The program
+reads a subnet with ``graph.subnet(name)`` and steps or changes it inside
+``NestedNets.subnet_scope``.
 
-A net that marks a port is closed unless it declares itself open
-(``construct_graph(..., open=True)``, since 2026-11-23): from outside it, tokens
-are put, taken and replaced only at its ports (``ClosedNetError`` otherwise), and
-a body of the net around it may not set its knobs or fire it by name
-(``HeldByBodyError``). ``ClosedNets`` says who is outside and what stays allowed.
+Every net is closed unless it declares itself open (``construct_graph(...,
+open=True)``): from outside it, tokens are put, taken and replaced only at its
+ports (``ClosedNetError`` otherwise), and a body of the net around it may not set
+its knobs, fire it by name or load a marking into it (``HeldByBodyError``).
+``ClosedNets`` says who is outside and what stays allowed.
 
 Everything here lives in ``petritype.core.executable_graph_components`` and
 ``petritype.core.events`` (the engine needs it); this module is the short

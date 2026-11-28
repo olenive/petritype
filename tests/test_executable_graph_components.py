@@ -1,7 +1,24 @@
 import pytest
 from pydantic import BaseModel
 from typing import Optional, Union
-from petritype.core.executable_graph_components import ExecutableGraphCheck, ExecutableGraphOperations, ListPlaceNode
+from petritype.core.executable_graph_components import (
+    ArgumentEdgeToTransition,
+    ExecutableGraphCheck,
+    ExecutableGraphOperations,
+    ListPlaceNode,
+)
+
+
+class TestPositionalArgsBaseModel:
+
+    def test_rejects_extra_and_duplicate_args(self):
+        # Too many positional args
+        with pytest.raises(TypeError, match="at most"):
+            ArgumentEdgeToTransition("P", "T", "x", "extra_arg")
+
+        # Duplicate positional and keyword arg
+        with pytest.raises(TypeError, match="multiple values"):
+            ListPlaceNode("P", int, name="Other")
 
 
 class TestExecutableGraphCheck:

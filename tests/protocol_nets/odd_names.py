@@ -11,7 +11,9 @@ serializable. A memo goes from the outer place ``Inbox #1 / "new"`` by the
 transition ``File it #1 / "now"`` into the port ``Clerk's tray #4 / "in"`` of
 the subnet place ``Cabinet "C" #2/3``, whose own transition ``Sort #2 / "A-Z"``
 moves it into its place ``Folder "D" #5/6``. Every body hands its memo on
-unchanged, and none fails.
+unchanged, and none fails. The inbox is the net's port, where a transcript
+``inject``s a note: since 2026-11-27 every net not declared open is closed, and
+from outside a closed net takes tokens only at its ports.
 
 The cabinet's net is stamped with the template name ``Cabinet #9 / "steel"``
 by ``construct_graph(template=...)`` and not registered by that name, as the
@@ -60,7 +62,7 @@ def cabinet() -> ExecutableGraph:
 @petri_net(name="odd-names", description="Every name holds a slash, a hash, a space and a double quote")
 def odd_names() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode(INBOX, str, ["Memo"]),
+        ListPlaceNode(INBOX, str, ["Memo"], port=True),
         SubnetPlaceNode(CABINET, cabinet()),
         FunctionTransitionNode(FILE_IT, moves),
         ArgumentEdgeToTransition(INBOX, FILE_IT, "memo"),

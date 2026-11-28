@@ -22,7 +22,7 @@ def _(mo):
         its own, built by the one template `Level` (`examples/subnet_places/levels.py`). The
         world is drawn on top, each level closed as one box with a cell per **port place**,
         showing the port's name and how many heroes it holds; below it, each level's own net,
-        where a port is drawn with a second ring, the border seen from inside.
+        where a port is drawn with one dotted ring, the border seen from inside.
 
         The world reaches a level only through its ports. `Enter` puts a hero into level 1's
         `Lobby`, `Climb` takes one from level 1's `Exit Hall` into level 2's `Lobby`, and
@@ -108,7 +108,7 @@ def _(label, snapshot, step):
         if fired is None:
             return 0
         session["log"].append(label(fired))
-        outside = len(graph.place_named("Outside").tokens)
+        outside = len(graph.place("Outside").tokens)
         snapshot(session, f"Firing {len(session['log'])}: {label(fired)}  ·  outside {outside} of 3")
         return 1
 

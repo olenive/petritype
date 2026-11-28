@@ -8,11 +8,15 @@ tells of one.
 Its names, places, transitions, keys, template and seed are fixed in
 PROTOCOL.md §11, so that the Rust runner can build the same net from the text
 alone and replay ``tests/protocol/17_read_edges.json``. A squad is a net built
-from the template ``Squad``, one place ``Members`` of strings, and then given
-its members; its leader is its first member and its size its number of members,
-and a roll line writes it as ``<leader> <size>``. Each transition takes the
-front of its own place of requests and reads the squads, and produces one line
-into ``Roll``. Each declares its take edge first.
+from the template ``Squad``, one place ``Members`` of strings, holding the
+members it is built with (since 2026-11-27: until then it was built empty and
+given its members after, a write from outside that a squad, closed like every
+net not declared open, now refuses); its leader is its first member and its
+size its number of members, and a roll line writes it as ``<leader> <size>``.
+Each transition takes the front of its own place of requests, ``Calls``,
+``Checks`` or ``Inspections``, each a port where a transcript ``inject``s a
+request, reads the squads, and produces one line into ``Roll``. Each declares
+its take edge first.
 
 The template is registered, so a squad has a saved form and ``Barracks`` is
 serializable through it, as the ``stepping-rules`` net registers its own.
@@ -27,7 +31,6 @@ from petritype.core.executable_graph_components import (
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
-    NestedNets,
     ReadAllEdge,
     ReadEdge,
     ReturnedEdgeFromTransition,
@@ -43,17 +46,16 @@ class Inspection(BaseModel):
 
 
 @Templates.template("Squad")
-def squad_template() -> ExecutableGraph:
-    """The ``Squad`` template: one place, ``Members``, of strings, holding no
-    tokens, and no transitions. No parameters."""
-    return ExecutableGraphOperations.construct_graph([ListPlaceNode("Members", str)])
+def squad_template(members: tuple[str, ...] = ()) -> ExecutableGraph:
+    """The ``Squad`` template: one place, ``Members``, of strings, holding
+    ``members`` in order (none by default, as a saved squad is rebuilt before its
+    marking is loaded), and no transitions. No net parameters."""
+    return ExecutableGraphOperations.construct_graph([ListPlaceNode("Members", str, list(members))])
 
 
 def squad(*members: str) -> ExecutableGraph:
-    """A squad built from the template, then given its members."""
-    net = squad_template()
-    NestedNets.put(net, "Members", list(members))
-    return net
+    """A squad built from the template with its members."""
+    return squad_template(members)
 
 
 def members(squad: ExecutableGraph) -> list[str]:
@@ -90,9 +92,9 @@ def roll_call() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Barracks", ExecutableGraph, [squad("Ada", "Ben"), squad("Cy")], nested=True,
                       keys={"leader": leader}),
-        ListPlaceNode("Calls", str),
-        ListPlaceNode("Checks", str),
-        ListPlaceNode("Inspections", Inspection, keys=("leader",)),
+        ListPlaceNode("Calls", str, port=True),
+        ListPlaceNode("Checks", str, port=True),
+        ListPlaceNode("Inspections", Inspection, keys=("leader",), port=True),
         ListPlaceNode("Roll", str),
         FunctionTransitionNode("Call the Roll", call_the_roll),
         ArgumentEdgeToTransition("Calls", "Call the Roll", "caller"),

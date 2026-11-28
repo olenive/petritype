@@ -77,9 +77,12 @@ def tick(x: int) -> int:
 
 
 @Templates.template("Tally")
-def build_tally() -> ExecutableGraph:
+def build_tally(low: tuple[int, ...] = ()) -> ExecutableGraph:
+    """A tally that starts with ``low`` to count. ``Low`` is its port: ``Fill``
+    puts there, and the runner injects there when every net around the tally is
+    declared open."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Low", int),
+        ListPlaceNode("Low", int, list(low), port=True),
         ArgumentEdgeToTransition("Low", "Up", "x"),
         FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
@@ -106,20 +109,23 @@ def make(label: str) -> Crate:
 
 
 @petri_net(name="crates", description="Crates are made, then filled")
-def crates(seeded: bool = False, labels: Optional[list[str]] = None) -> ExecutableGraph:
+def crates(seeded: bool = False, labels: Optional[list[str]] = None, open: bool = False) -> ExecutableGraph:
     """Passive places, so the driver never fires a tally: only the outer bodies
-    change one, which is what a ``fireable`` baseline is about."""
+    change one, which is what a ``fireable`` baseline is about. ``Labels`` and
+    ``Spare`` are ports, where the runner injects; it injects into a tally only
+    when ``open`` declares the net open, a closed net shielding the nets inside
+    it (since 2026-11-27)."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Labels", str, list(labels or [])),
-        ListPlaceNode("Spare", Crate, [make("seed")] if seeded else [], nested=True, stepping="passive"),
+        ListPlaceNode("Labels", str, list(labels or []), port=True),
+        ListPlaceNode("Spare", Crate, [make("seed")] if seeded else [], nested=True, stepping="passive", port=True),
         ListPlaceNode("Shelf", Crate, nested=True, stepping="passive"),
         FunctionTransitionNode("Make", make),
         ArgumentEdgeToTransition("Labels", "Make", "label"),
         ReturnedEdgeFromTransition("Make", "Spare"),
         FunctionTransitionNode("Fill", fill),
-        ArgumentEdgeToTransition("Spare", "Fill", "crate"),
+        ArgumentEdgeToTransition("Spare", "Fill", "crate", reaches=("Low",)),
         ReturnedEdgeFromTransition("Fill", "Shelf"),
-    ])
+    ], open=open)
 
 
 async def tally_of(harness, place):
@@ -175,11 +181,18 @@ class TestFireableBaselines:
 
 
 class TestInnerInject:
-    """A2 (§12.3, §12.5): ``inject`` into an inner net answers with its address."""
+    """A2 (§12.3, §12.5): ``inject`` into an inner net answers with its address. The
+    crates are declared open: inside a closed net the runner reaches no inner net
+    (since 2026-11-27)."""
 
     async def test_the_result_names_the_inner_net_and_carries_its_version(self):
+        closed = Harness(crates)
+        await closed.send("load", {"net": "crates", "params": {"seeded": True}})
+        tally = await tally_of(closed, "Spare")
+        assert error(await closed.send("inject", {"place": "Low", "token": 1, "nested_id": tally["nested_id"]})) == (
+            "closed_net")
         harness = Harness(crates)
-        await harness.send("load", {"net": "crates", "params": {"seeded": True}})
+        await harness.send("load", {"net": "crates", "params": {"seeded": True, "open": True}})
         tally = await tally_of(harness, "Spare")
         by_id = result(await harness.send("inject", {"place": "Low", "token": 1, "nested_id": tally["nested_id"]}))
         assert by_id == {"status": "injected", "id": by_id["id"], "marking_version": 1,
@@ -348,17 +361,10 @@ def keep_time(clock: int) -> int:
     return clock + 1
 
 
-def seeded_tally(low) -> ExecutableGraph:
-    tally = build_tally()
-    NestedNets.put(tally, "Low", list(low))
-    tally.drain_events()
-    return tally
-
-
 @petri_net(name="clockwork", description="A clock that always ticks, and crates of tallies")
 def clockwork(stepping: str = "inner_first", clock: bool = True) -> ExecutableGraph:
-    nodes = [ListPlaceNode("Shelf", Crate, [Crate(label="a", tally=seeded_tally([1, 2])),
-                                            Crate(label="b", tally=seeded_tally([3, 4]))],
+    nodes = [ListPlaceNode("Shelf", Crate, [Crate(label="a", tally=build_tally((1, 2))),
+                                            Crate(label="b", tally=build_tally((3, 4)))],
                            nested=True, stepping=stepping)]
     if clock:
         nodes += [

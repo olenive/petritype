@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from petritype.core.events import Added, Failed, Fired, InnerFiring, Mutated, Nested, PathStep, Port, Removed
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    ClosedNetError,
     DrainEdge,
     ExecutableGraph,
     ExecutableGraphOperations,
@@ -85,7 +86,7 @@ LOBBY = Port("Level 3", "Lobby")
 HALL = Port("Level 3", "Exit Hall")
 
 
-def level(walk: bool = False, lobby=(), template: Optional[str] = None) -> ExecutableGraph:
+def level(walk: bool = False, lobby=(), template: Optional[str] = None, hall=()) -> ExecutableGraph:
     """A level as its definition builds it: ``Lobby`` and ``Exit Hall`` are ports,
     keyed by name, role and hit points, and ``Arena`` is the level's own. With
     ``walk``, ``Walk`` takes the first hero in the lobby into the arena and ``Out``
@@ -93,7 +94,7 @@ def level(walk: bool = False, lobby=(), template: Optional[str] = None) -> Execu
     nodes = [
         ListPlaceNode("Lobby", Hero, list(lobby), port=True, keys=KEYS),
         ListPlaceNode("Arena", Hero),
-        ListPlaceNode("Exit Hall", Hero, port=True, keys=KEYS),
+        ListPlaceNode("Exit Hall", Hero, list(hall), port=True, keys=KEYS),
     ]
     if walk:
         nodes += [
@@ -107,15 +108,18 @@ def level(walk: bool = False, lobby=(), template: Optional[str] = None) -> Execu
     return ExecutableGraphOperations.construct_graph(nodes, template=template)
 
 
-def world(*nodes, walk: bool = False, lobby=(), door=(), restore: bool = False, stepping: str = "inner_first"):
+def world(*nodes, walk: bool = False, lobby=(), door=(), restore: bool = False, stepping: str = "inner_first",
+          hall=(), open: bool = False):
     """A world holding one level as ``Level 3``, with a ``Door`` and a ``Gone`` of
-    its own, and the given transitions and edges."""
+    its own, and the given transitions and edges. Closed unless ``open``: from
+    outside, only an open world takes a write at a port of its level, named by
+    the pair."""
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Door", Hero, list(door)),
-        SubnetPlaceNode("Level 3", level(walk, lobby), stepping=stepping),
+        SubnetPlaceNode("Level 3", level(walk, lobby, hall=hall), stepping=stepping),
         ListPlaceNode("Gone", Hero),
         *nodes,
-    ], record_events=True, restore_tokens_on_failure=restore)
+    ], record_events=True, restore_tokens_on_failure=restore, open=open)
 
 
 def names(graph: ExecutableGraph, place) -> list[str]:
@@ -164,6 +168,16 @@ def told(event) -> tuple:
 
 
 # --- every input edge kind on a port -----------------------------------------------------------
+
+
+def test_place_finds_a_port_by_its_pair_and_refuses_a_subnet_place_named_alone():
+    w = world(lobby=(hero("Ada"),))
+    assert [token.name for token in w.place(LOBBY).tokens] == ["Ada"]
+    assert w.place(LOBBY) is w.place_named(LOBBY)
+    with pytest.raises(KeyError, match="subnet place, which holds no tokens of its own"):
+        w.place("Level 3")
+    with pytest.raises(KeyError, match="the net has no place"):
+        w.place(Port("Level 3", "Cellar"))
 
 
 def test_a_take_edge_takes_the_front_of_a_port():
@@ -368,11 +382,12 @@ def test_ids_in_a_port_are_the_subnets_and_stay_in_increasing_order():
         FunctionTransitionNode("Enter", same),
         ArgumentEdgeToTransition("Door", "Enter", "hero"),
         ReturnedEdgeFromTransition("Enter", LOBBY),
-        lobby=[hero("Ada")], door=[hero("Bo"), hero("Cy")],
+        lobby=[hero("Ada")], door=[hero("Bo"), hero("Cy")], open=True,
     )
     outer_next = w.next_token_id
     # The subnet mints, wherever the token comes from: the outer net's firing, the
-    # program through the outer net, the program inside the subnet.
+    # program through the outer net (open, so that it takes a write at the pair),
+    # the program inside the subnet.
     fire(w, "Enter")
     ctx = RunContext(graph=w, inbox=asyncio.Queue(), strict=True)
     ctx.inbox.put_nowait(Extend(LOBBY, [hero("Di")]))
@@ -440,11 +455,8 @@ def test_a_failed_outer_firing_puts_back_what_it_took_from_two_ports():
         ArgumentEdgeToTransition(LOBBY, "Ambush", "hero"),
         ArgumentEdgeToTransition(HALL, "Ambush", "heroes"),
         ReturnedEdgeFromTransition("Ambush", "Gone"),
-        lobby=[hero("Ada"), hero("Bo")], restore=True,
+        lobby=[hero("Ada"), hero("Bo")], hall=[hero("Cy"), hero("Di")], restore=True,
     )
-    ctx = RunContext(graph=w, inbox=asyncio.Queue(), strict=True)
-    ctx.inbox.put_nowait(Extend(HALL, [hero("Cy"), hero("Di")]))
-    Runner.drain_inbox(ctx)
     lobby, hall = ids(w, LOBBY), ids(w, HALL)
     w.drain_events()
     with pytest.raises(TransitionFailedError) as failed:
@@ -754,7 +766,15 @@ def test_a_port_may_hold_tokens_that_carry_nets():
 
 
 def test_outside_input_reaches_a_port_through_the_outer_net():
-    w = world(lobby=[hero("Ada")])
+    """Through an open outer net: a closed one refuses a write at a pair, since a port
+    of its subnet place is none of its own (``tests/test_closed_nets.py``)."""
+    closed = world(lobby=[hero("Ada")])
+    closed_ctx = RunContext(graph=closed, inbox=asyncio.Queue(), strict=True)
+    closed_ctx.inbox.put_nowait(Extend(LOBBY, [hero("Bo")]))
+    with pytest.raises(ClosedNetError):
+        Runner.drain_inbox(closed_ctx)
+    assert names(closed, LOBBY) == ["Ada"]
+    w = world(lobby=[hero("Ada")], open=True)
     w.drain_events()
     ctx = RunContext(graph=w, inbox=asyncio.Queue(), strict=True)
     ctx.inbox.put_nowait(Extend(LOBBY, [hero("Bo"), hero("Cy")]))
@@ -778,8 +798,11 @@ def test_outside_input_reaches_a_port_through_the_outer_net():
         Runner.drain_inbox(ctx)
 
 
-def test_a_body_reaching_into_a_token_net_may_put_into_its_ports():
-    w = world()
+def test_nested_nets_put_and_take_reach_a_port_through_an_open_outer_net():
+    """The program's ``NestedNets.put`` and ``take`` by the pair, through an open
+    outer net, which takes a write there; a closed one refuses it
+    (``test_outside_input_reaches_a_port_through_the_outer_net``)."""
+    w = world(open=True)
     NestedNets.put(w, LOBBY, [hero("Ada")])
     assert NestedNets.take(w, LOBBY) == [hero("Ada")]
     assert w.drain_events() == [Added(LOBBY, 1), Removed(LOBBY, 1)]
@@ -810,7 +833,7 @@ def test_a_port_is_named_by_its_subnet_place_and_its_name():
     w = ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Lobby", Hero),
         SubnetPlaceNode("Level 1", level()),
-        SubnetPlaceNode("Level 2", level()),
+        SubnetPlaceNode("Level 2", level(lobby=[hero("Ada")])),
     ])
     own = w.place_named("Lobby")
     assert own is w.places[0], "a name alone finds only the net's own place"
@@ -827,7 +850,6 @@ def test_a_port_is_named_by_its_subnet_place_and_its_name():
     with pytest.raises(LookupError):
         with NestedNets.subnet_scope(w, "Lobby"):
             pass
-    NestedNets.put(w, Port("Level 2", "Lobby"), [hero("Ada")])
     assert TokenIds.locate(w, 1) is None, "a port's ids are its subnet's, located through it"
     assert TokenIds.locate(w.subnet("Level 2"), 1) == ("Lobby", hero("Ada"))
     assert NestedNets.token_count(w) == 0 and NestedNets.token_count(w.subnet("Level 2")) == 1
@@ -837,15 +859,16 @@ def test_a_port_is_named_by_its_subnet_place_and_its_name():
 
 
 @Templates.template("Test Level")
-def build_test_level() -> ExecutableGraph:
-    return level(walk=True, template="Test Level")
+def build_test_level(lobby=()) -> ExecutableGraph:
+    return level(walk=True, lobby=lobby, template="Test Level")
 
 
 @Templates.template("Test World")
-def build_test_world() -> ExecutableGraph:
+def build_test_world(door=(), lobby=()) -> ExecutableGraph:
+    """The heroes at its door and in its level's lobby start it."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Door", Hero),
-        SubnetPlaceNode("Level 3", build_test_level()),
+        ListPlaceNode("Door", Hero, list(door)),
+        SubnetPlaceNode("Level 3", build_test_level(lobby)),
         ListPlaceNode("Gone", Hero),
         FunctionTransitionNode("Enter", same),
         ArgumentEdgeToTransition("Door", "Enter", "hero"),
@@ -862,8 +885,7 @@ Templates.register("Test Tower", room_level_world)
 
 
 def test_saving_and_restoring_a_net_with_a_subnet():
-    w = build_test_world()
-    NestedNets.put(w, "Door", [hero("Ada"), hero("Bo")])
+    w = build_test_world(door=[hero("Ada"), hero("Bo")])
     deep_step(w)  # Ada enters
     deep_step(w)  # and walks into the arena
     saved = NetJson.save(w)
@@ -918,9 +940,7 @@ def test_a_subnet_without_a_template_cannot_be_saved():
 
 
 def test_loading_a_marking_checks_every_depth_before_changing_anything():
-    w = build_test_world()
-    NestedNets.put(w, "Door", [hero("Ada")])
-    NestedNets.put(w, LOBBY, [hero("Bo")])
+    w = build_test_world(door=[hero("Ada")], lobby=[hero("Bo")])
     for bad, kind in [
         ({"Level 3": {"marking": {}}}, ValueError),
         ({"Level 3": [{"marking": {}}, {"marking": {}}]}, ValueError),
@@ -1070,11 +1090,15 @@ def test_a_closed_subnet_place_is_one_rounded_box_with_a_cell_per_port():
                for line in lines), "Leave's arrow starts at the exit hall's cell"
 
 
-def test_a_port_seen_from_inside_has_a_second_ring():
+def test_a_port_seen_from_inside_has_one_dotted_ring():
+    """Since 2026-11-28, where it had a second ring, which looked like a place
+    inside a place."""
     dot = dot_of(level())
+    assert "peripheries" not in dot
     # A label may hold line breaks, so a node's statement runs to its "];".
     nodes = [statement for statement in dot.split("];") if "label=" in statement and "->" not in statement]
-    assert [("peripheries=2" in node) for node in nodes] == [True, False, True], "Lobby, Arena, Exit Hall"
+    assert [('style="filled,dotted"' in node) for node in nodes] == [True, False, True], "Lobby, Arena, Exit Hall"
+    assert "style=filled" in nodes[1] and "dotted" not in nodes[1], "Arena, plainly filled"
 
 
 def test_a_cell_draws_any_name_as_it_is():

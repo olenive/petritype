@@ -23,9 +23,11 @@ type Cache = dict[DBKey, DBValue]
 
 class DBOperations:
 
+    @staticmethod
     def retrieve_key_value_pair(db: Database, key: DBKey) -> DBKeyValuePair:
         return (key, db[key])
 
+    @staticmethod
     def print_db(db: Database):
         """Just adding this as an example of another function that could be added to the class."""
         pprint.pprint(db)
@@ -33,15 +35,20 @@ class DBOperations:
 
 class CacheOperations:
 
+    @staticmethod
     def cache_key_value_pair(
         cache: Cache, key_value_pair: DBKeyValuePair, expected_size: int = 100
     ) -> DBKeyValuePair:
         key, value = key_value_pair
         cache[key] = value
         if len(cache) > expected_size:
-            warn(f"Expected cache to not exceed {expected_size} items but it now has {len(cache)} items.")
+            warn(
+                f"Expected cache to not exceed {expected_size} items but it now has {len(cache)} items.",
+                stacklevel=2,
+            )
         return key_value_pair
 
+    @staticmethod
     def retrieve_key_value_pair(cache: Cache, key: DBKey) -> Union[DBKey, DBKeyValuePair]:
         value = cache.get(key)
         if value is None:

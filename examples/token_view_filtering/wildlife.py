@@ -10,7 +10,9 @@ bird of the forest and of the tundra migrates to the wetland, the savanna's
 egrets spread to the wetland while there are more than ``spread_threshold`` of
 them, the forest's deer thin down to a floor of ten and the tundra's lemmings
 crash down to a hundred. Each guard reads the token its edge would take, so a
-plain run is about nineteen firings and then nothing is fireable.
+plain run is about nineteen firings and then nothing is fireable. New species are
+brought in at any habitat: the five habitats are the net's ports, and ``Migrating``,
+where a bird is between two of them, is its own.
 
 Run it to see the five filters of the design document answered on the seed::
 
@@ -35,6 +37,10 @@ from petritype.core.executable_graph_components import (
 from petritype.core.keys import Filter, MutateWhereEdge, Query, TakeWhereEdge
 
 HABITATS = ("Forest", "Wetland", "Savanna", "Reef", "Tundra")
+# Where species are brought in from outside (an ``inject``): every habitat is a port.
+# The net is closed, as every net not declared open is, so from outside it takes tokens
+# only there, and ``Migrating`` takes none.
+PORTS = HABITATS
 Class = Literal["Bird", "Mammal", "Reptile", "Fish"]
 Diet = Literal["Herbivore", "Carnivore", "Insectivore", "Omnivore"]
 
@@ -160,7 +166,10 @@ def seed() -> dict[str, list[Species]]:
 def build_wildlife(record_events: bool = True) -> ExecutableGraph:
     tokens = seed()
     return ExecutableGraphOperations.construct_graph([
-        *[ListPlaceNode(habitat, Species, tokens[habitat], keys=KEYS) for habitat in HABITATS],
+        *[
+            ListPlaceNode(habitat, Species, tokens[habitat], keys=KEYS, port=habitat in PORTS)
+            for habitat in HABITATS
+        ],
         ListPlaceNode("Migrating", Species, keys=KEYS),
         # In autumn the oldest bird of the forest, and of the tundra, leaves for the wetland.
         FunctionTransitionNode("Migrate Forest Wetland", migrate, guard=autumn),

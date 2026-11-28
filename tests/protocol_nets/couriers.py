@@ -14,7 +14,10 @@ An order whose courier is not there waits, and the orders behind it go first.
 a failed firing took: this library sets that for the whole net
 (``restore_tokens_on_failure``), the Rust core for each transition, so the Rust
 twin sets it on both. Each transition declares its source edge before its bound
-edge, so its ``consumed`` lists the source first.
+edge, so its ``consumed`` lists the source first. ``Couriers`` and ``Calls`` are
+the net's ports, where a transcript ``inject``s a courier and the calls: since
+2026-11-27 every net not declared open is closed, and from outside a closed net
+takes tokens only at its ports.
 """
 
 from pydantic import BaseModel
@@ -78,11 +81,11 @@ def couriers() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Couriers", Courier, [
             Courier(name="Ada", parcels=0), Courier(name="Ben", parcels=0), Courier(name="Dot", parcels=0),
-        ], keys=("name",)),
+        ], keys=("name",), port=True),
         ListPlaceNode("Orders", Order, [
             Order(item="Lamp", courier="Cleo"), Order(item="Book", courier="Ben"), Order(item="Kite", courier="Ada"),
         ], keys=("courier",)),
-        ListPlaceNode("Calls", Call, keys=("courier",)),
+        ListPlaceNode("Calls", Call, keys=("courier",), port=True),
         ListPlaceNode("Loaded", Order),
         ListPlaceNode("On Road", Courier),
         FunctionTransitionNode("Load", load),

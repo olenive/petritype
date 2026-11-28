@@ -9,6 +9,7 @@ conformance net of ``tests/protocol_nets``.
 """
 
 import io
+import itertools
 import json
 import os
 import queue
@@ -16,6 +17,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,10 +29,12 @@ from petritype.runner.process import (
     Arguments,
     CommandLine,
     DEFAULT_HEARTBEAT_S,
+    DEFAULT_MAX_LINE_BYTES,
     Frames,
     Gauges,
     ProtocolStream,
     Reading,
+    TooLong,
     UsageError,
 )
 from petritype.runner.protocol import Malformed, Request
@@ -44,23 +48,25 @@ TIMEOUT = 30.0
 # --- the process, over pipes ---------------------------------------------------------------
 
 
-def child_env(heartbeat_ms: int = 100) -> dict:
+def child_env(heartbeat_ms: int = 100, **settings: str) -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(NETS), str(ROOT), env.get("PYTHONPATH")]))
     env["PETRITYPE_RUNNER_HEARTBEAT_MS"] = str(heartbeat_ms)
     env["PYTHONUNBUFFERED"] = "1"
+    env.update(settings)
     return env
 
 
 class Runner:
     """A runner subprocess. Every stdout line is kept raw (to prove it is JSON)
-    and decoded; stderr is collected whole."""
+    and decoded; stderr is collected whole. ``settings`` are more environment
+    variables of the child's."""
 
-    def __init__(self, *args: str, heartbeat_ms: int = 100):
+    def __init__(self, *args: str, heartbeat_ms: int = 100, **settings: str):
         self.process = subprocess.Popen(
             [sys.executable, "-m", "petritype.runner", *args],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=child_env(heartbeat_ms),
+            env=child_env(heartbeat_ms, **settings),
         )
         self.lines: queue.Queue = queue.Queue()
         self.raw: list[bytes] = []
@@ -335,6 +341,25 @@ def test_a_malformed_line_gets_invalid_params_with_an_empty_id(spawn):
     assert runner.finish() == 0
 
 
+@pytest.mark.parametrize("limit", [None, "1000"], ids=["4 MiB by default", "set by the environment"])
+def test_a_line_over_the_cap_gets_invalid_params_and_the_runner_keeps_serving(spawn, limit):
+    """Since 2026-11-28; until then a line of any length was read whole."""
+    runner = spawn(**({"PETRITYPE_RUNNER_MAX_LINE_BYTES": limit} if limit else {}))
+    cap = int(limit) if limit else 4 << 20
+    request = b'{"id": "1", "method": "describe", "params": {"pad": "'
+    tail = b'"}}'
+    runner.send_raw(request + b"y" * (cap + 1 - len(request) - len(tail)) + tail + b"\n")
+    line = runner.next_line()
+    assert line["id"] == "" and line["error"]["code"] == "invalid_params"
+    assert f"at most {cap} bytes" in line["error"]["message"]
+    runner.send_raw(request + b"y" * (cap - len(request) - len(tail)) + tail + b"\n")
+    answer = runner.next_line()
+    assert answer["id"] == "1" and answer["result"]["nets"] == [], "a line at the cap is read"
+    assert kinds(runner.request("describe")) == ["result"]
+    runner.process.stdin.close()
+    assert runner.finish() == 0
+
+
 def test_prints_at_import_go_to_stderr(spawn):
     runner = spawn("--module", "runner_noisy_import")
     assert [net["name"] for net in runner.request("describe")[0]["result"]["nets"]] == ["greeter", "noisy"]
@@ -428,10 +453,51 @@ def test_reading_splits_lines_across_chunks():
 
 
 def test_reading_a_long_line():
+    """Under a cap raised past it: by default a line is 4 MiB at most."""
     line = b'{"id": "1", "method": "describe", "params": {"pad": "' + b"y" * (17 << 20) + b'"}}'
-    (read,) = Reading.lines(chunks(line + b"\n", 1 << 16))
+    (read,) = Reading.lines(chunks(line + b"\n", 1 << 16), max_line_bytes=32 << 20)
     assert read == line
     assert isinstance(Reading.parse(read), Request)
+
+
+@pytest.mark.parametrize("size", [1, 3, 7, 4096, 1 << 16])
+def test_a_line_over_the_cap_is_too_long_and_the_lines_around_it_are_read(size):
+    """Since 2026-11-28. At the cap a line is read; one byte over, or a last line
+    over it with no newline, it is a ``TooLong``."""
+    data = b"a" * 10 + b"\n" + b"b" * 11 + b"\n" + b"c" * 25 + b"\n" + b"d" * 3 + b"\n" + b"e" * 12
+    assert list(Reading.lines(chunks(data, size), max_line_bytes=10)) == [
+        b"a" * 10, TooLong(10), TooLong(10), b"d" * 3, TooLong(10),
+    ]
+    assert list(Reading.lines(chunks(b"x" * 11, size), max_line_bytes=10)) == [TooLong(10)]
+
+
+def test_a_line_over_the_cap_is_never_held():
+    """What the reader holds stays near the cap, the cap and one chunk and what a
+    growing buffer keeps in hand, however long the line: read here from chunks made
+    as they are read, 64 MiB of them."""
+    def long_line_then_a_short_one():
+        """64 MiB of one line in chunks made as they are read, then ``{}``."""
+        chunks = itertools.chain((b"z" * (1 << 16) for _ in range(1 << 10)), [b"\n{}\n"])
+        return lambda _wanted: next(chunks, b"")
+
+    tracemalloc.start()
+    try:
+        lines = list(Reading.lines(long_line_then_a_short_one()))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert lines == [TooLong(DEFAULT_MAX_LINE_BYTES), b"{}"]
+    assert peak < 2 * (4 << 20), f"held {peak} bytes, where reading the line whole held over 64 MiB"
+    assert Reading.parse(TooLong(DEFAULT_MAX_LINE_BYTES)) == Malformed(
+        "", "a request line is at most 4194304 bytes long; a longer one was discarded unread",
+    )
+
+
+def test_the_cap_from_the_environment():
+    assert CommandLine.max_line_bytes({}) == DEFAULT_MAX_LINE_BYTES == 4 << 20
+    assert CommandLine.max_line_bytes({"PETRITYPE_RUNNER_MAX_LINE_BYTES": "1000"}) == 1000
+    for bad in ("0", "-5", "big", ""):
+        assert CommandLine.max_line_bytes({"PETRITYPE_RUNNER_MAX_LINE_BYTES": bad}) == DEFAULT_MAX_LINE_BYTES
 
 
 def test_a_line_parses_as_a_request_a_malformed_or_nothing():
@@ -521,5 +587,42 @@ def test_a_broken_stream_reports_false():
     assert not stream.write([{"id": "2", "result": {}}])
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_an_answer_that_is_not_json_becomes_an_internal_error_and_the_rest_is_written(bad, capsys):
+    sink = Recording()
+    stream = ProtocolStream(sink)
+    before = {"method": "added", "params": {"place": "In", "id": "1", "label": "1"}}
+    after = {"id": "8", "result": {"status": "ok"}}
+    assert stream.write([before, {"id": "7", "result": {"value": bad}}, after])
+    assert (sink.writes, sink.flushes) == (1, 1)
+    first, answer, last = (json.loads(raw) for raw in sink.getvalue().splitlines())
+    assert (first, last) == (before, after)
+    assert answer["id"] == "7" and answer["error"]["code"] == "internal"
+    assert "'7'" in capsys.readouterr().err
+
+
+def test_a_notification_that_is_not_json_is_left_out_and_the_rest_is_written(capsys):
+    sink = Recording()
+    stream = ProtocolStream(sink)
+    answer = {"id": "3", "result": {"fired": True}}
+    assert stream.write([{"method": "param_changed", "params": {"value": float("nan")}}, answer])
+    assert [json.loads(raw) for raw in sink.getvalue().splitlines()] == [answer]
+    assert "param_changed" in capsys.readouterr().err
+    # The stream is not broken by it: the next batch is written as any is.
+    assert stream.write([{"id": "4", "result": {}}])
+    assert json.loads(sink.getvalue().splitlines()[-1]) == {"id": "4", "result": {}}
+
+
 def test_frames_encode_one_object_per_line():
     assert Frames.encode([{"a": "x\ny"}, {"b": 1}]) == b'{"a": "x\\ny"}\n{"b": 1}\n'
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_frames_encode_rejects_non_finite_floats(bad):
+    with pytest.raises(ValueError):
+        Frames.encode([{"id": "1", "result": {"priority": bad}}])
+
+
+def test_frames_encode_accepts_finite_floats():
+    encoded = Frames.encode([{"id": "1", "result": {"priority": 2.5}}])
+    assert encoded == b'{"id": "1", "result": {"priority": 2.5}}\n'

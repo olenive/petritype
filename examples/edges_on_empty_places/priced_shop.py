@@ -10,6 +10,9 @@ Order`` turns an order and the promotions running into a ``Receipt``.
 ``Price Order`` takes the front order and **surveys** ``Promotions`` (a ``SurveyEdge``): a copy
 of every promotion running, zero or more, none consumed. An order is priced with whatever is
 running when it is taken, and nothing else, and an empty ``Promotions`` does not hold it back.
+Orders and promotions come in from outside, so ``Orders`` and ``Promotions`` are the net's
+ports: it is closed, as every net not declared open is, and takes tokens from outside only
+there.
 
 Each promotion's saving is worked out on the order as it stands, independently of the others,
 and a receipt never comes to less than nothing. Amounts are whole pence.
@@ -128,8 +131,8 @@ def price_order(order: Order, promotions: list[Promotion]) -> Receipt:
 
 def build_priced_shop(record_events: bool = False) -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Orders", Order),
-        ListPlaceNode("Promotions", Promotion),
+        ListPlaceNode("Orders", Order, port=True),
+        ListPlaceNode("Promotions", Promotion, port=True),
         ListPlaceNode("Priced", Receipt),
         # An order is priced with whatever promotions are running, none included.
         FunctionTransitionNode("Price Order", price_order),
@@ -176,8 +179,8 @@ def main() -> None:
     for tokens in SCRIPT:
         put(graph, tokens)
         asyncio.run(ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1))
-        print(f"{graph.last_fired}: running {[p.name for p in graph.place_named('Promotions').tokens]}")
-    for receipt in graph.place_named("Priced").tokens:
+        print(f"{graph.last_fired}: running {[p.name for p in graph.place('Promotions').tokens]}")
+    for receipt in graph.place("Priced").tokens:
         print(describe(receipt))
 
 

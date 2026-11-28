@@ -148,7 +148,7 @@ def _(cars, colour, fire, put, snapshot):
     def over(session):
         """Whether the example is over: every car on the schedule has arrived, and nobody is
         waiting (a car put in by hand included)."""
-        return session["firings"] >= max(ARRIVALS) and not session["graph"].place_named("Waiting").tokens
+        return session["firings"] >= max(ARRIVALS) and not session["graph"].place("Waiting").tokens
 
     async def fire_one(session, show=None, keep_going=False):
         """One firing of the example, the engine's own choice: the cars the schedule has due

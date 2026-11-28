@@ -4,12 +4,16 @@
 default:
     @{{just_executable()}} --list
 
-# Everything to run before a release, in order: lint, test, notebooks, gallery, build
-check: lint test notebooks gallery build
+# Everything to run before a release, in order: lint, typecheck, test, notebooks, gallery, build
+check: lint typecheck test notebooks gallery build
 
 # Lint with ruff
 lint:
-    uv run --extra dev ruff check petritype tests
+    uv run --extra dev ruff check petritype tests examples scripts
+
+# Type-check user-style code against the public API with pyright (tests/typecheck)
+typecheck:
+    uv run --extra dev pyright
 
 # The unit suite
 test:

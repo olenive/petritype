@@ -9,26 +9,31 @@ logger = logging.getLogger(__name__)
 
 class IOHelper:
 
+    @staticmethod
     def string_from_file(file_path: str) -> str:
         with open(file_path, 'r') as file:
             return file.read()
 
+    @staticmethod
     def string_to_file(contents: str, file_path: str, append=False) -> None:
         mode = 'a' if append else 'w'
         with open(file_path, mode) as file:
             file.write(contents)
 
+    @staticmethod
     def strings_to_files(files_to_strings: Dict[str, str], output_directory="", file_prefix="") -> None:
         for key, value in files_to_strings.items():
             output_path = os.path.join(output_directory, file_prefix + key)
             IOHelper.string_to_file(value, output_path)
 
+    @staticmethod
     def remove_file_if_it_exists(file_path: str) -> None:
         try:
             os.remove(file_path)
         except OSError:
             pass
 
+    @staticmethod
     def safe_move_file(source_path: str, destination_path: str, verbose=False) -> None:
         """Only move the file if the destination path does not already correspond to an existing file."""
         if os.path.isfile(destination_path):
@@ -39,6 +44,7 @@ class IOHelper:
             IOHelper.make_directory(os.path.dirname(destination_path), verbose=verbose)
             shutil.move(source_path, destination_path)
 
+    @staticmethod
     def safe_move_directory_contents(source_directory: str, destination_directory: str) -> None:
         if not os.path.isdir(source_directory) or not os.path.isdir(destination_directory):
             raise OSError(
@@ -51,26 +57,31 @@ class IOHelper:
                 os.path.join(destination_directory, item),
             )
 
+    @staticmethod
     def make_directory(path_to_directory: str, verbose=False) -> None:
         if not (os.path.exists(path_to_directory)):
             if verbose:
                 logger.info("Making directory: %s", path_to_directory)
             os.makedirs(path_to_directory)
 
+    @staticmethod
     def pickle(data: Any, file_path: str) -> None:
         with open(file_path, 'wb') as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    @staticmethod
     def unpickle(file_path: str) -> Any:
         with open(file_path, 'rb') as f:
             return pickle.load(f)
 
+    @staticmethod
     def directory_is_empty(path: str) -> bool:
         if len(os.listdir(path)) == 0:
             return True
         else:
             return False
 
+    @staticmethod
     def remove_directory(path: str, verbose=False) -> None:
         try:
             shutil.rmtree(path)

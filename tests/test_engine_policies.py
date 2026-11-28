@@ -155,8 +155,10 @@ def tick(x: int) -> int:
 
 
 def build_counter(low=()) -> ExecutableGraph:
+    """A counter whose ``Low`` is a port, where the program feeds it more when the
+    net around it is declared open."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Low", int, list(low)),
+        ListPlaceNode("Low", int, list(low), port=True),
         ArgumentEdgeToTransition("Low", "Up", "x"),
         FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
@@ -223,7 +225,9 @@ class TestOneLevel:
         assert under["take_turns"] == [1, 2] * 3
 
     def test_quiescence_is_the_same_and_the_turn_starts_after_the_last(self):
-        graph = clockwork([box("a", [1]), box("b", [2])], live_outer=False, stepping="take_turns")
+        # Declared open, so that the program reaches the counters' ports: a closed net
+        # shields the nets inside it (since 2026-11-27).
+        graph = clockwork([box("a", [1]), box("b", [2])], live_outer=False, stepping="take_turns", open=True)
         first, second = (b.counter for b in graph.place_named("Shelf").tokens)
         assert run(deep_steps(graph, 3)) == [up(1), up(2), None]
         assert graph._ring_cursor == second.net_id, "the cursor: the member that fired last"

@@ -134,6 +134,7 @@ NULL_IS_A_VALUE: dict[str, frozenset[str]] = {
 class Requests:
     """Functions that read requests."""
 
+    @staticmethod
     def parse(raw: Any) -> Union[Request, Malformed]:
         """A decoded JSON value as a request, or why it is not one. A ``null``
         field of its params counts as absent (``null_as_absent``)."""
@@ -148,6 +149,7 @@ class Requests:
         params = raw.get("params")
         return Request(request_id, method, Requests.null_as_absent(method, {} if params is None else params))
 
+    @staticmethod
     def null_as_absent(method: str, params: Any) -> Any:
         """``params`` without its ``null`` fields: ``null`` for an optional field of
         a request counts as the field's absence (PROTOCOL.md §2, since 2026-10-12),
@@ -165,13 +167,16 @@ class Requests:
 class Lines:
     """Functions that build the three kinds of line (PROTOCOL.md §3) as dicts."""
 
+    @staticmethod
     def result(request_id: str, result: Union[Wire, dict]) -> dict:
         body = result.wire() if isinstance(result, Wire) else result
         return {"id": request_id, "result": body}
 
+    @staticmethod
     def error(request_id: str, code: ErrorCode, message: str) -> dict:
         return {"id": request_id, "error": {"message": message, "code": str(code)}}
 
+    @staticmethod
     def notification(notification: "Notification") -> dict:
         params = notification.wire()
         # The stamp every notification carries goes last, as the protocol writes it,
@@ -311,8 +316,8 @@ class Control(Tolerant):
 class Topology(Tolerant):
     """``groups``: the net's groups in declared order, absent when it has none,
     each net's own (§5.1). ``open``: ``true`` on a net whose definition declares it
-    open, absent otherwise, so a net that shows a ``port`` and no ``open`` is closed
-    (§5.1, §12.7, since 2026-11-23). Read tolerantly, with its places, transitions,
+    open, absent otherwise, so a net that shows no ``open`` is closed (§5.1, §12.7).
+    Read tolerantly, with its places, transitions,
     edges and controls (``Tolerant``, since 2026-11-23)."""
 
     places: list[Union[Place, SubnetPlace]]

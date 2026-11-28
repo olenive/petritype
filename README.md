@@ -25,7 +25,7 @@ Petritype adds a type system on top of this: each place declares the Python type
 
 ```python
 import asyncio
-from petritype.core.executable_graph_components import (
+from petritype import (
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
@@ -51,10 +51,10 @@ graph, fired = asyncio.run(
     ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
 )
 
-print(graph.place_named('Output').tokens)  # [2, 4, 6]
+print(graph.place('Output').tokens)  # [2, 4, 6]
 ```
 
-`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find fireable transitions, select one, fire it, repeat. All primary node, edge, runtime, and error types are also re-exported directly from the top-level `petritype` package (`from petritype import ExecutableGraphOperations, ListPlaceNode, FunctionTransitionNode, Runner, RunContext, ExecutionMode, PetritypeError, ...`).
+`construct_graph` takes a flat list of places, transitions, and edges in any order — it sorts them out. Execution runs an async loop: find fireable transitions, select one, fire it, repeat. Every library name this README uses is imported from the top-level `petritype` package, as above; only the drawing modules, which need the `viz` extra, are imported by their own path.
 
 ## Key Features
 
@@ -88,7 +88,7 @@ except TransitionFailedError as e:
 
 *Expected* failures are the body's job: catch them and return an error token, and type-based routing (e.g. `-> Receipt | FailedOrder`) delivers it to an error-handling place. If your tokens are immutable or bodies don't mutate them before failing, `restore_tokens_on_failure=True` (on `construct_graph` or per `execute_graph` call) opts into putting consumed tokens back.
 
-All library-specific exceptions (`TransitionFailedError`, `ClosedNetError`, `HeldByBodyError`, `LaunchNotificationError`, `SubnetHeldError`, `TooManyFiringsError`) inherit from `PetritypeError` as well as their standard `ValueError` or `RuntimeError` base, so callers can catch `PetritypeError` cleanly without catching unrelated Python errors.
+All library-specific exceptions (`TransitionFailedError`, `ClosedNetError`, `HeldByBodyError`, `ReadOnlyError`, `LaunchNotificationError`, `SubnetHeldError`, `TooManyFiringsError`, `CancellationTimeoutError`) inherit from `PetritypeError` as well as their standard `ValueError` or `RuntimeError` base, so callers can catch `PetritypeError` cleanly without catching unrelated Python errors.
 
 ### Async execution
 
@@ -107,17 +107,17 @@ FunctionTransitionNode('Fetch', fetch)
 
 Each transition can carry two optional callables. Both receive the live graph, so they can read the whole marking:
 
-- **`guard`** — a firing condition the engine enforces in every execution mode: a transition whose guard returns `False` is not fireable, regardless of available tokens. Guards run on every fireable-discovery sweep, so keep them cheap, side-effect-free predicates over the marking.
+- **`guard`** — a firing condition the engine enforces in every execution mode: a transition whose guard returns `False` is not fireable, regardless of available tokens. Guards run on every fireable-discovery sweep, so keep them cheap predicates over the marking. A guard changes no net ([below](#questions-change-no-net)).
 - **`priority`** — a selection hint: the default selector fires the highest-priority fireable transition. Unset scores `0.0`; ties fall back to definition order. `tie_break` (on `construct_graph` or the graph) picks which end: `"first_declared"` (default) runs a FIFO pipeline in batches, every token through stage one before any reaches stage two, while `"last_declared"` lets each token flow through before the next enters, and `"round_robin"` takes the live transitions in turn, each pick the first one declared after the last.
 
 ```python
 # Guard: BatchProcess is not fireable until the pool is full
 def batch_ready(graph) -> bool:
-    return len(graph.place_named('Pool').tokens) >= 10
+    return len(graph.place('Pool').tokens) >= 10
 
 # Priority: drain the longest queue first
 def queue_pressure(graph) -> float:
-    return len(graph.place_named('Queue').tokens)
+    return len(graph.place('Queue').tokens)
 
 FunctionTransitionNode('BatchProcess', batch_process, guard=batch_ready)
 FunctionTransitionNode('Drain', drain, priority=queue_pressure)
@@ -130,6 +130,14 @@ graph.transition_selector = my_selector   # (graph, fireable) -> transition or N
 ```
 
 The older `activation_function` field is deprecated: the engine never consulted it, so use `guard` or `priority` instead. It remains visible to custom selectors until removed.
+
+#### Questions change no net
+
+The library calls five kinds of function of yours to decide what fires and where a result goes: a transition's `guard` and `priority`, a place's key functions (`keys`), a `transition_selector`, and an `output_distribution_function`. Each answers a question. While one runs, every change to every net is refused with `ReadOnlyError`: `NestedNets.put` and `NestedNets.take`, setting a parameter (`NestedNets.set_param`), and loading a marking or a saved form. This holds on the function's own net and on any other, open or closed, at a port or anywhere else, a net the function built itself included. Reading is not restricted.
+
+There are two reasons. A drawing shows a guard as a condition and a key as a label, so a write from one is a change the drawing does not show. And the library asks between planning a firing and making it, so a token moved meanwhile is one the plan may already have promised to a firing.
+
+Whatever asked fails with the error, also when the function caught it: a sequential step or a concurrent run raises it, a query raises it, and a firing whose output distribution function met it fails as for any error in its routing. Under the [protocol runner](#net-protocol--run-a-net-as-a-process) a guard that raises cannot let its transition fire, so the runner also says the refusal once on stderr. Make the change in a transition's body, or from the program between firings. As for a body, a direct edit of a place's list, of `params` or of `disabled` is not caught ([closed nets](#closed-nets), "What Python cannot catch").
 
 A selector is just a callable over the fireable transitions, so round-robin, bottleneck-aware and other policies are a few lines each.
 
@@ -221,7 +229,7 @@ Every edge above waits for a token: a transition never fires while one of its in
 - **`SurveyEdge`** — a deep copy of every token, possibly none; nothing is consumed.
 
 ```python
-from petritype.core.executable_graph_components import DrainEdge, SurveyEdge
+from petritype import DrainEdge, SurveyEdge
 
 def price_order(order: str, promotions: list[str]) -> tuple[str, list[str]]:
     return order, [f"{promotion} on {order}" for promotion in promotions]
@@ -243,7 +251,7 @@ A transition can be handed a place's tokens without consuming them, through a **
 - **`MutateEdge`**: the transition receives the live tokens and may modify them in place.
 
 ```python
-from petritype.core.executable_graph_components import SnapshotEdge, MutateEdge
+from petritype import SnapshotEdge, MutateEdge
 
 SnapshotEdge('Multiplier', 'Scale', 'factor')   # Scale reads Multiplier, never consumes it
 MutateEdge('Counter', 'Scale', 'tally')          # Scale increments Counter in place
@@ -256,8 +264,8 @@ Three **read edges** hand the body tokens to look at, live, without taking or co
 - **`ReadAllEdge`**: every token, oldest first, as a list, possibly empty, so it never holds the transition back; its argument is annotated `list[T]`.
 
 ```python
-from petritype.core.executable_graph_components import ReadAllEdge, ReadEdge
-from petritype.core.keys import Clause, Filter, ReadWhereEdge
+from petritype import ReadAllEdge, ReadEdge
+from petritype import Clause, Filter, ReadWhereEdge
 
 ReadAllEdge("Barracks", "Call the Roll", "squads")      # every squad, none taken
 ReadEdge("Barracks", "Check the Front", "squad")         # the front squad
@@ -274,7 +282,7 @@ The renderer draws a snapshot as a dashed arrow, a mutate edge as a thicker line
 A token can hold Petri nets of its own. Declare the place `nested=True`; each token is then an `ExecutableGraph` or any object with a `__petritype_nets__()` method naming the nets it holds. The outer net runs the inner nets as part of running itself, one firing at a time anywhere in the tree, in the order the place's **stepping rule** gives: `stepping="inner_first"` (the default) lets the place's nets come to rest before the outer net fires, `"take_turns"` has them and the outer net fire in turn, so an outer net that can always fire starves none of them, `"outer_first"` lets them fire only when the outer net has nothing to fire, and `"passive"` leaves them to the bodies that step them. Each level follows the rules of its own places. The outer net gathers the inner nets' events into its own log as `Nested` records carrying the path to the net they happened in, a tuple of `PathStep(place, token, net)`, tells a firing inside as an `InnerFiring(path, transition)`, and lets its bodies reach inside the tokens they hold:
 
 ```python
-from petritype.core.nested import NestedNets
+from petritype import NestedNets
 
 class Vehicle(BaseModel):
     name: str
@@ -283,22 +291,22 @@ class Vehicle(BaseModel):
         return {"cabin": self.cabin}
 
 def board(passenger: str, vehicle: Vehicle) -> None:
-    NestedNets.put(vehicle.cabin, "Door", [passenger])   # the only way in: through the token
+    NestedNets.put(vehicle.cabin, "Door", [passenger])   # the only way in: through the token, at a port
 
 ListPlaceNode("Depot", Vehicle, [bus], nested=True, stepping="outer_first")
-MutateEdge("Depot", "Board Depot", "vehicle")
+MutateEdge("Depot", "Board Depot", "vehicle", reaches=("Door",))   # the cabin marks "Door" port=True
 ```
 
-Inner nets never touch the outer net. A net also carries **net parameters** (`construct_graph(..., params={"stopped": True})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
+Inner nets never touch the outer net. A net also carries **net parameters** (`construct_graph(..., params={"seats": 2})`), read by guards as `graph.params` and handed to a body that declares a parameter of the same name. A body may read them but not set them on a net it holds (`HeldByBodyError`, [closed nets](#closed-nets)). `examples/tokens_as_nets/transit.py` is the worked example: buses and ferries whose cabins are nets, each carrying its state as where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read, so the net runs its journey on its own.
 
-A token's net may mark places as **ports**, `ListPlaceNode("Orders In", str, port=True)`, as a [subnet](#subnet-places) does, to say where the net around it may reach in: a net that marks a port is [closed](#closed-nets) to writes from outside at its other places. An input edge on the place of such tokens may name the ports its body reaches, given by keyword on every input edge kind:
+A token's net marks places as **ports**, `ListPlaceNode("Orders In", str, port=True)`, as a [subnet](#subnet-places) does, to say where the net around it may reach in: every net not declared open is [closed](#closed-nets) to writes from outside at its other places. An input edge on the place of such tokens names the ports its body reaches, given by keyword on every input edge kind, as a tuple or a list:
 
 ```python
 MutateEdge("Field", "Hand Over", "unit", reaches=("Orders In",))   # hands the unit an order
 MutateEdge("Field", "Collect", "unit", reaches=("Shots Out",))     # collects its shots
 ```
 
-`reaches` is a declaration, as a group is: it changes nothing about firing, and nothing checks that the net has the ports named; which places of the net the body may write is the rule on [closed nets](#closed-nets). The build refuses it on a place that holds no nets and refuses an empty name. The renderer writes `reaches Orders In` as the edge label's last line, and the [protocol runner](#net-protocol--run-a-net-as-a-process) shows `port` in the token's net's own topology and `reaches` on the edge. `tests/protocol_nets/trays.py` is a small net that uses both.
+`reaches` is enforced, so that the code and the drawing cannot disagree: a body may put tokens in, or take them from, a port of a [closed net](#closed-nets) it holds only if the edge that handed it the net names the port. A write at another port raises `ClosedNetError`, its `undeclared` true, and fails the firing as any refusal does, and so does a write at a port of a net inside the net it holds (`deeper`), which no edge can name: let a transition of the held net carry the token further in. Reading is not restricted. It is an upper bound, so naming a port the body never uses, or one the net lacks, is no error. A body writing a net it does not hold, one it built or a snapshot's copy, writes any port. So do the program and the runner, at a net that rests inside no closed net: a token's net in a place of a closed net is shielded from them, its ports included ([closed nets](#closed-nets)). The build refuses `reaches` on a place that holds no nets and refuses an empty name. The renderer writes `reaches Orders In` as the edge label's last line, and the [protocol runner](#net-protocol--run-a-net-as-a-process) shows `port` in the token's net's own topology and `reaches` on the edge. `tests/protocol_nets/trays.py` is a small net that uses both.
 
 A renderer marks a token that holds nets with its inner nets' names and token counts (`Vehicle(name='Bus 1', ...) ⊂ cabin: 3`) rather than printing the net; to draw the net inside, render `vehicle.cabin` like any other graph.
 
@@ -306,10 +314,10 @@ Any net whose places all have a JSON form (pydantic models, scalars, nets) can b
 
 ### Subnet places
 
-A place can hold a net of its own for the whole life of the net around it: a **subnet place** holds one **subnet**. The subnet is a separate net, with its own marking, ids, parameters and log, and the net around it reaches it only through its **port places**, the places the subnet's definition marks `port=True`. An edge names a port by the pair, `Port("Level 1", "Lobby")`, where it would name a place, and every edge kind, every way of choosing an output, guards, keyed edges, queries and outside input then treat it as a place of the outer net:
+A place can hold a net of its own for the whole life of the net around it: a **subnet place** holds one **subnet**. The subnet is a separate net, with its own marking, ids, parameters and log, and the net around it reaches it only through its **port places**, the places the subnet's definition marks `port=True`. An edge names a port by the pair, `Port("Level 1", "Lobby")`, where it would name a place, and every edge kind, every way of choosing an output, guards, keyed edges and queries then treat it as a place of the outer net. A closed outer net shields its subnets ([closed nets](#closed-nets)): a token from outside comes in at one of the outer net's own ports, and a transition of the outer net carries it on into the subnet, as `Enter` below carries a hero from the world's door into level 1's lobby. Input from outside reaches a subnet's port directly only when the outer net, and every net around it, is declared open: by the pair, or by addressing the subnet, whose port it is (`with NestedNets.subnet_scope(world, "Level 1") as level: NestedNets.put(level, "Lobby", [hero])`, or an `inject` by `path`):
 
 ```python
-from petritype.core.nested import Port, SubnetPlaceNode
+from petritype import Port, SubnetPlaceNode
 
 @Templates.template("Level")
 def build_level(reward: int = 1) -> ExecutableGraph:
@@ -325,23 +333,25 @@ ReturnedEdgeFromTransition("Enter", Port("Level 1", "Lobby"))
 ArgumentEdgeToTransition(Port("Level 1", "Exit Hall"), "Climb", "hero")
 ```
 
-A port keeps one list of tokens, in the subnet, which both nets use, and its ids are the subnet's whichever net puts a token there. A change is told once, by the net through which it was made: the outer net's firing names the port by its pair, the subnet's firing names the place by its own name and reaches the outer log as a `Nested` record whose path step names the subnet place alone, `PathStep("Level 1")`. The subnet is one net at its place's position in a deep step, under the place's stepping rule, and while a firing of the outer net with an edge on one of its ports is in flight it takes no turn. `graph.subnet("Level 1")` reads a subnet; `with NestedNets.subnet_scope(graph, "Level 1") as level:` steps or changes it from the program, refused with `SubnetHeldError` while such a firing is in flight. A subnet built through a template is saved, restored and copied with the net around it, its subnet place's entry in the marking being a list of one, the subnet in its saved form; built without one it runs, and the outer net cannot be saved. Subnets nest to any depth, and a port may hold tokens that carry nets. The Graphviz drawing shows a subnet place closed, as one rounded box with a cell per port giving the port's name and count, an edge ending at its port's cell; in the subnet's own drawing a port has a second ring, as it has in the drawing of any net that marks ports. `examples/subnet_places/levels.py` is the worked example: heroes entering two levels built from one template through one port and leaving through another, which the [protocol runner](#net-protocol--run-a-net-as-a-process) serves as `levels-world`.
+A port keeps one list of tokens, in the subnet, which both nets use, and its ids are the subnet's whichever net puts a token there. A change is told once, by the net through which it was made: the outer net's firing names the port by its pair, the subnet's firing names the place by its own name and reaches the outer log as a `Nested` record whose path step names the subnet place alone, `PathStep("Level 1")`. The subnet is one net at its place's position in a deep step, under the place's stepping rule, and while a firing of the outer net with an edge on one of its ports is in flight it takes no turn. `graph.subnet("Level 1")` reads a subnet; `with NestedNets.subnet_scope(graph, "Level 1") as level:` steps or changes it from the program, refused with `SubnetHeldError` while such a firing is in flight. A subnet built through a template is saved, restored and copied with the net around it, its subnet place's entry in the marking being a list of one, the subnet in its saved form; built without one it runs, and the outer net cannot be saved. Subnets nest to any depth, and a port may hold tokens that carry nets. The Graphviz drawing shows a subnet place closed, as one rounded box with a cell per port giving the port's name and count, an edge ending at its port's cell; in the subnet's own drawing a port has one dotted ring, as it has in the drawing of any net that marks ports. `examples/subnet_places/levels.py` is the worked example: heroes entering two levels built from one template through one port and leaving through another, which the [protocol runner](#net-protocol--run-a-net-as-a-process) serves as `levels-world`.
 
 ### Closed nets
 
-A net that marks a place as a port is **closed**: from outside it, tokens are put, taken and replaced only at its ports.
+Every net is **closed** unless its definition declares it open: from outside it, tokens are put, taken and replaced only at its ports, the places it marks `port=True`. A net that marks no port takes nothing from outside, so a place that is written from outside, by the program, a body of the net around it or the runner, is marked as a port, and the drawing shows it as one: a port has one dotted outline in the drawing of its own net (since 2026-11-28, where it had a second ring, which looked like a place inside a place). The drawing of a net declared open, which takes tokens in at any place, gives each of its places that is not a port a dashed outline (since 2026-11-28); a port of an open net stays dotted, never dashed as well. A subnet place's box is drawn as before, and the subnet's own drawing shows its ports and whether it is open. The marks are few and quiet on purpose: the activations, the outlines of the last firing, and the tokens moving are what should catch the eye, and nothing is drawn as if nested unless it is a nested net. The dots and the dashes are the keywords `dotted` and `dashed` added to the place's Graphviz `style`, so a place stays filled and a `fillcolor`, `color` or `penwidth` of your own still applies; an attribute function of your own that sets `style` outright replaces them, and one that adds its keyword with `NodeLabel.add_style(attrs, "bold")` keeps them.
 
-**Who is outside.** A body, guard or key function of a transition of the net around it, by any edge; the program and its drivers; and the [protocol runner](#net-protocol--run-a-net-as-a-process)'s requests. Inside are the net's own transitions, the controls it declares, the tokens its definition starts it with, and the engine's own moves (a firing's inputs and outputs, a failed firing's restore, a deep step).
+A closed net also **shields the nets inside it**, its [subnets](#subnet-places) and the nets its tokens carry, at any depth: the program and the runner write no place of theirs, a port included, unless every net around is declared open. So the drawing of a closed net shows every way a token comes into it from outside, the nets inside it included: a hero reaches level 1's lobby by the world's `Enter`, the route the world draws, and not by addressing the level. A body is on the outside in the same way wherever no edge puts it inside: at a net no edge handed it, reached through a closure say, it is refused as the program is; and a closed net it holds shields every net inside itself from it, an open one included, where until now only a closed one was refused. Which net a net is inside is where the engine last saw it come to rest, a place that still holds it: a net the program took out of its place, or a firing moved elsewhere, is judged by where it is now, and one a body holds in flight counts as inside the net it was taken from until the firing lands.
 
-**How to tell a net is closed.** It marks at least one place as a port and does not declare itself open: `graph.is_closed` is true. On the wire its topology shows `port` on a place and no `open` (PROTOCOL.md §5.1). A net that marks no port is open, as before.
+**Who is outside.** A body of a transition of the net around it, by any edge; the program and its drivers; and the [protocol runner](#net-protocol--run-a-net-as-a-process)'s requests. Inside are the net's own transitions, the controls it declares, the tokens its definition starts it with, and the engine's own moves (a firing's inputs and outputs, a failed firing's restore, a deep step). A guard, a priority, a key function, a selector and an output distribution function write nowhere, inside or outside ([questions change no net](#questions-change-no-net)).
 
-**What a refusal is.** A write from outside at a place that is not a port raises `ClosedNetError`: from `NestedNets.put` and `NestedNets.take`, from the runtime's `Extend` and `SetTokens` (raised by a strict `RunContext`, dropped and logged by any other), and as `closed_net` from the runner's `inject`, at the top level and by path. A write at `Port(subnet place, port)` belongs to the net around the subnet: a closed net refuses it, an open one lets it land. In a body the error fails the firing, at the cost of any failure: the tokens it took, unless `restore_tokens_on_failure` puts them back, and what the body did before stays done. The message names the net, the place and the act.
+**How to tell a net is closed.** It does not declare itself open: `graph.is_closed` is `not graph.open`. On the wire its topology shows no `open` (PROTOCOL.md §5.1).
 
-**Three ways to make a refused write land:**
+**What a refusal is.** A write from outside at a place that is not a port raises `ClosedNetError`: from `NestedNets.put` and `NestedNets.take`, from the runtime's `Extend` and `SetTokens` (raised out of the run by every `RunContext`, strict or not, since a place that is not a port is a matter of the net's definition and not of the input), and as `closed_net` from the runner's `inject`, at the top level and by path. A write at `Port(subnet place, port)` belongs to the net around the subnet: a closed net refuses it, an open one lets it land. A write by the program or the runner at a net inside a closed net is refused at every place, its ports included, whichever way it is addressed: through `NestedNets.subnet_scope` or `graph.subnet(...)`, through the token that carries it, by a `RunContext` on it, or by an `inject` by `path` or `nested_id`. The error's `around` then names the nearest closed net around, and its message says to come in through that net's ports or to declare it open; at a place the inner net itself would refuse, the refusal is the inner net's own. In a body the error fails the firing, at the cost of any failure: the tokens it took, unless `restore_tokens_on_failure` puts them back, and what the body did before stays done. The message names the net, the place and the act. A body that holds the net is refused a port too when the edge that handed it the net does not name the port in its [`reaches`](#nets-as-tokens): the error's `undeclared` is then true, and its message says what to name. A body is judged by its edge's reach, not by the nets around the net it writes.
 
-1. Mark the place as a port: `ListPlaceNode("Ledger", str, port=True)`.
-2. Start the net with the token in its definition, as a seed or a template's token: `ListPlaceNode("Ledger", str, ["Opening entry"])`.
-3. Declare the net open: `construct_graph([...], open=True)`, read as `graph.open`. An open net lets anyone outside write to any of its places. It opens that net alone, not the nets inside it.
+**Three ways to make a refused write land**, in the order to prefer them:
+
+1. Start the net with the token in its definition, as a seed or a template's token, when the program only seeded it after building it: `ListPlaceNode("Ledger", str, ["Opening entry"])`, or a template that takes what it starts with.
+2. Mark the place as a port, when tokens genuinely arrive there from outside: `ListPlaceNode("Ledger", str, port=True)`, and name it in the `reaches` of each edge whose body writes it. For a net inside a closed net, the port goes on the closed net around it, with a transition that carries the token in: `ReturnedEdgeFromTransition("Enter", Port("Level 1", "Lobby"))`, or a body whose edge names the inner net's port in its `reaches`.
+3. Declare the net open: `construct_graph([...], open=True)`, read as `graph.open`, only for a net meant to be written anywhere from outside. An open net lets anyone outside write to any of its places. It opens that net's own places only: each net inside it keeps its own rule, which the program meets there once every net around is open. To reach a net inside a closed net this way, every net around it is declared open, which opens their own places too.
 
 ```python
 post = ExecutableGraphOperations.construct_graph([
@@ -352,13 +362,11 @@ NestedNets.put(post, "Inbox", ["Dear Ada"])   # lands
 NestedNets.put(post, "Ledger", ["IOU"])       # ClosedNetError
 ```
 
-**Knobs and firing by name stay with the program and the runner.** Setting a parameter, a transition's switch or keywords, the tie-break, a stepping rule or a selector, and firing a transition by name (`Fire`), stay with the program, its drivers and the runner on every net. A body of the net around a net that marks a port may not use them while it holds the net, closed or declared open alike, since `open` opens the places and not the knobs: `HeldByBodyError` fails its firing. A net that marks no port keeps today's behaviour, so a body still sets its parameters, as the transit example's `Depart` and `Arrive` set their cabin's `stopped`.
+**Knobs and firing by name stay with the program and the runner.** Setting a parameter, a transition's switch or keywords, the tie-break, a stepping rule or a selector, and firing a transition by name (`Fire`), stay with the program, its drivers and the runner on every net. A body of the net around a net may not use them while it holds the net, on any net, closed or declared open alike, since `open` opens the places and not the knobs: `HeldByBodyError` fails its firing. Nor may it load a marking or a saved form into a net it holds, drain its events, move its tie-break cursor without firing it (calling the default selector or `forget_cursors` on it) or press one of its controls, nor drive it with a `RunContext` that switches transitions off. Give such a setting to a transition of the net's own, or leave it to the program.
 
-**What stays allowed.** Reading, for everyone; stepping, a body included (a body may step a net it holds, and the net's own firings are inside it); the whole-state acts, `import_marking`, `NetJson.load_into` and `restore`, `NestedNets.fork`, saving, and the runner's `load` and `reset`; and a net's own controls, `apply_control` and the runner's `press`, whose commands land at any place.
+**What stays allowed.** Reading, for everyone; stepping, a body included (a body may step a net it holds, and the net's own firings are inside it); the whole-state acts, `import_marking`, `NetJson.load_into` and `restore`, `NestedNets.fork`, saving, and the runner's `load` and `reset`, for the program and the runner, between firings (a load under a firing in flight in the net, a subnet of it or the net around it at its ports is refused with `HeldByBodyError`); and a net's own controls, `apply_control` and the runner's `press`, pressed by the program or a viewer, whose commands land at any place, though not while a body holds the net: the press is then refused with `HeldByBodyError` until the firing lands, as a knob is. Loading is the one whole-state act a closed net shields the nets inside it from: `import_marking` or `NetJson.load_into` on a net inside a closed net writes every place of it, so it is refused as a put there is, with `ClosedNetError`, its `place` `None`; load the net around as a whole, which loads the nets inside it, or declare the net around open. The knobs of a net inside a closed net stay with the program as on any other net, a parameter putting no token anywhere.
 
-**What Python cannot catch.** The rule holds through the library's own functions, the runtime's commands and the runner. For a body there is one more check: when it returns, the private places and knobs (including mutable containers inside `params` and `transition.kwargs`) of each closed net it held are compared with what they held when it was handed the net, so a body that edits `place.tokens` or `params` directly fails too. A change made inside a token object where it lies goes unseen, and a program that edits a place's list, `graph.params` or `graph.disabled` directly is not caught.
-
-**Stage two.** A later change will close every net that does not declare itself open, a net that marks no port included, by turning one default. A net whose places a body or the program writes from outside will then mark them as ports, start with its tokens in its definition, or declare itself open. A body that sets the parameters of a net that marks no port, as transit's do, will be refused then, `open` opening only the places, so such a net will give the setting to a transition of its own or leave it to the program.
+**What Python cannot catch.** The rule holds through the library's own functions, the runtime's commands and the runner. For a body there is one more check: when it returns, the private places and knobs of each closed net it held are compared with what they held when it was handed the net, the plain dicts, lists, tuples and sets inside `params` and `transition.kwargs` included, so a body that edits `place.tokens` or `params` directly, or appends to a list in `params`, fails too. A change made inside a token object where it lies, or inside any other object in `params` or `transition.kwargs` (a dataclass, a numpy array), goes unseen, and a program that edits a place's list, `graph.params` or `graph.disabled` directly is not caught. A net that code appends to a place's list directly is not known to be inside that place's net until the next engine entry point (a step, a command, a `put` or `take` on that net) gives the place's tokens their ids, and one put in place of another, the length kept, is not known at all.
 
 ### Groups
 
@@ -371,14 +379,14 @@ FunctionTransitionNode("Walk", walk, guard=can_walk, group="Walk")
 SubnetPlaceNode("Level 1", build_level(), group="Dungeon")       # a subnet place may be in one too
 ```
 
-A group exists from its first mention, and `graph.groups` lists the groups in that order, reading the places in declaration order and then the transitions; `node.group` is the group a node is in, or `None`. A node is in one group or none, a group holds no group, a name may hold any character, and a node keeps its own name. A subnet, or a net a token carries, has groups of its own, given on its own nodes, and a port's group is its subnet's. Groups are part of the definition: a copy or a template carries them, and a saved net never mentions them, so a net fires, steps, numbers its tokens and saves exactly as it would with no groups. The Graphviz drawing frames each group with a dashed line titled with its name (`SimpleGraphvizVisualization.graph`, or `RustworkxToGraphviz.draw` with attributes of your own), and the [protocol runner](#net-protocol--run-a-net-as-a-process) lists a net's groups in its topology, for a viewer to draw. A group is a label on parts of one net whose places it shares freely; a part that is really separate, with its own tokens and turns and reached only through ports, is a subnet place. `examples/groups/hike.py` is the worked example: a hiker whose walking, eating and resting all read and change one store of energy, each concern a group and the energy in none.
+A group exists from its first mention, and `graph.groups` lists the groups in that order, reading the places in declaration order and then the transitions; `node.group` is the group a node is in, or `None`. A node is in one group or none, a group holds no group, a name may hold any character, and a node keeps its own name. A subnet, or a net a token carries, has groups of its own, given on its own nodes, and a port's group is its subnet's. Groups are part of the definition: a copy or a template carries them, and a saved net never mentions them, so a net fires, steps, numbers its tokens and saves exactly as it would with no groups. The Graphviz drawing frames each group with a dotted line titled with its name (`SimpleGraphvizVisualization.graph`, or `RustworkxToGraphviz.draw` with attributes of your own; until 2026-11-28 it was dashed, as an open net's places now are), and the [protocol runner](#net-protocol--run-a-net-as-a-process) lists a net's groups in its topology, for a viewer to draw. A group is a label on parts of one net whose places it shares freely; a part that is really separate, with its own tokens and turns and reached only through ports, is a subnet place. `examples/groups/hike.py` is the worked example: a hiker whose walking, eating and resting all read and change one store of energy, each concern a group and the energy in none.
 
 ### Token keys and queries
 
 A place can declare **keys**, named attributes derived from each token, and a net can then be asked for the tokens matching a filter, with their places, ids, keys and values:
 
 ```python
-from petritype.core.keys import Filter, Query
+from petritype import Filter, Query
 
 ListPlaceNode("Forest", Species, [...], keys={"species": lambda s: s.name, "class": lambda s: s.class_})
 
@@ -392,7 +400,7 @@ Key values are strings, integers or booleans, derived from the value whenever th
 A keyed edge can also choose its token by another input of the same firing, with a clause that compares one of its keys with a key of the token the transition gets from another place:
 
 ```python
-from petritype.core.keys import Clause, Filter, MutateWhereEdge
+from petritype import Clause, Filter, MutateWhereEdge
 
 ArgumentEdgeToTransition("Orders", "Load", "order")
 MutateWhereEdge("Couriers", "Load", "courier", where=Filter((Clause("name", input="Orders", input_key="courier"),)))
@@ -421,7 +429,7 @@ Modes: `manual` (default), `24/7` (continuous; auto-restarting on failure is a h
 A net can also declare, beside it, the controls a viewer shows for it and how its places are drawn. The traffic light (`examples/edges_on_empty_places/traffic_light.py`) declares two buttons and fills its light with the light's colour:
 
 ```python
-from petritype.runtime import ControlSpec, PlaceStyle
+from petritype import ControlSpec, PlaceStyle
 
 @petri_net(
     name="traffic-light",
@@ -442,17 +450,20 @@ The [protocol runner](#net-protocol--run-a-net-as-a-process) serves them in the 
 Beyond running a net to completion, `petritype.runtime` turns a net into a **live object you can watch and poke while it runs** — for monitoring, real-time simulations, or interactive tools. The graph is the single source of truth; a `Runner` (a set of functions, no objects to construct) drives it via a passive `RunContext` the caller owns.
 
 ```python
-from petritype.runtime import Runner, RunContext, ExecutionMode, Extend
+from petritype import Runner, RunContext, ExecutionMode, Extend
 
 ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT, observers=(render,))
 await Runner.run_to_completion(ctx)   # or Runner.step(ctx) / Runner.run_indefinitely(ctx, tick=0.1)
 ```
 
 - **One definition, two execution modes** — `SEQUENTIAL` fires one transition fully before the next; `CONCURRENT` runs non-conflicting transitions' bodies as overlapping tasks (wall-clock ≈ max instead of sum). Selected by `RunContext.mode` — the only line that changes. In `CONCURRENT` mode:
-  - **Per-token reader/writer locking** prevents data races on shared places: concurrent `ReadEdge`s (and launch-time `SnapshotEdge`s) share a token in parallel, while `MutateEdge`s and consuming edges take exclusive per-token claims (`(place, token_id)`) so distinct tokens in the same place (e.g. via keyed edges) still run concurrently. Whole-place edges (`DrainEdge`, `SurveyEdge`, `ReadAllEdge`, and list-mode edges) take place-level claims. Claims are checked atomically before launch (preventing lock deadlocks) with strict FIFO head-of-line waiting.
-  - **Selector & priority ordering** matches sequential mode: each concurrent launch sweep repeatedly picks the next launchable, non-conflicting transition via `transition_selector` or the default selector (`priority` + `tie_break`) until none remain.
+  - **Per-token reader/writer claims** keep the firings the concurrent runner launches off each other's tokens: read edges share a token, mutate edges and consuming edges need it to themselves, per `(place, token_id)`, and a snapshot edge waits only for a mutator, since it copies at launch. Firings on different tokens of one place (e.g. through keyed edges) still overlap. Edges that take or read every token (`DrainEdge`, `SurveyEdge`, `ReadAllEdge`, and list-mode edges) claim the whole place. Claims are checked all at once before a launch and nothing is held while waiting, so firings cannot deadlock.
+  - **Head-of-line waiting** — a transition waits for the token it would take in sequential mode (the front token, or the oldest match for a keyed edge) rather than skip to the next, so a slow reader or mutator of the front token holds back the consumers of every token behind it; keep slow reads and mutations off a place that other transitions consume from.
+  - **Selector & priority ordering** matches sequential mode: each launch sweep picks one launchable transition at a time with `transition_selector` or the default selector (`priority` + `tie_break`) until none is left.
+  - **What the claims cannot cover** — Python cannot stop a body, guard, observer or the program from changing a token or the net directly, and a body can keep a reference to a token after it returns. The claims cover only the firings the runner launches and those a `Fire` command makes; a user who changes tokens or the net any other way takes responsibility for it, as with [closed nets](#closed-nets) ("What Python cannot catch").
+- **Ending a run** — when a concurrent run ends on an error (a firing failed, a guard raised, the fuse), the other bodies in flight did nothing wrong: they finish and land, their outputs deposited and their events recorded, before the error goes on. A peer that fails as it lands is told in a note on the error, which stays the first failure. When the run is stopped or cancelled, the async bodies still in flight are cancelled and waited for, so their cleanup runs first, and so are those still running when an error's wait for them runs out. Each wait is five minutes at most, or the net's own `construct_graph(..., cancellation_timeout_seconds=N)`, with `None` for no limit; a warning naming the cancelled bodies still running is logged at three fifths of it. Past the timeout the run lets go of them and says which: in a note on the error it was ending with, or as a `CancellationTimeoutError` when it was ending with none. A body on a thread cannot be interrupted and is not waited for once cancelled.
 - **Observation** — `observers` are plain callables handed the *live graph* after each state change, so any renderer (a marimo notebook, a web frontend) can redraw at its own pace. In-flight transitions are exposed via `graph.in_flight`, so a renderer could for example highlight them by changing their colour while their bodies run. Observers are notified as a transition goes in flight in sequential mode too, so a renderer can show it working while its body runs: a sequential run calls them at the initial marking, then for each firing once at launch and once after it completes, and at the launch call `graph.in_flight` names the transition, its consumed tokens are out of their places, and `last_fired`, `step_count`, `fired_counts` and the log still read as they did before the firing. An inline body holds the event loop until it returns, so an observer's own work finishes before the body starts and anything it only schedules runs after the body returns; an async body lets that work run at its awaits, and a body marked `execution="thread"` leaves the loop free. To know *what fired since you last looked*, snapshot `graph.fired_counts` and diff it at the next notification with `fired_since(previous, current)` — lossless in every mode, unlike `graph.last_fired`, which names only one completion per concurrent batch.
-- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` / `Fire` (transitions; `Fire` fires one now if it is fireable), `SetNetParam` (the net's own parameters). A UI only ever *produces commands* — the runner is the only thing that mutates the net.
+- **Interactive input** — write to a running net by putting typed commands on `RunContext.inbox`, drained between steps: `Extend` / `SetTokens` (places), `SetParam` / `Enable` / `Disable` / `Fire` (transitions; `Fire` fires one now if it is fireable), `SetNetParam` (the net's own parameters). A UI only ever *produces commands* — the runner is the only thing that mutates the net. The program is outside the net, which is [closed](#closed-nets) unless it declares itself open, so `Extend` and `SetTokens` land only at the places it marks `port=True` (`ListPlaceNode("Inbox", Parcel, port=True)`); a command a control of the net gives through `apply_control` is the net's own and lands anywhere.
 - **Real-time** — `run_indefinitely(ctx, tick=...)` drives the net on an internal clock until `ctx.stop`, surviving idle ticks, so you can inject input live.
 - **Limits** — `Runner.run(ctx, stop_after_n_firings=N)` paces: it always returns a `RunSummary` whose `quiesced` flag tells "stopped by the limit, call again to continue" from "nothing left to fire". `RunContext.error_after_n_firings` is a run-wide fuse for nets that should quiesce quickly: `TooManyFiringsError` is raised *before* the net fires past it (a net that fires exactly n and quiesces is fine).
 - **Offload** — mark a blocking / CPU-bound body `FunctionTransitionNode(..., execution="thread")` and it runs in a thread pool, so it never freezes the loop (and parallelises in concurrent mode).
@@ -482,7 +493,12 @@ progress and log view, their events wrapped in `nested` notifications. A
 subnet is one more inner net, its path step the subnet place alone
 (`[{"place": "Level 1"}]`); the net around it names a port with `port` beside
 `place` (`{"place": "Level 1", "port": "Lobby"}`), and a change of a port moves
-the versions of both nets that see it (PROTOCOL.md §12.7). Each net's topology
+the versions of both nets that see it (PROTOCOL.md §12.7). An `inject` lands
+only at a port of the net it is addressed to, every net not declared open being
+[closed](#closed-nets), and in an inner net only when every net around it is
+declared open, a closed net shielding the nets inside it; elsewhere it answers
+`closed_net`. So a subnet's port takes an inject addressed to the subnet by
+`path` only inside an open net. Each net's topology
 lists its own [groups](#groups) as `groups`, with `group` on each member, and
 marks its own port places `port: true`, whichever net it is, and an edge carries
 the ports it declares it reaches as `reaches` (PROTOCOL.md §5.1). A
@@ -542,6 +558,9 @@ Optional features live behind extras:
 The `viz` extra also needs the Graphviz `dot` binary on your PATH
 (`brew install graphviz` / `apt install graphviz`).
 
+The package is typed: it ships `py.typed`, so your type checker reads its annotations.
+CI type-checks code written against the public API, as this README uses it, with pyright in its standard mode.
+
 ## Examples
 
 See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) directory:
@@ -552,7 +571,7 @@ See the [`examples/`](https://github.com/olenive/petritype/tree/main/examples) d
 - **Rooms** (`examples/toy/state_machines/01_rooms.py`) — a state machine: a character moves between rooms, which are the places, and each room's way out is a transition whose distribution function sends the character to the room a **Go to** button names (a `SetNetParam` command)
 - **Transit** (`examples/tokens_as_nets/transit_journey.py`) — nets as tokens: a city whose vehicles hold cabins that are nets of their own, running its journey under plain stepping (each vehicle's state is where its door tokens are, in its cabin's `Doors Open` or `Doors Closed`, which the city's guards read), with the followed bus's cabin drawn beside the city
 - **Levels** (`examples/subnet_places/levels_journey.py`): subnet places, a world with two levels built from one template, heroes entering each level through its `Lobby` port and leaving through its `Exit Hall` port, the world drawn with each level closed and, below it, each level's own net
-- **Hike** (`examples/groups/hike_day.py`): groups, a hiker's day in which walking, eating and resting all read and change one store of energy, each concern drawn as a dashed frame titled with its name and the shared energy outside them
+- **Hike** (`examples/groups/hike_day.py`): groups, a hiker's day in which walking, eating and resting all read and change one store of energy, each concern drawn as a dotted frame titled with its name and the shared energy outside them
 - **Wildlife** (`examples/token_view_filtering/wildlife_filter.py`) — token keys: species across habitats, drawn through a filter picked from tabs built with `Query.distinct`, with a keyed-edge migration
 - **Shop** (`examples/edges_on_empty_places/shop_day.py`) — an edge that accepts an empty place: switch promotions on and off and place orders, and each order is priced with whatever promotions are running through a survey edge, its receipt showing what each one took off. The example day also plays by itself
 - **Traffic light** (`examples/edges_on_empty_places/traffic_light_junction.py`) — the edge that takes every token, zero or more: cars wait at a light that cycles red, green and amber (one place, whose token is its colour). Two transitions: `Change` cycles the light by itself, and `Go` drains every car waiting past the light while it is green, reading the light and guarded on green and someone waiting, so a car arriving at green goes straight through. Cars arrive on a schedule or by hand

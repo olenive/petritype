@@ -3,7 +3,9 @@
 An autonomous net samples a "traffic level" over time and classifies it. At any
 point an external caller -- a UI, the Petri app's inject handler, or just the
 driver loop below -- drops a UserRequest into the `Requests` place to override
-the next reading with their own level. A priority-aware selector handles that
+the next reading with their own level. `Requests` is the net's port: the net is
+closed, as every net not declared open is, so a write from outside (an inject)
+lands only there. A priority-aware selector handles that
 injection on the *next* fire, ahead of routine sampling: "throw a switch"
 responsiveness, without preemption.
 
@@ -86,7 +88,7 @@ def user_first_selector(
 def build_interactive_monitor() -> ExecutableGraph:
     graph = ExecutableGraphOperations.construct_graph([
         # === PLACES ===
-        ListPlaceNode("Requests", UserRequest),  # external input lands here
+        ListPlaceNode("Requests", UserRequest, port=True),  # external input lands here: the port
         ListPlaceNode("Readings", Reading),
         ListPlaceNode("Log", Classification),
 
@@ -117,14 +119,14 @@ async def main() -> None:
     # 2. The user "throws a switch" -- inject an arbitrary high level. In the
     #    Petri app this append is the runtime inject handler; here the driver
     #    stands in for the UI.
-    graph.place_named("Requests").tokens.append(UserRequest(level=0.97))
+    graph.place("Requests").tokens.append(UserRequest(level=0.97))
 
     # 3. Next fires: the injection is handled FIRST (priority selector), then
     #    classified -- so the override takes effect immediately, no preemption.
     await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=2)
 
     print("\nLog:")
-    for entry in graph.place_named("Log").tokens:
+    for entry in graph.place("Log").tokens:
         print(f"  {entry.source:5} level={entry.level:.3f} -> {entry.verdict}")
 
 

@@ -39,8 +39,10 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence, Union
 
 from petritype.core.events import PlaceKey, Port
+from petritype.core.executable_graph_components import _ASKED, _Asked
 from petritype.core.executable_graph_components import (
-    ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, ReadWhereEdge, TakeWhereEdge, TokenIds,
+    ExecutableGraph, ListPlaceNode, MapPlaceNames, MutateWhereEdge, Questions, ReadWhereEdge, TakeWhereEdge,
+    TokenIds,
 )
 
 __all__ = [
@@ -67,31 +69,47 @@ def same_value(a: Any, b: Any) -> bool:
 class Keys:
     """Functions that read the keys a place derives from its tokens."""
 
+    @staticmethod
     def names(place: ListPlaceNode) -> tuple[str, ...]:
         """The key names a place declares, in declaration order; empty for none."""
         return tuple(place.keys) if place.keys else ()
 
+    @staticmethod
     def of(place: ListPlaceNode, token: Any) -> dict[str, KeyValue]:
         """The token's keys as the place derives them now. ``TypeError`` if an
-        extractor gives anything but a string, an integer or a boolean."""
+        extractor gives anything but a string, an integer or a boolean. The
+        extractors are asked as one question (``Questions``): one that asks to
+        change a net is refused with ``ReadOnlyError``."""
         keys: dict[str, KeyValue] = {}
-        for name, extract in (place.keys or {}).items():
-            value = extract(token)
-            if not is_key_value(value):
-                raise TypeError(
-                    f"key {name!r} of a token in {place.name!r} is {type(value).__name__}; "
-                    f"a key is a string, an integer or a boolean"
-                )
-            keys[name] = value
+        if not place.keys:
+            return keys
+        # ``Questions.ask`` written out, once for all the place's extractors: this
+        # runs for every token a keyed edge or a query looks at.
+        asked = _Asked("keys", place.name, _ASKED.get())
+        marker = _ASKED.set(asked)
+        try:
+            for name, extract in place.keys.items():
+                value = extract(token)
+                if type(value) not in KEY_TYPES:
+                    raise TypeError(
+                        f"key {name!r} of a token in {place.name!r} is {type(value).__name__}; "
+                        f"a key is a string, an integer or a boolean"
+                    )
+                keys[name] = value
+        finally:
+            _ASKED.reset(marker)
+        if asked.refusal is not None:
+            raise asked.refusal
         return keys
 
+    @staticmethod
     def one(place: ListPlaceNode, token: Any, key: str) -> KeyValue:
         """One key of ``token`` as ``place`` derives it now, without running
         other key extractors. ``KeyError`` if the place does not declare ``key``;
         ``TypeError`` if the extractor gives anything but a string, an integer or
-        a boolean."""
+        a boolean. Asked as a question, as for ``of``."""
         extract = (place.keys or {})[key]
-        value = extract(token)
+        value = Questions.ask("keys", place.name, extract, token)
         if not is_key_value(value):
             raise TypeError(
                 f"key {key!r} of a token in {place.name!r} is {type(value).__name__}; "
@@ -244,6 +262,7 @@ class Match:
 class Query:
     """Functions that ask a net for tokens by their keys."""
 
+    @staticmethod
     def matches(graph: ExecutableGraph, filter: Filter = EVERYTHING) -> list[Match]:
         """Every token the filter keeps, in place order then token order, the
         ports of a subnet place at its position (``MapPlaceNames``)."""
@@ -261,10 +280,12 @@ class Query:
                     found.append(Match(key, ids[index] if index < len(ids) else -1, keys, token))
         return found
 
+    @staticmethod
     def count(graph: ExecutableGraph, place: ListPlaceNode, filter: Filter) -> int:
         """How many tokens of ``place`` the filter keeps."""
         return sum(1 for token in place.tokens if filter.matches(graph, place, token))
 
+    @staticmethod
     def distinct(graph: ExecutableGraph, key: str, places: Optional[Sequence[PlaceKey]] = None) -> list[KeyValue]:
         """The distinct values of ``key`` over the net (or ``places``, a port by
         its pair), in order of first appearance in place order then token order,
@@ -284,6 +305,7 @@ class Query:
                     seen.append(value)
         return seen
 
+    @staticmethod
     def first(graph: ExecutableGraph, place: ListPlaceNode, filter: Filter) -> Optional[int]:
         """The index of the oldest token of ``place`` the filter keeps, or ``None``."""
         for index, token in enumerate(place.tokens):

@@ -131,7 +131,7 @@ def _(Order, Promotion, Receipt, RustworkxToGraphviz, graphviz_draw, io, money):
 def _(Extend, Runner, SCRIPT, SetTokens, fireable, money, snapshot):
     def running(session):
         """The names of the promotions running, oldest first."""
-        return [p.name for p in session["graph"].place_named("Promotions").tokens]
+        return [p.name for p in session["graph"].place("Promotions").tokens]
 
     def put(session, tokens):
         """Put tokens in, as the protocol's ``inject`` does, through the runner's inbox.
@@ -155,14 +155,14 @@ def _(Extend, Runner, SCRIPT, SetTokens, fireable, money, snapshot):
     def withdraw(session, name):
         """Take a promotion off: the switch, not the net, ends it."""
         ctx = session["ctx"]
-        keep = [p for p in ctx.graph.place_named("Promotions").tokens if p.name != name]
+        keep = [p for p in ctx.graph.place("Promotions").tokens if p.name != name]
         ctx.inbox.put_nowait(SetTokens("Promotions", keep))
         Runner.drain_inbox(ctx)
 
     def explain(graph, fired, before):
         """What a firing did, read off the net after it; ``before`` is what was running."""
         if fired == "Price Order":
-            receipt = graph.place_named("Priced").tokens[-1]
+            receipt = graph.place("Priced").tokens[-1]
             o = receipt.order
             applied = [s.promotion for s in receipt.savings]
             if not before:
@@ -294,7 +294,7 @@ async def _(
                 "promotions applied": ", ".join(f"{s.promotion} −{money(s.amount)}" for s in r.savings) or "—",
                 "total": money(r.total),
             }
-            for r in _graph.place_named("Priced").tokens
+            for r in _graph.place("Priced").tokens
         ]
         # While a firing plays, the switches cannot follow the net (they are rebuilt once the
         # cell is done), so the promotions running are written out instead.

@@ -22,7 +22,8 @@ from petritype.runtime import ExecutionMode, RunContext, Runner, SetTokens
 
 
 def _chain_graph(n_transitions: int, tokens: list[int]):
-    """P0 -T1-> P1 -T2-> ... -Tn-> Pn, each transition passing its token through."""
+    """P0 -T1-> P1 -T2-> ... -Tn-> Pn, each transition passing its token through;
+    P0 is the chain's port, where its input comes in."""
 
     def passthrough():
         async def body(x: int) -> int:
@@ -30,7 +31,7 @@ def _chain_graph(n_transitions: int, tokens: list[int]):
 
         return body
 
-    components = [ListPlaceNode('P0', int, list(tokens))]
+    components = [ListPlaceNode('P0', int, list(tokens), port=True)]
     for i in range(1, n_transitions + 1):
         components += [
             ArgumentEdgeToTransition(f'P{i - 1}', f'T{i}', 'x'),

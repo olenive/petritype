@@ -80,7 +80,7 @@ def readings(
         ArgumentEdgeToTransition("In", "Tune", "reading"),
         FunctionTransitionNode("Tune", tune),
         ReturnedEdgeFromTransition("Tune", "Out"),
-        ListPlaceNode("Out", Reading),
+        ListPlaceNode("Out", Reading, port=True),  # where the runner injects
     ])
 
 

@@ -100,8 +100,11 @@ def _(
 
     def build_graph():
         nodes_and_edges = [
-            ListPlaceNode(name="Inbox", type=int, tokens=[]),
-            ListPlaceNode(name="Multiplier", type=int, tokens=[2]),
+            # The ports: items come in at Inbox and the multiplier is set from outside. The
+            # net is closed, as every net not declared open is, so the buttons' Extend and
+            # SetTokens land only at a port.
+            ListPlaceNode(name="Inbox", type=int, tokens=[], port=True),
+            ListPlaceNode(name="Multiplier", type=int, tokens=[2], port=True),
             ListPlaceNode(name="Processed", type=Tally, tokens=[Tally(n=0)]),
             ArgumentEdgeToTransition("Inbox", "Scale", "item"),
             SnapshotEdge("Multiplier", "Scale", "factor"),
@@ -182,10 +185,10 @@ async def _(
         _ctx.inbox.put_nowait(Extend("Inbox", [session["next_item"]]))
         session["next_item"] += 1
     elif minus_button.value:
-        _cur = _ctx.graph.place_named("Multiplier").tokens[0]
+        _cur = _ctx.graph.place("Multiplier").tokens[0]
         _ctx.inbox.put_nowait(SetTokens("Multiplier", [max(1, _cur - 1)]))
     elif plus_button.value:
-        _cur = _ctx.graph.place_named("Multiplier").tokens[0]
+        _cur = _ctx.graph.place("Multiplier").tokens[0]
         _ctx.inbox.put_nowait(SetTokens("Multiplier", [_cur + 1]))
 
     await Runner.step(_ctx)  # drain queued input + scale one item using the current multiplier
@@ -193,10 +196,10 @@ async def _(
     _controls = mo.hstack(
         [add_button, minus_button, plus_button, reset_button, refresh], justify="start"
     )
-    _mult = _ctx.graph.place_named("Multiplier").tokens[0]
-    _processed = _ctx.graph.place_named("Processed").tokens[0].n
-    _inbox_n = len(_ctx.graph.place_named("Inbox").tokens)
-    _outbox = _ctx.graph.place_named("Outbox").tokens
+    _mult = _ctx.graph.place("Multiplier").tokens[0]
+    _processed = _ctx.graph.place("Processed").tokens[0].n
+    _inbox_n = len(_ctx.graph.place("Inbox").tokens)
+    _outbox = _ctx.graph.place("Outbox").tokens
     mo.vstack(
         [
             _controls,

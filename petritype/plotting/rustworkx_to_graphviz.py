@@ -32,6 +32,7 @@ type FunctionNamesToNodeIndices = dict[FunctionFullName, int]
 
 class NodeLabel:
 
+    @staticmethod
     def default_token_summariser(token: any, maximum_length=100) -> str:
         """One line per token in a place's label. A token that holds nets is
         marked as such, with each inner net's name and token count in place of
@@ -43,21 +44,26 @@ class NodeLabel:
             token_info = token_info[:maximum_length] + "..."
         return token_info
 
+    @staticmethod
     def inner_nets(token: any) -> dict[str, ExecutableGraph]:
         """The nets a token holds, by name, for a descend view: each is an
         ``ExecutableGraph`` that ``RustworkxGraph.from_executable_graph`` renders
         like any other net."""
         return NestedNets.of(token)
 
+    @staticmethod
     def default_place(
-        node: ListPlaceNode, token_summariser=default_token_summariser,
+        node: ListPlaceNode, token_summariser: Optional[Callable[[Any], str]] = None,
         filter: Optional[Filter] = None, params: Optional[dict[str, Any]] = None,
     ) -> str:
-        """A place's label: its name and type, then one line per token. With a
-        ``filter`` (``petritype.core.keys``) only the tokens it keeps are listed,
-        the header reads ``matching / count`` and a last line says how many the
-        filter hides, so a hidden token is never mistaken for an absent one;
-        ``params`` are the net's, for a clause that names one."""
+        """A place's label: its name and type, then one line per token, each
+        written by ``token_summariser`` (``default_token_summariser`` if none is
+        given). With a ``filter`` (``petritype.core.keys``) only the tokens it
+        keeps are listed, the header reads ``matching / count`` and a last line
+        says how many the filter hides, so a hidden token is never mistaken for
+        an absent one; ``params`` are the net's, for a clause that names one."""
+        if token_summariser is None:
+            token_summariser = NodeLabel.default_token_summariser
         type_name = TypeNames.of(node.type)
         if filter is None:
             label = f"{node.name}\n({type_name})"
@@ -72,22 +78,41 @@ class NodeLabel:
         tokens_string = "\n".join(value_strings)
         return NodeLabel.escape_quoted(f"{label}\n{tokens_string}")
 
+    @staticmethod
     def default_transition(node: FunctionTransitionNode) -> str:
         return NodeLabel.escape_quoted(f"{node.name}\n({TypeNames.callable_name(node.function)})")
 
+    @staticmethod
+    def drawable(text: str) -> str:
+        """``text`` with the characters Graphviz cannot draw as they are made
+        drawable (since 2026-11-28): a tab becomes four spaces, a carriage return a
+        line break (a carriage return and line feed one line break), and a NUL is
+        left out. Graphviz draws a tab and a carriage return in ways of its own,
+        and a NUL ends its input, so ``dot`` failed. Only the drawing changes: names
+        stay as they are in the net and on the wire. ``escape_quoted``,
+        ``record_text`` and ``quoted_text`` apply it, so every label does."""
+        return text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ").replace("\0", "")
+
+    @staticmethod
     def escape_quoted(text: str) -> str:
         """Escape the characters a Graphviz quoted string gives a meaning
-        (``\\`` and ``"``) with a backslash, preserving line breaks."""
-        return "".join("\\" + character if character in '\\"' else character for character in text)
+        (``\\`` and ``"``) with a backslash, preserving line breaks, after making
+        the text ``drawable``."""
+        drawn = NodeLabel.drawable(text)
+        return "".join("\\" + character if character in '\\"' else character for character in drawn)
 
+    @staticmethod
     def record_text(text: str) -> str:
         """Text for one field of a Graphviz record label: the characters a record
         or a quoted string gives a meaning (``\\ { } | < > "``) escaped with a
         backslash, and each line break written as the record's ``\\n``, so a name
-        is drawn as it is, whatever characters it holds."""
-        escaped = "".join("\\" + character if character in '\\{}|<>"' else character for character in text)
+        is drawn as it is, whatever characters it holds, once ``drawable``."""
+        escaped = "".join(
+            "\\" + character if character in '\\{}|<>"' else character for character in NodeLabel.drawable(text)
+        )
         return escaped.replace("\n", "\\n")
 
+    @staticmethod
     def quoted_text(text: str) -> str:
         """Text for a Graphviz quoted string, such as a frame's title: the
         characters a quoted string gives a meaning (``\\`` and ``"``) escaped with
@@ -95,6 +120,20 @@ class NodeLabel:
         it is, whatever characters it holds."""
         return NodeLabel.escape_quoted(text).replace("\n", "\\n")
 
+    @staticmethod
+    def add_style(attrs: dict, keyword: str) -> dict:
+        """``attrs`` with ``keyword`` (``dotted``, ``dashed``, ``bold``, ...) added to its Graphviz
+        ``style``, a list of keywords joined by commas and quoted when it holds more
+        than one, since rustworkx writes a value as given and ``dot`` reads an unquoted
+        comma as the end of the attribute: ``filled`` becomes ``"filled,dashed"``. A
+        keyword already there is not added again. Changes ``attrs`` and returns it."""
+        keywords = [word.strip() for word in str(attrs.get("style", "")).strip('"').split(",") if word.strip()]
+        if keyword not in keywords:
+            keywords.append(keyword)
+        attrs["style"] = keywords[0] if len(keywords) == 1 else '"' + ",".join(keywords) + '"'
+        return attrs
+
+    @staticmethod
     def port_cells(places) -> dict[Port, str]:
         """For every port of every subnet place among ``places``, the record field
         its cell is drawn as, by position (``port0``, ``port1``, ...), so no
@@ -105,6 +144,7 @@ class NodeLabel:
             for index, port in enumerate(place.ports)
         }
 
+    @staticmethod
     def subnet_place(node: SubnetPlaceNode) -> str:
         """A closed subnet place's record label, for ``shape=Mrecord`` (a box with
         rounded corners): its name as the title, the template that built its
@@ -120,6 +160,7 @@ class NodeLabel:
             return "{" + NodeLabel.record_text(title) + "}"
         return "{" + NodeLabel.record_text(title) + "|{" + cells + "}}"
 
+    @staticmethod
     def filter_label(filter: Filter) -> str:
         """A keyed edge's filter as a reader writes one, as petritype-dot writes
         it: its clauses joined by `` and ``, a constant clause as ``class in {Bird,
@@ -145,11 +186,13 @@ class NodeLabel:
 
         return " and ".join(clause_text(clause) for clause in filter.clauses)
 
+    @staticmethod
     def reaches_label(reaches: Sequence[str]) -> str:
         """The ports an edge declares it reaches in its tokens' nets, as petritype-dot
         writes them: ``reaches Orders In, Shots Out``, in the order declared."""
         return "reaches " + ", ".join(reaches)
 
+    @staticmethod
     def edge_label(edge: Any, first: Optional[str] = None) -> dict[str, str]:
         """An edge's ``label`` attribute, quoted (``quoted_text``) since rustworkx
         quotes a label without escaping it, or nothing for an edge with nothing to
@@ -165,6 +208,7 @@ class NodeLabel:
             lines.append(NodeLabel.reaches_label(reaches))
         return {"label": NodeLabel.quoted_text("\n".join(lines))} if lines else {}
 
+    @staticmethod
     def edge_port(edge: Any, cells: dict[Port, str]) -> dict[str, str]:
         """The attribute that ends an edge on a port at the port's cell: the edge's
         tail for an input edge, a non-consuming one included, its head for an
@@ -178,6 +222,7 @@ class NodeLabel:
 
 class RustworkxToGraphviz:
 
+    @staticmethod
     def type_relationship_edges(
         function_node_indices: NodeIndex,
         functions: Sequence[FunctionWithAnnotations],
@@ -213,6 +258,7 @@ class RustworkxToGraphviz:
         )
         return type_relationship_edges, type_names_to_node_indices, function_names_to_node_indices
 
+    @staticmethod
     def digraph(
         *,
         types: Sequence[TypeVariableWithAnnotations],
@@ -237,6 +283,7 @@ class RustworkxToGraphviz:
         graph.add_edges_from(type_relationship_edges)
         return graph, type_names_to_node_indices, function_names_to_node_indices, type_relationship_edges
 
+    @staticmethod
     def node_name(node_data: Union[FunctionWithAnnotations, TypeVariableWithAnnotations]) -> str:
         if isinstance(node_data, FunctionWithAnnotations):
             return node_data.function_full_name
@@ -245,6 +292,7 @@ class RustworkxToGraphviz:
         else:
             raise ValueError(f"Unexpected node data type: {type(node_data)}")
 
+    @staticmethod
     def node_attr_fn(node):
         return {
             "label": RustworkxToGraphviz.node_name(node),
@@ -252,6 +300,7 @@ class RustworkxToGraphviz:
             'style': 'filled'
         }
 
+    @staticmethod
     def edge_value_to_colour(value: str) -> str:
         value_to_colour = {
             TypeRelationship.CONTAINS_AS_SUBTYPE.value: 'deepskyblue',
@@ -268,12 +317,14 @@ class RustworkxToGraphviz:
         }
         return value_to_colour.get(value, 'red')
 
+    @staticmethod
     def edge_attr_fn(edge):
         return {
             'label': edge.value,
             'color': RustworkxToGraphviz.edge_value_to_colour(edge.value)
         }
 
+    @staticmethod
     def activation_coloured_attr_functions(
         graph: ExecutableGraph,
         token_summariser=NodeLabel.default_token_summariser,
@@ -292,8 +343,23 @@ class RustworkxToGraphviz:
         port with the port's name and count (``NodeLabel.subnet_place``); an edge on a port
         ends at the port's cell, and the box is outlined when the last firing touched one of
         its ports. Filters apply per net, so the cells count every token: a port is filtered
-        in its subnet's own drawing. There, in the drawing of the subnet, a port place has a
-        second ring, so that the border shows from inside.
+        in its subnet's own drawing, where it is drawn as the port of any net is.
+
+        A port of the net drawn, a place it marks ``port=True``, has one dotted outline, as
+        petritype-dot draws one (since 2026-11-28, where it had a second ring): ``dotted`` is
+        added to its ``style`` (``NodeLabel.add_style``), so it is drawn ``"filled,dotted"``
+        and stays filled. A second ring looked like a place inside a place, and nothing is
+        drawn as if nested unless it is a nested net. A place of a net declared open
+        (``graph.open``, since 2026-11-28), which takes tokens from outside at every place,
+        has a dashed outline, ``dashed`` added in the same way, so it is drawn
+        ``"filled,dashed"``; a port of an open net is dotted and not dashed, never both, its
+        mark as a port winning. A subnet place's box is drawn as before, the subnet's own
+        drawing showing its ports and whether it is open. These marks are kept few and quiet
+        so that the activations, the outlines of the last firing, and the tokens moving are
+        what catch the eye. An attribute function that wraps this one keeps the dots and the
+        dashes when it adds a style keyword of its own with ``NodeLabel.add_style`` and loses
+        them when it sets ``style`` outright; its ``fillcolor``, ``color`` and ``penwidth``
+        leave them as they are.
 
         A keyed edge (``TakeWhereEdge``, ``MutateWhereEdge``) is drawn as a take or a mutate edge
         with its filter written on it (``NodeLabel.filter_label``), as petritype-dot draws one.
@@ -340,7 +406,9 @@ class RustworkxToGraphviz:
                     'penwidth': '1'
                 }
                 if node.port:
-                    attrs['peripheries'] = '2'  # a port of this net: the border, seen from inside
+                    NodeLabel.add_style(attrs, 'dotted')  # a port of this net, dotted in an open net too
+                elif graph.open:
+                    NodeLabel.add_style(attrs, 'dashed')  # an open net: written from outside at any place
                 if node.name in magenta_outlined_places:
                     attrs['color'] = 'magenta'
                     attrs['penwidth'] = '2'
@@ -458,6 +526,7 @@ class RustworkxToGraphviz:
 
         return node_attr_fn, edge_attr_fn
 
+    @staticmethod
     def group_frames(pydigraph: PyDiGraph) -> list[tuple[str, list[NodeIndex]]]:
         """The groups of the net a rustworkx graph shows
         (``RustworkxGraph.from_executable_graph``), each with the indices of its
@@ -472,6 +541,7 @@ class RustworkxToGraphviz:
                 frames.setdefault(group, []).append(index)
         return list(frames.items())
 
+    @staticmethod
     def dot_source(
         pydigraph: PyDiGraph,
         node_attr_fn: Optional[Callable] = None,
@@ -479,9 +549,11 @@ class RustworkxToGraphviz:
         graph_attr: Optional[dict[str, str]] = None,
     ) -> str:
         """The Graphviz source of a net's rustworkx graph: what ``to_dot`` writes,
-        with each group drawn as a cluster, a dashed frame whose title is the
+        with each group drawn as a cluster, a dotted frame whose title is the
         group's name, holding the group's places, subnet places and transitions,
-        the clusters in the groups' order. A frame is named by its position
+        the clusters in the groups' order. The frame is dotted since 2026-11-28,
+        where it was dashed, so that it is not mistaken for the longer dashes of an
+        open net's places. A frame is named by its position
         (``cluster_0``, ``cluster_1``, ...) and its title is quoted
         (``NodeLabel.quoted_text``), so no character of a group's name reaches
         the drawing's syntax. A net with no groups gets ``to_dot``'s source as it
@@ -494,13 +566,14 @@ class RustworkxToGraphviz:
         if not body.endswith("}"):
             raise ValueError("to_dot wrote no closing brace to put the groups' frames before")
         clusters = "".join(
-            f'subgraph cluster_{position} {{\nlabel="{NodeLabel.quoted_text(name)}";\nstyle=dashed;\n'
+            f'subgraph cluster_{position} {{\nlabel="{NodeLabel.quoted_text(name)}";\nstyle=dotted;\n'
             + "".join(f"{index};\n" for index in members)
             + "}\n"
             for position, (name, members) in enumerate(frames)
         )
         return body[:-1] + clusters + "}\n"
 
+    @staticmethod
     def draw(
         pydigraph: PyDiGraph,
         node_attr_fn: Optional[Callable] = None,

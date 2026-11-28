@@ -36,13 +36,11 @@ def _():
     import os
     import time
     from itertools import chain
-    from typing import Iterable, Sequence
-
     import rustworkx as rx
     from rustworkx.visualization import graphviz_draw
 
     from petritype.core.ast_extraction import FunctionWithAnnotations
-    from petritype.core.data_structures import ClassName, NodeIndex, TypeVariableWithAnnotations
+    from petritype.core.data_structures import ClassName, TypeVariableWithAnnotations
     from petritype.core.descriptions import Description
     from petritype.core.executable_graph_components import (
         ArgumentEdgeToTransition,
@@ -97,7 +95,6 @@ def _():
         chain,
         graphviz_draw,
         io,
-        mo,
         os,
         rx,
         time,
@@ -198,11 +195,6 @@ def _(
     _neighbours = list(chain.from_iterable(relationship_graph.neighbors(i) for i in _path_indices))
     _relevant = set(_path_indices + _neighbours)
 
-    relevant_functions = tuple(
-        relationship_graph[i]
-        for i in _relevant
-        if isinstance(relationship_graph[i], FunctionWithAnnotations)
-    )
     relevant_types = tuple(
         relationship_graph[i]
         for i in _relevant

@@ -10,8 +10,10 @@ built from the template ``Unit``: an order put into its ``Orders In`` is fired
 by its ``Fire`` into its ``Shots Out`` as ``"Shot: <order>"``. The net's
 ``Hand Over`` takes an order and puts it into the front unit's ``Orders In``,
 and its ``Collect`` takes every shot out of the front unit's ``Shots Out`` into
-``Reports``; each declares the port its body reaches, a declaration that
-changes nothing about how the net runs.
+``Reports``; each names in its ``reaches`` the port its body writes, as a body
+writing a port of a closed net it holds must since 2026-11-27. ``Orders`` is the
+net's own port, where a transcript ``inject``s the order: since that day every
+net not declared open is closed, the loaded net included.
 
 The template is registered, so a unit has a saved form and ``Field`` is
 serializable through it, as the ``roll-call`` net registers its own.
@@ -69,7 +71,7 @@ def a_shot_is_waiting(graph: ExecutableGraph) -> bool:
 @petri_net(name="trays", description="A unit is handed an order through one tray and its shots are collected from another")
 def trays() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Orders", str),
+        ListPlaceNode("Orders", str, port=True),
         ListPlaceNode("Field", ExecutableGraph, [unit_template()], nested=True),
         ListPlaceNode("Reports", str),
         FunctionTransitionNode("Hand Over", hand_over),

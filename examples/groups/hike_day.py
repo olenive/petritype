@@ -19,7 +19,7 @@ def _(mo):
 
         A hiker has one store of energy, the place **Energy**, and three concerns that all
         read it and change it (`examples/groups/hike.py`). Each concern is a **group**, drawn
-        as a dashed frame titled with its name: **Walk** spends two energy on each leg of the
+        as a dotted frame titled with its name: **Walk** spends two energy on each leg of the
         trail, **Eat** gains three from a snack when the hiker is too tired to walk, and
         **Rest** gains one on a bench when there is nothing left to eat. `Energy` belongs to
         every concern at once, so it is in no group and stands outside the frames.

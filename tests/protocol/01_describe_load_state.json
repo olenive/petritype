@@ -114,7 +114,8 @@
         {
          "name": "Receiving",
          "type_name": "<label>",
-         "serializable": true
+         "serializable": true,
+         "port": true
         },
         {
          "name": "Sorting",

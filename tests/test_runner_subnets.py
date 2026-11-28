@@ -32,7 +32,7 @@ from petritype.core.serialisation import Templates  # noqa: E402
 from petritype.runner.owner import Owner  # noqa: E402
 from petritype.runner.process import Gauges  # noqa: E402
 from petritype.runner.registry import Registry  # noqa: E402
-from petritype.runtime import ControlSpec, SetTokens  # noqa: E402
+from petritype.runtime import ControlSpec, Extend, SetTokens  # noqa: E402
 from tests.protocol_nets.levels import Hero, level, levels  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
@@ -165,9 +165,29 @@ def clear_lobby(_clicked):
     return SetTokens(Port("Level", "Lobby"), [])
 
 
+KNIGHTS = {knight.name: knight for knight in (
+    Knight(name="Ada", role="Knight"), Knight(name="Bo", role="Mage"), Knight(name="Cy", role="Bard"),
+)}
+
+
+def send_to(port: str):
+    """A control's command: a copy of the knight the press names, put at the level's
+    ``port``. The world is closed, so a knight from outside it comes in by one of its
+    own controls, or enters at its door."""
+    def to_command(name: str):
+        return Extend(Port("Level", port), [KNIGHTS[name].model_copy()])
+    return to_command
+
+
 @petri_net(
     name="keyed-world", description="Knights enter a level whose ports are keyed",
-    controls=lambda: {"clear": ControlSpec("Level", "button", "Clear the lobby", clear_lobby)},
+    controls=lambda: {
+        "clear": ControlSpec("Level", "button", "Clear the lobby", clear_lobby),
+        "admit": ControlSpec("Level", "select", "A knight into the lobby", send_to("Lobby"),
+                             {"options": list(KNIGHTS)}),
+        "release": ControlSpec("Level", "select", "A knight into the exit hall", send_to("Exit Hall"),
+                               {"options": list(KNIGHTS)}),
+    },
 )
 def keyed_world() -> ExecutableGraph:
     return construct([
@@ -275,7 +295,7 @@ ship = Templates.register("Runner Ship", _ship)
 @petri_net(name="harbour", description="A ship loads its hold, then goes for scrap")
 def harbour() -> ExecutableGraph:
     return construct([
-        ListPlaceNode("Harbour", ExecutableGraph, [ship()], nested=True),
+        ListPlaceNode("Harbour", ExecutableGraph, [ship()], nested=True, port=True),  # where the runner injects
         ListPlaceNode("Scrapyard", str),
         FunctionTransitionNode("Scrap", scrap),
         ArgumentEdgeToTransition("Harbour", "Scrap", "ship"),
@@ -316,13 +336,14 @@ def yard_world() -> ExecutableGraph:
     ])
 
 
-@petri_net(name="levels-eve", description="Two levels, the second with a hero in its arena from its definition")
+@petri_net(name="levels-eve", description="Two levels, the second with heroes in it from its definition")
 def levels_eve() -> ExecutableGraph:
-    """The two levels, with Eve in level 2's arena from the level's definition: a
-    level is closed (it marks its ports), so a token from outside reaches only its
-    ports, and a token in its arena starts there or walks in (since 2026-11-23)."""
+    """The two levels, with Eve in level 2's arena and three heroes in its lobby
+    from the level's definition: the world and its levels are closed, so a token
+    from outside reaches only their ports, and the world, which marks none, takes
+    none (since 2026-11-27)."""
     second = construct([
-        ListPlaceNode("Lobby", Hero, port=True),
+        ListPlaceNode("Lobby", Hero, [Hero(name=name, fought=False) for name in ("Bram", "Cato", "Dara")], port=True),
         ListPlaceNode("Arena", Hero, [Hero(name="Eve", fought=False)]),
         ListPlaceNode("Exit Hall", Hero, port=True),
     ], template="Level")
@@ -332,6 +353,29 @@ def levels_eve() -> ExecutableGraph:
         SubnetPlaceNode("Level 2", second),
         ListPlaceNode("Outside", Hero),
     ])
+
+
+@petri_net(name="open-levels", description="The world of the two levels, declared open")
+def open_levels() -> ExecutableGraph:
+    """The world of ``levels``, the same places, transitions and seed, declared
+    open: a closed world shields its levels (since 2026-11-27), so an inject
+    addressed to a level, by path, lands at the level's port only when the world
+    around it is open."""
+    return construct([
+        ListPlaceNode("Door", Hero, [Hero(name="Ada", fought=False)]),
+        SubnetPlaceNode("Level 1", level()),
+        SubnetPlaceNode("Level 2", level()),
+        ListPlaceNode("Outside", Hero),
+        FunctionTransitionNode("Enter", moves),
+        ArgumentEdgeToTransition("Door", "Enter", "hero"),
+        ReturnedEdgeFromTransition("Enter", Port("Level 1", "Lobby")),
+        FunctionTransitionNode("Climb", moves),
+        ArgumentEdgeToTransition(Port("Level 1", "Exit Hall"), "Climb", "hero"),
+        ReturnedEdgeFromTransition("Climb", Port("Level 2", "Lobby")),
+        FunctionTransitionNode("Leave", moves),
+        ArgumentEdgeToTransition(Port("Level 2", "Exit Hall"), "Leave", "hero"),
+        ReturnedEdgeFromTransition("Leave", "Outside"),
+    ], open=True)
 
 
 # --- slow bodies on a port, outside and inside ----------------------------------------------------
@@ -626,7 +670,7 @@ class TestReferences:
         lines = await h.send("press", {"control": "clear"})
         removed = outer(lines, "removed")
         assert [(r["place"], r["port"]) for r in removed] == [("Level", "Lobby")] * 2
-        lines = await h.send("inject", {"place": "Level", "port": "Exit Hall", "token": {"name": "Cy", "role": "Bard"}})
+        lines = await h.send("press", {"control": "release", "value": "Cy"})
         [added] = outer(lines, "added")
         assert (added["place"], added["port"], added["keys"]) == ("Level", "Exit Hall", {"name": "Cy", "role": "Bard"})
 
@@ -634,19 +678,17 @@ class TestReferences:
         h = await loaded(keyed_world, net="keyed-world")
         mages = {"clauses": [{"key": "role", "values": ["Mage"]}]}
         await h.send("set_filter", {"filter": mages, "path": [{"place": "Level"}]})
-        lines = await h.send("inject", {"place": "Level", "port": "Lobby", "token": {"name": "Ada", "role": "Knight"}})
+        lines = await h.send("press", {"control": "admit", "value": "Ada"})
         [hidden] = outer(lines, "hidden")
         assert (hidden["kind"], hidden["place"], hidden["port"]) == ("added", "Level", "Lobby")
         assert set(hidden["subnet_marking_versions"]) == {"Level"}
-        lines = await h.send("inject", {"place": "Level", "port": "Lobby", "token": {"name": "Bo", "role": "Mage"}})
+        lines = await h.send("press", {"control": "admit", "value": "Bo"})
         assert outer(lines, "added")[0]["port"] == "Lobby"
 
 
 class TestState:
     async def test_a_subnet_places_entry_holds_its_subnet_and_its_ports_under_the_token_limit(self):
         h = await loaded(levels_eve, net="levels-eve")
-        for name in ("Bram", "Cato", "Dara"):
-            await h.send("inject", {"place": "Level 2", "port": "Lobby", "token": {"name": name, "fought": False}})
         entry = result(await h.send("get_state", {"token_limit": 2}))["marking"]["places"]["Level 2"]
         assert entry["subnet"]["count"] == 4, "its ports included, and its own places"
         assert entry["ports"]["Lobby"]["count"] == 3 and len(entry["ports"]["Lobby"]["tokens"]) == 2
@@ -675,13 +717,19 @@ class TestState:
 
 class TestRequests:
     async def test_a_ports_tokens_are_read_and_put_both_ways_with_the_subnets_ids(self):
-        h = await loaded(levels, net="levels")
-        lines = await h.send("inject", {"place": "Level 1", "port": "Lobby", "token": {"name": "Bram", "fought": False}})
-        by_pair = result(lines)
-        lines = await h.send("inject", {"place": "Lobby", "path": L1, "token": {"name": "Cato", "fought": False}})
-        by_place = result(lines)
-        assert (by_pair["id"], by_place["id"]) == ("1", "2"), "one counter, the subnet's"
-        assert by_place["path"] == L1 and "path" not in by_pair
+        """The world's own ``Enter`` puts a hero into level 1's lobby by the pair, and an
+        inject by path, at the subnet, puts another, the world being declared open. The
+        closed world refuses both injects (``closed_net``): by the pair since it marks
+        no port (``tests/test_runner_closed_nets.py``), and by path since it shields
+        its levels (since 2026-11-27)."""
+        closed = await loaded(levels, net="levels")
+        hero = {"name": "Cato", "fought": False}
+        assert error(await closed.send("inject", {"place": "Level 1", "port": "Lobby", "token": hero})) == "closed_net"
+        assert error(await closed.send("inject", {"place": "Lobby", "path": L1, "token": hero})) == "closed_net"
+        h = await loaded(open_levels, net="open-levels")
+        await h.send("step")  # Enter: Ada, through the pair
+        by_place = result(await h.send("inject", {"place": "Lobby", "path": L1, "token": hero}))
+        assert by_place["id"] == "2" and by_place["path"] == L1, "one counter, the subnet's: Ada is its 1"
         outside = result(await h.send("get_place_tokens", {"place": "Level 1", "port": "Lobby"}))
         inside = result(await h.send("get_place_tokens", {"place": "Lobby", "path": L1}))
         assert outside["tokens"] == inside["tokens"] and [t["id"] for t in inside["tokens"]] == ["1", "2"]
@@ -747,12 +795,14 @@ class TestTwoViews:
         assert sequence(lines) == ["nested:launched", "nested:distributed", "nested:fireable", "result"]
 
     async def test_after_a_change_of_a_port_both_nets_fireable_sets_are_compared_the_outer_first(self):
-        h = await loaded(levels, net="levels")
+        h = await loaded(open_levels, net="open-levels")  # open, so that an inject by path reaches a level
         lines = await h.send("inject", {"place": "Exit Hall", "path": L2, "token": {"name": "Cy", "fought": True}})
         assert sequence(lines) == ["nested:added", "fireable", "result"], "the level's set did not change"
         assert outer(lines, "fireable")[0]["transitions"] == ["Enter", "Leave"]
-        lines = await h.send("inject", {"place": "Level 2", "port": "Lobby", "token": {"name": "Di", "fought": False}})
-        assert sequence(lines) == ["added", "nested:fireable", "result"]
+        lines = await h.send("step")  # Enter, the world's own firing, at level 1's lobby by the pair
+        assert sequence(lines) == ["launched", "distributed", "fireable", "nested:fireable", "result"], "both changed"
+        lines = await h.send("inject", {"place": "Lobby", "path": L2, "token": {"name": "Di", "fought": False}})
+        assert sequence(lines) == ["nested:added", "nested:fireable", "result"], "the world's set did not change"
 
     async def test_a_nets_fireable_precedes_the_nets_inside_it_at_two_depths(self):
         h = await loaded(tower, net="tower", params={"room": "inner_first"})
@@ -816,7 +866,7 @@ class TestVersions:
         assert result(await h.send("get_state", {"path": FLOOR}))["marking_version"] == floor_version + 1
 
     async def test_a_reader_that_follows_one_net_sees_a_change_told_by_the_other_as_a_gap(self):
-        h = await loaded(levels, net="levels")
+        h = await loaded(open_levels, net="open-levels")  # open, so that an inject by path reaches a level
         world_lines, level_lines = [], []
         level_id = await nested_id(h, L1)
         sends = [("step", {})] * 5  # Enter, Walk In, Fight, Win, Climb; then one told by the level

@@ -6,7 +6,9 @@ takes the front order and *surveys* ``Promotions`` (a ``SurveyEdge``: a deep cop
 promotion, zero or more, none consumed). The survey does not hold the transition back when
 ``Promotions`` is empty, which it usually is: a shop with no promotion running still sells
 things. With an edge that needs a token, ``Price Order`` would need an "empty twin" guarded
-on the place being empty. The seed is empty everywhere; what happens is what is put in.
+on the place being empty. The seed is empty everywhere; what happens is what is put in, at
+the two ports, ``Orders`` and ``Promotions``: the net is closed, as every net not declared
+open is, so from outside it takes tokens only there.
 
 The edge that *takes* every token, zero or more (a ``DrainEdge``), has its own example
 beside this one, the traffic light (``traffic_light.py``): every car waiting goes while
@@ -42,6 +44,8 @@ from petritype.core.executable_graph_components import (
 )
 
 PLACES = ("Orders", "Promotions", "Priced", "Discounts Applied")
+# Where orders and promotions come in from outside (an ``inject``, or ``put`` below).
+PORTS = ("Orders", "Promotions")
 
 
 # --- bodies ---------------------------------------------------------------------------------
@@ -59,7 +63,7 @@ def price_order(order: str, promotions: list[str]) -> tuple[str, list[str]]:
 
 def build_shop(record_events: bool = True) -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
-        *[ListPlaceNode(name, str) for name in PLACES],
+        *[ListPlaceNode(name, str, port=name in PORTS) for name in PLACES],
         # An order is priced with whatever promotions are running, none included.
         FunctionTransitionNode("Price Order", price_order),
         ArgumentEdgeToTransition("Orders", "Price Order", "order"),
@@ -107,7 +111,7 @@ def step(graph: ExecutableGraph) -> int:
 
 
 def marking(graph: ExecutableGraph, places=SHOWN) -> dict[str, list[str]]:
-    return {place: list(graph.place_named(place).tokens) for place in places}
+    return {place: list(graph.place(place).tokens) for place in places}
 
 
 def main() -> None:

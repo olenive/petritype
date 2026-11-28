@@ -198,6 +198,44 @@ class TestRunnerDisableKeepsSelectionPolicy:
         assert graph.place_named('In').tokens == [1]
 
 
+async def _fire_once(graph, how):
+    if how == "execute_graph":
+        await ExecutableGraphOperations.execute_graph(graph)
+    else:
+        await Runner.run(RunContext(graph=graph, mode=ExecutionMode(how)), stop_after_n_firings=1)
+
+
+class TestANaNPriorityIsAnError:
+    """A priority that is NaN ranks neither above nor below any other, so the default
+    selector raises ``ValueError`` naming the transition, and whatever asked fails, as
+    when a priority raises (since 2026-11-28). Until then the pick depended on the
+    order of declaration and round robin raised ``IndexError``. Infinity ranks as
+    itself. The protocol runner leaves ``priority`` out for both
+    (``tests/test_runner_owner.py``)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("how", ["execute_graph", "sequential", "concurrent"])
+    @pytest.mark.parametrize("tie_break", ["first_declared", "last_declared", "round_robin"])
+    @pytest.mark.parametrize("nan_on", ["A", "B"])
+    async def test_whatever_asked_fails_and_nothing_fires(self, how, tie_break, nan_on):
+        graph = _shared_input_graph(
+            ['A', 'B'], priorities={nan_on: lambda graph: float("nan")}, tie_break=tie_break,
+        )
+        with pytest.raises(ValueError, match=f"the priority of transition '{nan_on}' is NaN"):
+            await _fire_once(graph, how)
+        assert graph.place_named('In').tokens == [1] and graph.fired_counts == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tie_break", ["first_declared", "last_declared", "round_robin"])
+    async def test_infinity_ranks_as_itself(self, tie_break):
+        graph = _shared_input_graph(
+            ['A', 'B', 'C'],
+            priorities={'A': lambda graph: float("-inf"), 'C': lambda graph: float("inf")}, tie_break=tie_break,
+        )
+        await _fire_once(graph, "execute_graph")
+        assert graph.fired_counts == {'C': 1}
+
+
 class TestTransitionIsEnabledDeprecation:
     """`transition_is_enabled` was renamed `transition_is_fireable` ("enabled" now means only
     the Enable/Disable switch); the old name is a warning alias with the same answer."""

@@ -4,6 +4,7 @@ from typing import Dict
 
 class SafeMerge:
 
+    @staticmethod
     def _two_dictionaries(dict1: Dict, dict2: Dict, allow_common_key_value_pairs=False) -> Dict:
 
         def intersection_keys_with_different_tokens(dict1: Dict, dict2: Dict) -> Dict:
@@ -28,6 +29,7 @@ class SafeMerge:
                 + f"more than once:\n{intersection}"
             )
 
+    @staticmethod
     def dictionaries(*dicts: Dict, allow_common_key_value_pairs=False) -> Dict:
         try:
             combined = reduce(

@@ -4,8 +4,9 @@ Cancelling a concurrent run must not orphan in-flight transition bodies: inputs
 are consumed at launch (stage 1) and outputs are deposited by the loop, so an
 abandoned task would mean silently lost tokens on top of the cancellation.
 Both concurrent loops cancel their in-flight tasks and clear
-``graph.in_flight`` on the way out — including when a failed firing (not a
-caller cancellation) is what interrupts the run.
+``graph.in_flight`` on the way out. A failed firing lets the other bodies in
+flight land first (since 2026-11-28), for the net's
+``cancellation_timeout_seconds``, and cancels those still running then.
 """
 
 import asyncio
@@ -85,9 +86,10 @@ class TestConcurrentCancellation:
         assert graph.in_flight == set()
 
     @pytest.mark.asyncio
-    async def test_failed_firing_does_not_orphan_peers(self):
-        # When one lane's body raises, TransitionFailedError propagates out of the
-        # run — the other lane's still-running body must be cancelled with it.
+    async def test_failed_firing_does_not_orphan_a_peer_still_running_at_the_timeout(self):
+        # When one lane's body raises, the other lane's body may land, for the net's
+        # cancellation_timeout_seconds (since 2026-11-28; until then it was cancelled
+        # at once). Still running then, it is cancelled with the failure, and named.
         started = asyncio.Event()
         body_state = {'cancelled': False}
 
@@ -115,10 +117,13 @@ class TestConcurrentCancellation:
             FunctionTransitionNode('Boom', boom),
             ReturnedEdgeFromTransition('Boom', 'B Out'),
             ListPlaceNode('B Out', int),
-        ])
+        ], cancellation_timeout_seconds=0.05)
         ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT)
-        with pytest.raises(TransitionFailedError):
+        with pytest.raises(TransitionFailedError) as raised:
             await Runner.run_to_completion(ctx)
         await _settle()
         assert body_state['cancelled'] is True
         assert graph.in_flight == set()
+        [note] = raised.value.__notes__
+        assert 'Slow' in note and 'cancelled, not landed' in note
+        assert graph.place_named('A Out').tokens == []

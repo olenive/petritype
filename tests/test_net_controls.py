@@ -9,6 +9,8 @@ The traffic light's own controls are tested beside its other tests, in
 """
 
 import asyncio
+import math
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -45,8 +47,9 @@ def even_first(graph) -> bool:
 
 
 def build_numbers(seed=(2,)):
+    """``In`` is a port: the program, not only the net's own controls, adds numbers there."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("In", int, list(seed)),
+        ListPlaceNode("In", int, list(seed), port=True),
         ListPlaceNode("Out", int),
         FunctionTransitionNode("Move", move, guard=even_first),
         ArgumentEdgeToTransition("In", "Move", "n"),
@@ -124,7 +127,80 @@ def marking(owner):
     return {place.name: list(place.tokens) for place in owner._loaded.outer.graph.places}
 
 
+def changed(spec: ControlSpec, **fields) -> ControlSpec:
+    """``spec`` with ``fields`` set after it was made, which its own check does not see."""
+    for name, value in fields.items():
+        setattr(spec, name, value)
+    return spec
+
+
 # --- the runtime ---------------------------------------------------------------------------------
+
+
+def nothing(_value):
+    return None
+
+
+class TestTheDeclarationIsChecked:
+    """Since 2026-11-28 a ``ControlSpec`` is checked as it is made, with
+    ``ValueError``; until then it took anything, and a kind or an action outside the
+    vocabulary failed only the protocol runner's load."""
+
+    @pytest.mark.parametrize("kind, config, action, problem", [
+        ("knob", {}, None, "kind is one of button, toggle, slider, select, text, not 'knob'"),
+        ("button", {}, "launch", "action is one of inject, fire, enable or None, not 'launch'"),
+        ("button", [1], None, "config is a dict"),
+        ("toggle", {"value": 1}, None, "a toggle's value is True or False, not 1"),
+        ("slider", {"start": 5, "stop": 1}, None, "start 5 is above its stop 1"),
+        ("slider", {"step": 0}, None, "step is above zero, not 0"),
+        ("slider", {"step": -0.5}, None, "step is above zero, not -0.5"),
+        ("slider", {"start": math.nan}, None, "start is a finite number, not nan"),
+        ("slider", {"stop": math.inf}, None, "stop is a finite number, not inf"),
+        ("slider", {"value": -math.inf}, None, "value is a finite number, not -inf"),
+        ("slider", {"start": True}, None, "start is a finite number, not True"),
+        ("slider", {"step": "1"}, None, "step is a finite number, not '1'"),
+        ("slider", {"value": None}, None, "value is a finite number, not None"),
+        ("slider", {"start": 0, "stop": 10, "value": 11}, None, "value 11 is outside its range 0..10"),
+        ("slider", {"start": 3, "value": 2}, None, "value 2 is outside its range 3..None"),
+        ("select", {}, None, "at least one option"),
+        ("select", {"options": []}, None, "at least one option"),
+        ("select", {"options": "ab"}, None, "at least one option"),
+        ("select", {"options": ["a", 1]}, None, "options are strings"),
+        ("select", {"options": ["a"], "value": "b"}, None, "value 'b' is not one of its options ['a']"),
+        ("text", {"placeholder": 3}, None, "a text's placeholder is a string, not 3"),
+        ("text", {"value": ["typed"]}, None, "a text's value is a string"),
+    ])
+    def test_a_declaration_no_widget_can_show_is_refused(self, kind, config, action, problem):
+        with pytest.raises(ValueError, match=re.escape(problem)):
+            ControlSpec("In", kind, "Bad", nothing, config, action=action)
+
+    @pytest.mark.parametrize("fields, problem", [
+        ({"node": None}, "node is the name of a place or a transition"),
+        ({"label": 3}, "a control's label is a string, not 3"),
+        ({"to_command": "Extend"}, "to_command is a function"),
+    ])
+    def test_the_fields_are_of_their_types(self, fields, problem):
+        given = {"node": "In", "kind": "button", "label": "Bad", "to_command": nothing, **fields}
+        with pytest.raises(ValueError, match=re.escape(problem)):
+            ControlSpec(**given)
+
+    def test_what_the_notebooks_examples_and_runner_declare_is_accepted(self):
+        """A config's other keys are the runtime's own, and what it leaves out takes
+        the widget's default: a slider with no range, a select with no initial value.
+        A node of ``""`` targets none."""
+        assert len(CONTROLS) == 9
+        for spec in (
+            ControlSpec("", "slider", "Free", nothing),
+            ControlSpec("", "slider", "Point", nothing, {"start": 2, "stop": 2, "value": 2}),
+            ControlSpec("", "slider", "Down", nothing, {"start": -1.5, "stop": 0.5, "step": 0.25, "value": -1}),
+            ControlSpec("", "select", "Pick", nothing, {"options": ("a",)}),
+            ControlSpec("", "toggle", "On", nothing),
+            ControlSpec("", "text", "Say", nothing, {"kind": "warn"}),
+            ControlSpec.inject("Waiting", str, "+ Car", kind="text", config={"placeholder": "name"}),
+            ControlSpec.enable("Sort", "Sorter on", value=False),
+            ControlSpec("Sorted", "button", "Clear", nothing, {"kind": "warn"}),
+        ):
+            ControlSpec.validate(spec)
 
 
 class TestTheConstructors:
@@ -296,8 +372,8 @@ class TestTheTopology:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("controls, place_styles", [
-        ({"bad": ControlSpec("In", "knob", "Bad", lambda v: None)}, None),
-        ({"bad": ControlSpec("In", "button", "Bad", lambda v: None, action="launch")}, None),
+        ({"bad": changed(ControlSpec("In", "button", "Bad", lambda v: None), kind="knob")}, None),
+        ({"bad": changed(ControlSpec("In", "button", "Bad", lambda v: None), action="launch")}, None),
         ({"bad": ControlSpec("Nowhere", "button", "Bad", lambda v: None)}, None),
         ({"bad": ControlSpec("In", "button", "Bad", lambda v: None, {"kind": object()})}, None),
         ({}, {"Nowhere": PlaceStyle(fill="token")}),
@@ -305,6 +381,8 @@ class TestTheTopology:
         (lambda: ["not", "a", "map"], None),
     ], ids=["kind", "action", "node", "config", "style place", "fill", "not a map"])
     async def test_a_bad_declaration_fails_the_load(self, controls, place_styles):
+        """A kind or an action outside the vocabulary is refused as the spec is made
+        (``TestTheDeclarationIsChecked``); one set on it afterwards fails the load."""
         @petri_net(name="bad", controls=controls, place_styles=place_styles)
         def bad():
             return build_numbers()

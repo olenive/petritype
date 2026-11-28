@@ -25,11 +25,17 @@ from petritype.core.executable_graph_components import (  # noqa: E402
     ListPlaceNode,
     MutateEdge,
     NestedNets,
+    ReadAllEdge,
+    ReadEdge,
+    ReadWhereEdge,
     ReturnedEdgeFromTransition,
+    SubnetPlaceNode,
 )
+from petritype.core.keys import Filter  # noqa: E402
 from petritype.core.serialisation import Templates  # noqa: E402
 from petritype.runner.owner import Owner  # noqa: E402
 from petritype.runner.registry import Registry  # noqa: E402
+from petritype.runtime import ControlSpec, SetTokens  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
@@ -100,9 +106,12 @@ def tick(x: int) -> int:
 
 
 @Templates.template("Counter")
-def build_counter() -> ExecutableGraph:
+def build_counter(low: tuple[int, ...] = ()) -> ExecutableGraph:
+    """A counter that starts with ``low`` to count. ``Low`` is its port: the
+    runner injects there when every net around the counter is declared open, and
+    the outer bodies put there."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Low", int),
+        ListPlaceNode("Low", int, list(low), port=True),
         ArgumentEdgeToTransition("Low", "Up", "x"),
         FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
@@ -128,26 +137,26 @@ async def fill(box: Box) -> None:
 
 
 def seed_box(label: str, low: list[int]) -> Box:
-    counter = build_counter()
-    NestedNets.put(counter, "Low", low)
-    return Box(label=label, counter=counter)
+    return Box(label=label, counter=build_counter(tuple(low)))
 
 
 @petri_net(name="boxes", description="Boxes holding counters")
-def boxes() -> ExecutableGraph:
+def boxes(open: bool = False) -> ExecutableGraph:
     """Outer first, so that ``Fill``, once its guard lets it, fires before the
-    counters it reaches into."""
+    counters it reaches into. ``open`` declares it open, so that the runner
+    reaches the counters' ports: a closed net shields the nets inside it (since
+    2026-11-27)."""
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Shelf", Box, [seed_box("a", [1]), seed_box("b", [2])], nested=True, stepping="outer_first"),
-        ListPlaceNode("Spare", Box, [seed_box("c", [])], nested=True, stepping="outer_first"),
-        MutateEdge("Shelf", "Fill", "box"),
+        ListPlaceNode("Spare", Box, [seed_box("c", [])], nested=True, stepping="outer_first", port=True),
+        MutateEdge("Shelf", "Fill", "box", reaches=("Low",)),
         FunctionTransitionNode("Fill", fill, guard=lambda g: g.params["fill"]),
-    ], params={"fill": False})
+    ], params={"fill": False}, open=open)
 
 
-async def loaded_boxes():
+async def loaded_boxes(open: bool = False):
     harness = Harness(boxes)
-    await harness.send("load", {"net": "boxes"})
+    await harness.send("load", {"net": "boxes", "params": {"open": open}})
     state = result(await harness.send("get_state"))
     shelf = state["marking"]["places"]["Shelf"]["tokens"]
     spare = state["marking"]["places"]["Spare"]["tokens"]
@@ -204,6 +213,181 @@ class TestReadsWhileHeld:
         assert lines[0]["method"] == "nested" and lines[0]["params"]["event"]["method"] == "distributed"
         assert any("result" in line for line in lines), "the waiting get_token is answered"
 
+    async def test_a_read_edge_holds_the_inner_net_and_the_outer_state_shows_it_from_before_the_body(self):
+        gate = asyncio.Event()
+        modified = asyncio.Event()
+
+        async def inspect_and_push(trigger: int, box: Box) -> int:
+            NestedNets.put(box.counter, "Low", [10, 20])
+            modified.set()
+            await gate.wait()
+            return trigger
+
+        @petri_net(name="read-nested")
+        def read_nested() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Triggers", int, [1]),
+                ListPlaceNode(
+                    "Shelf",
+                    Box,
+                    [seed_box("first", [1]), seed_box("second", [2])],
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode("Done", int),
+                ArgumentEdgeToTransition("Triggers", "Inspect", "trigger"),
+                ReadEdge("Shelf", "Inspect", "box", reaches=("Low",)),
+                FunctionTransitionNode("Inspect", inspect_and_push),
+                ReturnedEdgeFromTransition("Inspect", "Done"),
+            ])
+
+        harness = Harness(read_nested)
+        await harness.send("load", {"net": "read-nested"})
+        shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
+        held_box_id = shelf[0]["id"]
+        held_net_id = shelf[0]["nets"][0]["nested_id"]
+        free_box_id = shelf[1]["id"]
+        free_net_id = shelf[1]["nets"][0]["nested_id"]
+
+        await harness.send("step", land=False)
+        task = asyncio.create_task(harness.pending.coroutine)
+        harness.pending = None
+        await modified.wait()
+
+        # Inner net of the ReadEdge token is held: reads by nested_id and by path both wait.
+        assert await harness.send("get_state", {"nested_id": held_net_id}) == []
+        assert await harness.send("get_state", {"path": [step("Shelf", held_box_id, "counter")]}) == []
+        # get_token on the holding token waits because it serializes the inner net live.
+        assert await harness.send("get_token", {"id": held_box_id}) == []
+
+        # Outer get_state answers immediately using the eagerly captured pre-body snapshot (count == 1).
+        mid_outer = result(await harness.send("get_state"))
+        assert mid_outer["marking"]["places"]["Shelf"]["tokens"][0]["nets"][0]["count"] == 1
+
+        # Unread sibling token and its inner net answer immediately.
+        assert result(await harness.send("get_state", {"nested_id": free_net_id}))["marking"]["places"]["Low"]["count"] == 1
+        assert result(await harness.send("get_token", {"id": free_box_id}))["nets"][0]["count"] == 1
+
+        gate.set()
+        landing = await task
+        lines = await harness._follow(await harness.owner.completed(landing, NOW), True)
+        results = [line["result"] for line in lines if "result" in line]
+        # Deferred reads see the post-body state (1 + 2 = 3 tokens in Low).
+        inner_states = [r for r in results if r.get("nested_id") == held_net_id]
+        assert len(inner_states) == 2
+        assert all(s["marking"]["places"]["Low"]["count"] == 3 for s in inner_states)
+        token_result = next(r for r in results if r.get("id") == held_box_id)
+        assert token_result["nets"][0]["count"] == 3
+
+    async def test_a_read_where_edge_holds_only_the_inner_net_it_matched(self):
+        gate = asyncio.Event()
+        modified = asyncio.Event()
+
+        async def inspect_match(trigger: int, box: Box) -> int:
+            NestedNets.put(box.counter, "Low", [99])
+            modified.set()
+            await gate.wait()
+            return trigger
+
+        @petri_net(name="read-where-nested")
+        def read_where_nested() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Triggers", int, [1]),
+                ListPlaceNode(
+                    "Shelf",
+                    Box,
+                    [seed_box("alpha", [1]), seed_box("beta", [2])],
+                    keys=("label",),
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode("Done", int),
+                ArgumentEdgeToTransition("Triggers", "Inspect", "trigger"),
+                ReadWhereEdge("Shelf", "Inspect", "box", where=Filter.where(label="beta"), reaches=("Low",)),
+                FunctionTransitionNode("Inspect", inspect_match),
+                ReturnedEdgeFromTransition("Inspect", "Done"),
+            ])
+
+        harness = Harness(read_where_nested)
+        await harness.send("load", {"net": "read-where-nested"})
+        shelf = result(await harness.send("get_state"))["marking"]["places"]["Shelf"]["tokens"]
+        alpha_net_id = shelf[0]["nets"][0]["nested_id"]
+        beta_box_id = shelf[1]["id"]
+        beta_net_id = shelf[1]["nets"][0]["nested_id"]
+
+        await harness.send("step", land=False)
+        task = asyncio.create_task(harness.pending.coroutine)
+        harness.pending = None
+        await modified.wait()
+
+        # Matched token ("beta") is held; non-matching front token ("alpha") is free.
+        assert await harness.send("get_state", {"nested_id": beta_net_id}) == []
+        assert await harness.send("get_token", {"id": beta_box_id}) == []
+        assert result(await harness.send("get_state", {"nested_id": alpha_net_id}))["marking"]["places"]["Low"]["count"] == 1
+
+        gate.set()
+        landing = await task
+        await harness._follow(await harness.owner.completed(landing, NOW), True)
+        assert result(await harness.send("get_state", {"nested_id": beta_net_id}))["marking"]["places"]["Low"]["count"] == 2
+
+    async def test_a_read_all_edge_holds_every_inner_net_in_its_place(self):
+        gate = asyncio.Event()
+        modified = asyncio.Event()
+
+        async def inspect_all(trigger: int, boxes: list[Box]) -> int:
+            for box in boxes:
+                NestedNets.put(box.counter, "Low", [7])
+            modified.set()
+            await gate.wait()
+            return trigger
+
+        @petri_net(name="read-all-nested")
+        def read_all_nested() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Triggers", int, [1]),
+                ListPlaceNode(
+                    "Shelf",
+                    Box,
+                    [seed_box("a", [1]), seed_box("b", [2])],
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode(
+                    "Spare",
+                    Box,
+                    [seed_box("c", [3])],
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode("Done", int),
+                ArgumentEdgeToTransition("Triggers", "InspectAll", "trigger"),
+                ReadAllEdge("Shelf", "InspectAll", "boxes", reaches=("Low",)),
+                FunctionTransitionNode("InspectAll", inspect_all),
+                ReturnedEdgeFromTransition("InspectAll", "Done"),
+            ])
+
+        harness = Harness(read_all_nested)
+        await harness.send("load", {"net": "read-all-nested"})
+        places = result(await harness.send("get_state"))["marking"]["places"]
+        shelf_nets = [t["nets"][0]["nested_id"] for t in places["Shelf"]["tokens"]]
+        spare_net = places["Spare"]["tokens"][0]["nets"][0]["nested_id"]
+
+        await harness.send("step", land=False)
+        task = asyncio.create_task(harness.pending.coroutine)
+        harness.pending = None
+        await modified.wait()
+
+        # Both inner nets in Shelf are held; Spare is untouched and answers immediately.
+        for nid in shelf_nets:
+            assert await harness.send("get_state", {"nested_id": nid}) == []
+        assert result(await harness.send("get_state", {"nested_id": spare_net}))["marking"]["places"]["Low"]["count"] == 1
+
+        gate.set()
+        landing = await task
+        await harness._follow(await harness.owner.completed(landing, NOW), True)
+        for nid in shelf_nets:
+            assert result(await harness.send("get_state", {"nested_id": nid}))["marking"]["places"]["Low"]["count"] == 2
+
 
 # --- addressing, results and lifetime ----------------------------------------------------------
 
@@ -222,7 +406,7 @@ class TestAddressing:
             "counter", 1, path, nested_id, "Counter",
         )
         assert by_id["marking_version"] == 0
-        assert by_id["topology"]["places"][0] == {"name": "Low", "type_name": "int", "serializable": True}
+        assert by_id["topology"]["places"][0] == {"name": "Low", "type_name": "int", "serializable": True, "port": True}
         assert result(await harness.send("get_state"))["topology"]["places"][0] == {
             "name": "Shelf", "type_name": "Box", "serializable": True, "nested": True, "stepping": "outer_first",
         }
@@ -255,7 +439,12 @@ class TestAddressing:
                 and line["params"]["event"]["method"] == "launched"] == ["Up", "Up"]
 
     async def test_inject_and_get_token_in_an_inner_net(self):
-        harness, shelf, spare = await loaded_boxes()
+        """Inside boxes declared open. Inside closed ones the runner reaches no
+        counter, at its port either (since 2026-11-27)."""
+        closed, _shelf, spare = await loaded_boxes()
+        refused = await closed.send("inject", {"place": "Low", "nested_id": spare[0]["nets"][0]["nested_id"], "token": 5})
+        assert error(refused) == "closed_net" and "is inside net" in message(refused)
+        harness, shelf, spare = await loaded_boxes(open=True)
         nested_id = spare[0]["nets"][0]["nested_id"]
         lines = await harness.send("inject", {"place": "Low", "nested_id": nested_id, "token": 5})
         assert methods(lines) == ["nested", "nested", "result"]
@@ -368,6 +557,170 @@ class TestAddressing:
         assert fresh[0]["nets"][0]["nested_id"] != nested_id
 
 
+# --- the owner's records of inner nets: kept while their tokens live, pruned after ------------------------
+
+
+def discard(box: Box) -> str:
+    return box.label
+
+
+def keep_moving(box: Box) -> Box:
+    return box
+
+
+def drop_first_box(_value, graph: ExecutableGraph):
+    shelf = graph.place_named("Shelf").tokens
+    return SetTokens(place="Shelf", tokens=list(shelf[1:])) if shelf else None
+
+
+class TestInnerNetRecords:
+
+    async def test_live_inner_nets_and_subnets_keep_their_versions_while_others_are_destroyed(self):
+        """A record dropped while its net lives would be built afresh, at version 0.
+        The net is declared open, so that the runner's injects reach the nets
+        inside it and raise their versions."""
+        @petri_net(name="prune-test")
+        def prune_test() -> ExecutableGraph:
+            subnet = ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Port", int, [1], port=True),
+            ])
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode(
+                    "Trash",
+                    Box,
+                    [seed_box("a", []), seed_box("b", []), seed_box("c", [])],
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode(
+                    "Keep",
+                    Box,
+                    [seed_box("keeper", [])],
+                    nested=True,
+                    stepping="outer_first",
+                ),
+                ListPlaceNode("Moved", Box, [], nested=True, stepping="outer_first"),
+                ListPlaceNode("Log", str),
+                SubnetPlaceNode("Sub", subnet),
+                ArgumentEdgeToTransition("Trash", "Discard", "box"),
+                FunctionTransitionNode("Discard", discard, priority=lambda _g: 10.0),
+                ReturnedEdgeFromTransition("Discard", "Log"),
+                ArgumentEdgeToTransition("Keep", "Move", "box"),
+                FunctionTransitionNode("Move", keep_moving, priority=lambda _g: 1.0),
+                ReturnedEdgeFromTransition("Move", "Moved"),
+            ], open=True)
+
+        harness = Harness(prune_test)
+        await harness.send("load", {"net": "prune-test"})
+        places = result(await harness.send("get_state"))["marking"]["places"]
+        trash = [token["nets"][0]["nested_id"] for token in places["Trash"]["tokens"]]
+        keeper = places["Keep"]["tokens"][0]["nets"][0]["nested_id"]
+        subnet = places["Sub"]["subnet"]["nested_id"]
+        await harness.send("inject", {"place": "Low", "nested_id": keeper, "token": 5})
+        await harness.send("inject", {"place": "Port", "nested_id": subnet, "token": 2})
+
+        async def versions():
+            return [result(await harness.send("get_state", {"nested_id": nested_id}))["marking_version"]
+                    for nested_id in (keeper, subnet)]
+
+        assert await versions() == [1, 1]
+        for destroyed in trash:
+            assert result(await harness.send("step"))["transition"] == "Discard"
+            assert error(await harness.send("get_state", {"nested_id": destroyed})) == "unknown_net"
+            assert await versions() == [1, 1]
+        assert result(await harness.send("step"))["transition"] == "Move"
+        assert await versions() == [1, 1]
+
+    async def test_a_token_read_while_a_body_runs_leaves_the_bodys_events_for_the_landing(self):
+        """The body holds box ``a``, in no place until the firing lands, and changes
+        box ``r``, which it holds through a mutate edge. A ``get_token`` in box ``b``
+        answered meanwhile writes its answer alone, as every other read does: what
+        the body did inside ``r`` is told at the landing, before its ``failed``, and
+        no ``fireable`` is compared while it runs. Box ``a``, put back by the
+        failure, keeps its net's version, raised by an inject before the step: the
+        net is declared open, so that the inject reaches box ``a``'s counter."""
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def fail_slowly(box: Box, held: Box) -> str:
+            NestedNets.put(held.counter, "Low", [6])
+            entered.set()
+            await gate.wait()
+            raise RuntimeError("boom")
+
+        @petri_net(name="inflight-read")
+        def inflight_read() -> ExecutableGraph:
+            graph = ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Inbox", Box, [seed_box("a", [])], nested=True, stepping="outer_first"),
+                ListPlaceNode("Shelf", Box, [seed_box("r", [])], nested=True, stepping="outer_first"),
+                ListPlaceNode("Other", Box, [seed_box("b", [3])], nested=True, stepping="outer_first"),
+                ListPlaceNode("Out", str),
+                ArgumentEdgeToTransition("Inbox", "Fail", "box"),
+                MutateEdge("Shelf", "Fail", "held", reaches=("Low",)),
+                FunctionTransitionNode("Fail", fail_slowly),
+                ReturnedEdgeFromTransition("Fail", "Out"),
+            ], open=True)
+            graph.restore_tokens_on_failure = True
+            return graph
+
+        harness = Harness(inflight_read)
+        await harness.send("load", {"net": "inflight-read"})
+        places = result(await harness.send("get_state"))["marking"]["places"]
+        taken = places["Inbox"]["tokens"][0]["nets"][0]["nested_id"]
+        free = places["Other"]["tokens"][0]["nets"][0]["nested_id"]
+        await harness.send("inject", {"place": "Low", "nested_id": taken, "token": 5})
+        free_token = result(await harness.send("get_state", {"nested_id": free}))["marking"]["places"]["Low"]["tokens"][0]
+
+        await harness.send("step", land=False)
+        task = asyncio.create_task(harness.pending.coroutine)
+        harness.pending = None
+        await entered.wait()
+        meanwhile = await harness.send("get_token", {"id": free_token["id"], "nested_id": free})
+        assert [line.get("method", "answer") for line in meanwhile] == ["answer"]
+        assert result(meanwhile)["value"] == 3
+
+        gate.set()
+        landing = await task
+        lines = await harness._follow(await harness.owner.completed(landing, NOW), True)
+        methods = [line.get("method") for line in lines]
+        added = next(line for line in lines if line.get("method") == "nested")
+        assert added["params"]["path"][0]["place"] == "Shelf"
+        assert added["params"]["event"]["method"] == "added"
+        assert methods.index("nested") < methods.index("failed")
+        assert next(line for line in lines if line.get("method") == "failed")["params"]["restored"] is True
+        assert result(await harness.send("get_state", {"nested_id": taken}))["marking_version"] == 1
+
+    async def test_the_owner_forgets_the_records_of_inner_nets_that_die(self):
+        """Reaches inside the owner (``_loaded.inner``) on purpose: no request reads
+        the record of a net that has died, since every address is resolved through
+        the live nets (``unknown_net``), so dropping the record shows only as memory
+        the owner gives back. A net dies here by a firing that takes its box and by
+        a control that removes its box."""
+        @petri_net(name="dying-boxes", controls={
+            "drop_first": ControlSpec(node="Shelf", kind="button", label="Drop first", to_command=drop_first_box),
+        })
+        def dying_boxes() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Trash", Box, [seed_box("a", [])], nested=True, stepping="outer_first"),
+                ListPlaceNode("Shelf", Box, [seed_box("b", []), seed_box("c", [])], nested=True),
+                ListPlaceNode("Log", str),
+                ArgumentEdgeToTransition("Trash", "Discard", "box"),
+                FunctionTransitionNode("Discard", discard),
+                ReturnedEdgeFromTransition("Discard", "Log"),
+            ])
+
+        harness = Harness(dying_boxes)
+        await harness.send("load", {"net": "dying-boxes"})
+        places = result(await harness.send("get_state"))["marking"]["places"]
+        [a] = [int(token["nets"][0]["nested_id"]) for token in places["Trash"]["tokens"]]
+        b, c = [int(token["nets"][0]["nested_id"]) for token in places["Shelf"]["tokens"]]
+        assert set(harness.owner._loaded.inner) == {a, b, c}
+        assert result(await harness.send("step"))["transition"] == "Discard"
+        assert set(harness.owner._loaded.inner) == {b, c}
+        assert result(await harness.send("press", {"control": "drop_first"}))["status"] == "pressed"
+        assert set(harness.owner._loaded.inner) == {c}
+
+
 # --- names that the text form of version 1 could not spell, and two depths ------------------------
 
 
@@ -382,16 +735,13 @@ class Odd(BaseModel):
 
 
 def odd_inside() -> ExecutableGraph:
-    graph = ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("#Low", int),
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode("#Low", int, [1]),
         ArgumentEdgeToTransition("#Low", "Up/1", "x"),
         FunctionTransitionNode("Up/1", tick),
         ReturnedEdgeFromTransition("Up/1", "#High/"),
         ListPlaceNode("#High/", int),
     ])
-    NestedNets.put(graph, "#Low", [1])
-    graph.drain_events()
-    return graph
 
 
 @petri_net(name="odd/names", description="Names with a slash or a leading hash")
@@ -412,7 +762,7 @@ class Nest(BaseModel):
 def nest_level(child: Nest | None = None) -> ExecutableGraph:
     """A counter with one token to count, holding ``child`` in its place ``Inside``."""
     nodes = [
-        ListPlaceNode("Low", int),
+        ListPlaceNode("Low", int, [1]),
         ArgumentEdgeToTransition("Low", "Up", "x"),
         FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
@@ -420,10 +770,7 @@ def nest_level(child: Nest | None = None) -> ExecutableGraph:
     ]
     if child is not None:
         nodes.append(ListPlaceNode("Inside", Nest, [child], nested=True))
-    graph = ExecutableGraphOperations.construct_graph(nodes)
-    NestedNets.put(graph, "Low", [1])
-    graph.drain_events()
-    return graph
+    return ExecutableGraphOperations.construct_graph(nodes)
 
 
 def ring(bell: int) -> int:
@@ -509,16 +856,16 @@ class TestTransitOverTheProtocol:
             lines = await harness.send("step")
             fired.append(result(lines)["transition"])
         assert len(fired) == 10
-        assert [line["params"]["event"]["method"] for line in lines if line.get("method") == "nested"] == ["param_changed"]
+        assert [line for line in lines if line.get("method") == "nested"] == [], "departing reaches nothing inside the cabin"
         moved = result(await harness.send("get_state", {"nested_id": cabin}))
         in_transit = result(await harness.send("get_place_tokens", {"place": "In Transit"}))["tokens"][0]["id"]
         assert moved["path"] == [step("In Transit", in_transit, "cabin")] and moved["nested_id"] == cabin
         lines = await harness.send("step")
         assert result(lines)["transition"] == "Arrive"
         assert [(line["params"]["event"]["method"], line["params"]["event"]["params"].get("place"))
-                for line in lines if line.get("method") == "nested"][:4] == [
-            ("param_changed", None), ("removed", "Doors Closed"), ("added", "Doors Open"), ("added", "Announcements"),
-        ], "stopped, the doors opened, and the announcement, all by the outer body"
+                for line in lines if line.get("method") == "nested"][:3] == [
+            ("removed", "Doors Closed"), ("added", "Doors Open"), ("added", "Announcements"),
+        ], "the doors opened, and the announcement, both by the outer body at the cabin's ports"
         arrived = result(await harness.send("get_state", {"nested_id": cabin}))
         at_central = result(await harness.send("get_place_tokens", {"place": "Central"}))["tokens"][0]["id"]
         assert arrived["path"] == [step("Central", at_central, "cabin")]

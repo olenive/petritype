@@ -30,10 +30,12 @@ from examples.edges_on_empty_places.shop import (  # noqa: E402
 from examples.edges_on_empty_places.traffic_light import (  # noqa: E402
     Colour, build_traffic_light, go, green_and_someone_waiting, traffic_light,
 )
+from petritype import petri_net  # noqa: E402
 from petritype.core.events import Failed, Fired, Mutated  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,
     DrainEdge,
+    ExecutableGraph,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
@@ -592,6 +594,11 @@ class TestOverTheWire:
             "the car alone: nothing from Light, which is read"
 
 
+@petri_net(name="spare-lamps", description="Lamps of the light's colours, brought in from outside")
+def spare_lamps() -> ExecutableGraph:
+    return ExecutableGraphOperations.construct_graph([ListPlaceNode("Spares", Colour, port=True)])
+
+
 class TestTheTrafficLightsControls:
     """What the traffic light declares beside the net (PROTOCOL.md §5.1, §11): the light's
     ``Colour``, the controls ``car`` and ``change``, and the light's place style."""
@@ -609,18 +616,32 @@ class TestTheTrafficLightsControls:
 
     @pytest.mark.asyncio
     async def test_a_colour_round_trips_through_inject_and_get_token(self):
-        owner = Owner(Registry.from_factories([traffic_light]))
+        """In through a port of colours, since ``Light`` is the light's own place and no
+        port: an inject there is refused, and only ``Change`` changes the light. Out of
+        ``Light`` as of any place."""
+        owner = Owner(Registry.from_factories([spare_lamps]))
         _, injected, blue = await send_all(owner, self.NOW, [
-            ("load", {"net": "traffic-light"}),
-            ("inject", {"place": "Light", "token": "green"}),
-            ("inject", {"place": "Light", "token": "blue"}),
+            ("load", {"net": "spare-lamps"}),
+            ("inject", {"place": "Spares", "token": "green"}),
+            ("inject", {"place": "Spares", "token": "blue"}),
         ])
         assert injected[0]["method"] == "added" and injected[0]["params"]["color"] == "#32cd32"
         assert blue[-1]["error"]["code"] == "invalid_token"
-        light = owner._loaded.outer.graph.place_named("Light").tokens
-        assert type(light[-1]) is Colour and light == ["red", "green"]
+        spares = owner._loaded.outer.graph.place_named("Spares").tokens
+        assert type(spares[-1]) is Colour and spares == ["green"]
         (token,) = await send_all(owner, self.NOW, [("get_token", {"id": injected[-1]["result"]["id"]})])
         assert token[-1]["result"]["value"] == "green" and token[-1]["result"]["kind"] == "json"
+
+        owner = Owner(Registry.from_factories([traffic_light]))
+        _, refused, state = await send_all(owner, self.NOW, [
+            ("load", {"net": "traffic-light"}),
+            ("inject", {"place": "Light", "token": "green"}),
+            ("get_state", None),
+        ])
+        assert refused[-1]["error"]["code"] == "closed_net"
+        (light,) = state[-1]["result"]["marking"]["places"]["Light"]["tokens"]
+        (token,) = await send_all(owner, self.NOW, [("get_token", {"id": light["id"]})])
+        assert token[-1]["result"]["value"] == "red" and token[-1]["result"]["kind"] == "json"
 
     @pytest.mark.asyncio
     async def test_the_two_controls_and_the_style_in_the_topology(self):

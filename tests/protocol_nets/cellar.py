@@ -10,7 +10,15 @@ years}``, and every place of bottles declares one key, ``years``. The house
 keeps one bottle on its ``Table`` and reaches the cellar's ``Rack``, its port,
 through ``Age``, which mutates the bottle at the front of the rack, adding a
 year, and produces nothing. The cellar's net has no transition of its own, so a
-deep step always comes to ``Age`` while the rack holds a bottle.
+deep step always comes to ``Age`` while the rack holds a bottle. The house is
+declared open (since 2026-11-27). Since that day every net not declared open is
+closed, and a closed net refuses a write from outside at the pair of a subnet's
+port and, since later that day, at any place of a net inside it, the cellar's
+port included, however it is addressed. Open, the house lets the transcript bring
+a bottle into the rack with an ``inject`` by the pair on the house, as it did
+before 2026-11-27, and the cellar, which is closed, takes it at ``Rack`` because
+``Rack`` is its port. For part of 2026-11-27, before the house was declared open,
+the transcript addressed that ``inject`` to the cellar by path instead.
 
 The cellar's net is stamped with the template name ``Cellar`` by
 ``construct_graph(template=...)`` and not registered by that name, as the
@@ -62,4 +70,4 @@ def house() -> ExecutableGraph:
         SubnetPlaceNode("Cellar", cellar()),
         FunctionTransitionNode("Age", age),
         MutateEdge(Port("Cellar", "Rack"), "Age", "bottle"),
-    ])
+    ], open=True)

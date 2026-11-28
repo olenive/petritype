@@ -150,19 +150,22 @@ def test_a_subnet_and_a_tokens_net_have_groups_of_their_own():
 
 
 def test_a_group_name_may_hold_any_character_and_a_node_keeps_its_name():
-    """No character of a name has a meaning: the empty string and a name that
-    looks like a path or a prefix are names like any other. A group may share a
-    name with a node."""
+    """No character of a name has a meaning: a name that looks like a path or a
+    prefix, or that is one space, is a name like any other. A group may share a
+    name with a node. The empty string is no name (since 2026-11-28,
+    ``tests/test_empty_names.py``)."""
     odd = ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Walk", int, group="Walk"),
         ListPlaceNode("B", int, group="a/b: c|d"),
-        ListPlaceNode("C", int, group=""),
+        ListPlaceNode("C", int, group=" "),
         FunctionTransitionNode("T", same, group="Walk"),
         ArgumentEdgeToTransition("Walk", "T", "x"),
         ReturnedEdgeFromTransition("T", "B"),
     ])
-    assert odd.groups == ("Walk", "a/b: c|d", "")
+    assert odd.groups == ("Walk", "a/b: c|d", " ")
     assert odd.place_named("Walk").name == "Walk"
+    with pytest.raises(ValidationError, match="empty string"):
+        ListPlaceNode("C", int, group="")
 
 
 def test_the_group_is_a_string_or_none():
@@ -296,7 +299,7 @@ def drawing(graph: ExecutableGraph):
 
 
 def frame(position: int, name: str, indices: list[int]) -> str:
-    return f'subgraph cluster_{position} {{\nlabel="{name}";\nstyle=dashed;\n' + "".join(f"{i};\n" for i in indices) + "}\n"
+    return f'subgraph cluster_{position} {{\nlabel="{name}";\nstyle=dotted;\n' + "".join(f"{i};\n" for i in indices) + "}\n"
 
 
 def test_a_net_with_no_groups_draws_the_source_it_drew_before():
@@ -309,7 +312,9 @@ def test_a_net_with_no_groups_draws_the_source_it_drew_before():
             pydigraph.to_dot(node_attr_fn, edge_attr_fn)
 
 
-def test_each_group_is_a_dashed_frame_with_its_name_in_order_holding_its_members():
+def test_each_group_is_a_dotted_frame_with_its_name_in_order_holding_its_members():
+    """Dotted since 2026-11-28, where it was dashed, so that a frame is not taken for
+    the longer dashes of an open net's places."""
     from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
     f = farm()
     pydigraph, node_attr_fn, edge_attr_fn, index = drawing(f)
@@ -333,6 +338,19 @@ def test_a_subnet_place_in_a_group_is_drawn_in_its_frame_and_the_subnet_draws_it
     assert RustworkxToGraphviz.group_frames(inside) == [("Grinding", [inner["Hopper"], inner["Grind"]])]
 
 
+def test_a_port_in_a_group_has_one_dotted_ring_inside_the_dotted_frame():
+    """The mill's own drawing: ``Hopper``, a port in the group ``Grinding``, is drawn
+    as every port is since 2026-11-28, one dotted ring and no second one, and the
+    frame around it is dotted as every frame is; neither changes the other."""
+    from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
+    inside, node_attr_fn, edge_attr_fn, inner = drawing(farm().subnet("Mill"))
+    source = RustworkxToGraphviz.dot_source(inside, node_attr_fn, edge_attr_fn)
+    assert frame(0, "Grinding", [inner["Hopper"], inner["Grind"]]) in source
+    assert "peripheries" not in source
+    for port in ("Hopper", "Flour"):
+        assert node_attr_fn(inside[inner[port]])["style"] == '"filled,dotted"'
+
+
 def test_a_frame_title_draws_any_name_as_it_is():
     from petritype.plotting.rustworkx_to_graphviz import NodeLabel, RustworkxToGraphviz
     assert NodeLabel.quoted_text('a "b" \\ c\nd {e|f}') == 'a \\"b\\" \\\\ c\\nd {e|f}'
@@ -343,7 +361,7 @@ def test_a_frame_title_draws_any_name_as_it_is():
 
 @pytest.mark.skipif(shutil.which("dot") is None, reason="needs the Graphviz dot program")
 def test_graphviz_puts_each_member_inside_its_frame():
-    """Read back from Graphviz itself: each cluster is dashed, titled with its
+    """Read back from Graphviz itself: each cluster is dotted, titled with its
     group's name, and holds exactly its members; the nodes in no group stand
     outside every frame."""
     from petritype.plotting.rustworkx_to_graphviz import RustworkxToGraphviz
@@ -363,7 +381,7 @@ def test_graphviz_puts_each_member_inside_its_frame():
         "Milling": sorted([index["Mill"], index["Cart"]]),
         "Selling": [index["Sell"]],
     }
-    assert all(obj["style"] == "dashed" for obj in objects if obj.get("name", "").startswith("cluster_"))
+    assert all(obj["style"] == "dotted" for obj in objects if obj.get("name", "").startswith("cluster_"))
     image = RustworkxToGraphviz.draw(pydigraph, node_attr_fn, edge_attr_fn)
     assert image.width > 0 and image.height > 0
     assert SimpleGraphvizVisualization.graph(pydigraph).width > 0
