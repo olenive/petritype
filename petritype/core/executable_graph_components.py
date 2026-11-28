@@ -85,7 +85,9 @@ def _function_type_hints(fn: Any) -> dict[str, Any]:
 
     Keyed weakly by ``fn`` and validated against ``__annotations__`` identity so
     callables can be garbage-collected and rare runtime annotation mutations are
-    never stale.
+    never stale. A body with no hints to read, a ``functools.partial`` or an
+    object with ``__call__``, gives none on every Python: ``get_type_hints``
+    raises ``TypeError`` for one before 3.14 and returns ``{}`` from 3.14 on.
     """
     annotations = getattr(fn, "__annotations__", None)
     try:
@@ -1497,7 +1499,7 @@ class ExecutableGraph(BaseModel):
             if not isinstance(transition, FunctionTransitionNode):
                 raise NotImplementedError("Currently only FunctionTransitionNode is supported.")
             place_type = place.type  # This needs to be the value of the 'type' field of the place.
-            argument_type = get_type_hints(transition.function).get(edge.argument)
+            argument_type = _function_type_hints(transition.function).get(edge.argument)
             if isinstance(edge, DrainEdge):
                 # Exactly list[T] for the place's T, which also covers a place of lists.
                 ExecutableGraphCheck.ensure_argument_takes_every_token(edge, place, transition, argument_type)
@@ -1529,7 +1531,7 @@ class ExecutableGraph(BaseModel):
                 # validated against their destination places at fire time.
                 continue
             place_type = place.type
-            return_type = get_type_hints(transition.function).get('return')
+            return_type = _function_type_hints(transition.function).get('return')
             if edge.return_index is not None and return_type is not None:
                 # Indexed edge: the token flowing along it is the return tuple's
                 # element at return_index, not the whole return value.
@@ -1593,7 +1595,7 @@ class ExecutableGraph(BaseModel):
             place = _edge_place(places_by_name, edge.place_node_name, "Non-consuming", edge.transition_node_name)
             transition = transition_names_to_nodes[edge.transition_node_name]
             place_type = place.type
-            argument_type = get_type_hints(transition.function).get(edge.argument)
+            argument_type = _function_type_hints(transition.function).get(edge.argument)
             if isinstance(edge, (SurveyEdge, ReadAllEdge)):
                 ExecutableGraphCheck.ensure_argument_takes_every_token(edge, place, transition, argument_type)
             elif isinstance(edge, ReadEdge):

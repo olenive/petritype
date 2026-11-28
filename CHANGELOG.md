@@ -69,6 +69,7 @@ A minor version, since several changes can break a working program: each entry m
 - **Removed:** the Jupyter notebooks in `examples/legacy_notebooks`, kept since the move to marimo. No test ran them; the marimo notebooks beside each example replace them.
 - The README gains a contents line and a table of the ten input edges, saying what each consumes, copies and accepts, what it claims in concurrent mode and how it is drawn. It describes the concurrent claims, the head-of-line trade and what the claims cannot cover, says that the errors share `PetritypeError`, and says, as `petri_net`'s docstring now does, that restarting a `24/7` net after a failure is the host's to do.
 - `PROPOSED_DESIGN_GOALS.md` and `DESIGN_RUNNER.md` are cut down to an overview of each area, where to look in the code, the decisions with their reasons and what is still open: the code, with its docstrings and tests, `PROTOCOL.md` and this changelog say how things work. `PROTOCOL.md` changes in one reference in §12.3, with nothing on the wire changed.
+- **Fixed on Python 3.12 and 3.13:** a net whose transition body is a `functools.partial` or an object with `__call__` could not be constructed: reading the body's type hints raised `TypeError`, where Python 3.14 reads none. Such a body has no hints to check on any version, so its edges' types are checked as it fires, as before on 3.14. The suite failed on those two versions in CI for this reason.
 
 ## 0.5.0, 2026-11-23
 
