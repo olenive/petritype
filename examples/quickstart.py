@@ -10,7 +10,7 @@ README documents, so an ordering regression must fail here.
 """
 
 import asyncio
-from petritype.core.executable_graph_components import (
+from petritype import (
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
@@ -36,8 +36,8 @@ graph, fired = asyncio.run(
     ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=3)
 )
 
-print(graph.place_named('Output').tokens)  # [2, 4, 6]
+print(graph.place('Output').tokens)  # [2, 4, 6]
 
-assert graph.place_named('Output').tokens == [2, 4, 6], graph.place_named('Output').tokens
+assert graph.place('Output').tokens == [2, 4, 6], graph.place('Output').tokens
 assert fired == 3, fired
 print("quickstart OK")

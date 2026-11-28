@@ -30,7 +30,28 @@ jobs:
           cache-suffix: lint
 
       - name: Lint
-        run: uv run --extra dev ruff check petritype tests
+        run: uv run --extra dev ruff check petritype tests examples scripts
+
+  # The promise py.typed makes: code written the way the README teaches, against
+  # the public API, type-checks (tests/typecheck, set in pyproject's [tool.pyright]).
+  # The pyright package bundles pyright and runs it on the `node` on PATH, which the
+  # runner image has; with none, it downloads Node into its own cache first.
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # uv checks PyPI's certificate against the root bundle compiled into its
+          # binary; 0.13.4 is the first release without the compromised
+          # eMudhra/emSign roots (October 2026).
+          version: ">=0.13.4"
+          enable-cache: true
+          cache-suffix: typecheck
+
+      - name: Type-check
+        run: uv run --extra dev pyright
 
   test:
     name: tests (py${{ matrix.python }})

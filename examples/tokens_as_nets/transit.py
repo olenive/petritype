@@ -6,10 +6,15 @@ stops of a loop (Depot, Central, Harbour, Airport, and round again) or in
 transit; each vehicle holds an inner net, its cabin, whose structure depends on
 the kind of vehicle (a bus seats and stands its passengers, a ferry has two
 decks, a shuttle only seats). The outer net never shares a place with a cabin:
-it reaches inside only through the vehicle tokens its bodies hold, putting
-passengers in at the door, taking them out, opening the doors, setting the
-cabin's ``stopped`` parameter and posting an announcement. Passengers are plain
-strings.
+it reaches inside only through the vehicle tokens its bodies hold, and only at
+the cabin's ports, the places a cabin marks ``port=True``: putting passengers in
+at the door and taking them out, opening the doors, and posting an announcement.
+Each edge of the city that hands a body a vehicle names the ports that body
+reaches (``reaches``), and a body is held to them, so the drawing of the city
+shows every way it reaches into a cabin. Passengers are plain strings. The city
+is closed too, as every net not declared open is: its one port is ``Depot``,
+where a vehicle comes into service from outside (an ``inject`` of a saved
+vehicle, PROTOCOL.md §11).
 
 The net runs its journey on its own. The vehicle's state is where its doors
 are: its cabin holds one token per door, the door's name, in one of two
@@ -101,7 +106,7 @@ def discard(announcement: str) -> None:
 
 
 def _count(graph: ExecutableGraph, place: str) -> int:
-    return len(graph.place_named(place).tokens)
+    return len(graph.place(place).tokens)
 
 
 def boarding(cabin: ExecutableGraph) -> bool:
@@ -123,11 +128,13 @@ def under_way(cabin: ExecutableGraph) -> bool:
 
 def _doors_places(doors: tuple[str, ...]) -> list:
     """The three places every template has besides where passengers go:
-    announcements, and the two places of the doors, every door seeded open."""
+    announcements, and the two places of the doors, every door seeded open. All
+    three are ports: ``Arrive``, a body of the city, opens the doors and puts up
+    the announcement."""
     return [
-        ListPlaceNode("Announcements", str),
-        ListPlaceNode("Doors Open", str, list(doors)),
-        ListPlaceNode("Doors Closed", str),
+        ListPlaceNode("Announcements", str, port=True),
+        ListPlaceNode("Doors Open", str, list(doors), port=True),
+        ListPlaceNode("Doors Closed", str, port=True),
     ]
 
 
@@ -167,7 +174,7 @@ def build_cabin(seats: int = 2, capacity: int = 6) -> ExecutableGraph:
         return _count(graph, "Seats") >= graph.params["seats"] and boarding(graph)
 
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Door", str),
+        ListPlaceNode("Door", str, port=True),
         ListPlaceNode("Seats", str),
         ListPlaceNode("Standing", str),
         *_doors_places(DOORS["Cabin"]),
@@ -184,7 +191,7 @@ def build_cabin(seats: int = 2, capacity: int = 6) -> ExecutableGraph:
         ArgumentEdgeToTransition("Standing", "Go To Door From Standing", "passenger"),
         ReturnedEdgeFromTransition("Go To Door From Standing", "Door"),
         *_doors_transitions(("Door", "Seats", "Standing")),
-    ], params={"stopped": True, "seats": seats, "capacity": capacity}, template="Cabin")
+    ], params={"seats": seats, "capacity": capacity}, template="Cabin")
 
 
 @Templates.template("Deck")
@@ -194,7 +201,7 @@ def build_deck(capacity: int = 40) -> ExecutableGraph:
     back to the door from either deck."""
 
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Door", str),
+        ListPlaceNode("Door", str, port=True),
         ListPlaceNode("Lower Deck", str),
         ListPlaceNode("Upper Deck", str),
         *_doors_places(DOORS["Deck"]),
@@ -211,7 +218,7 @@ def build_deck(capacity: int = 40) -> ExecutableGraph:
         ArgumentEdgeToTransition("Upper Deck", "Go To Door From Upper Deck", "passenger"),
         ReturnedEdgeFromTransition("Go To Door From Upper Deck", "Door"),
         *_doors_transitions(("Door", "Lower Deck", "Upper Deck")),
-    ], params={"stopped": True, "capacity": capacity}, template="Deck")
+    ], params={"capacity": capacity}, template="Deck")
 
 
 @Templates.template("Pod")
@@ -220,7 +227,7 @@ def build_pod(seats: int = 4) -> ExecutableGraph:
     no more than it seats."""
 
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Door", str),
+        ListPlaceNode("Door", str, port=True),
         ListPlaceNode("Seats", str),
         *_doors_places(DOORS["Pod"]),
         FunctionTransitionNode("Sit", passenger_moves, guard=_seat_free),
@@ -230,7 +237,7 @@ def build_pod(seats: int = 4) -> ExecutableGraph:
         ArgumentEdgeToTransition("Seats", "Go To Door", "passenger"),
         ReturnedEdgeFromTransition("Go To Door", "Door"),
         *_doors_transitions(("Door", "Seats")),
-    ], params={"stopped": True, "seats": seats, "capacity": seats}, template="Pod")
+    ], params={"seats": seats, "capacity": seats}, template="Pod")
 
 
 # Registered by the decorators above: what rebuilds a cabin from a saved vehicle.
@@ -259,11 +266,11 @@ def departure_from(stop: str):
     """The body of ``Depart <stop>``. ``destination`` is the net parameter of that
     name, handed to the body because it declares a parameter so named and nothing
     else supplies it: when it names a place every departure goes there, and when it
-    is ``None`` the vehicle goes on to the next stop of the loop."""
+    is ``None`` the vehicle goes on to the next stop of the loop. It leaves the cabin
+    as it is: every door is closed already, which is what lets it depart."""
 
     def depart(vehicle: Vehicle, destination: Optional[str]) -> Vehicle:
         vehicle.destination = destination if destination is not None else NEXT_STOP[stop]
-        NestedNets.set_param(vehicle.cabin, "stopped", False)
         return vehicle
     depart.__name__ = f"depart_{stop.lower()}"
     return depart
@@ -276,7 +283,6 @@ def arrive(vehicle: Vehicle) -> Vehicle:
     inner transition: they are all closed until then, so ``Depart`` would fire
     again before the cabin had its turn."""
     cabin = vehicle.cabin
-    NestedNets.set_param(cabin, "stopped", True)
     NestedNets.put(cabin, "Doors Open", NestedNets.take(cabin, "Doors Closed", _count(cabin, "Doors Closed")))
     NestedNets.put(cabin, "Announcements", [f"Arrived at {vehicle.destination}"])
     return vehicle
@@ -290,7 +296,7 @@ def route_arrival(vehicle: Vehicle) -> dict[str, Vehicle]:
 
 
 def _front_vehicle(graph: ExecutableGraph, stop: str) -> Vehicle:
-    return graph.place_named(stop).tokens[0]
+    return graph.place(stop).tokens[0]
 
 
 def can_board(stop: str):
@@ -319,9 +325,10 @@ def can_depart(stop: str):
 def city_nodes_and_edges(vehicles: dict[str, list[Vehicle]], waiting: dict[str, list[str]]) -> list:
     """Every node and edge of the city, with the given seed: the vehicles standing
     at each stop and the passengers waiting on each platform. Every place of
-    vehicles steps outer first: the city fires before its cabins."""
+    vehicles steps outer first: the city fires before its cabins. ``Depot`` is the
+    city's port, where a new vehicle comes into service."""
     nodes = [
-        ListPlaceNode(stop, Vehicle, vehicles.get(stop, []), nested=True, stepping="outer_first")
+        ListPlaceNode(stop, Vehicle, vehicles.get(stop, []), nested=True, stepping="outer_first", port=stop == "Depot")
         for stop in LOCATIONS
     ]
     nodes += [ListPlaceNode(f"Platform@{stop}", str, waiting.get(stop, [])) for stop in LOCATIONS]
@@ -333,12 +340,12 @@ def city_nodes_and_edges(vehicles: dict[str, list[Vehicle]], waiting: dict[str, 
         nodes += [
             FunctionTransitionNode(f"Board {stop}", board, guard=can_board(stop)),
             ArgumentEdgeToTransition(f"Platform@{stop}", f"Board {stop}", "passenger"),
-            MutateEdge(stop, f"Board {stop}", "vehicle"),
+            MutateEdge(stop, f"Board {stop}", "vehicle", reaches=("Door",)),
         ]
     for stop in LOCATIONS:
         nodes += [
             FunctionTransitionNode(f"Alight {stop}", alight, guard=can_alight(stop)),
-            MutateEdge(stop, f"Alight {stop}", "vehicle"),
+            MutateEdge(stop, f"Alight {stop}", "vehicle", reaches=("Door",)),
             ReturnedEdgeFromTransition(f"Alight {stop}", "Arrived"),
         ]
     for stop in LOCATIONS:
@@ -349,7 +356,9 @@ def city_nodes_and_edges(vehicles: dict[str, list[Vehicle]], waiting: dict[str, 
         ]
     nodes += [
         FunctionTransitionNode("Arrive", arrive, output_distribution_function=route_arrival),
-        ArgumentEdgeToTransition("In Transit", "Arrive", "vehicle"),
+        ArgumentEdgeToTransition(
+            "In Transit", "Arrive", "vehicle", reaches=("Doors Closed", "Doors Open", "Announcements"),
+        ),
         *[ReturnedEdgeFromTransition("Arrive", stop) for stop in LOCATIONS],
     ]
     return nodes
@@ -419,7 +428,7 @@ def label(fired: Union[str, InnerFiring]) -> str:
 def travelling(city: ExecutableGraph) -> int:
     """How many passengers have not arrived: waiting on a platform or aboard a vehicle."""
     waiting = sum(_count(city, f"Platform@{stop}") for stop in LOCATIONS)
-    vehicles = [vehicle for place in (*LOCATIONS, "In Transit") for vehicle in city.place_named(place).tokens]
+    vehicles = [vehicle for place in (*LOCATIONS, "In Transit") for vehicle in city.place(place).tokens]
     return waiting + sum(aboard(vehicle) for vehicle in vehicles)
 
 
@@ -452,7 +461,7 @@ def main() -> None:
     events = asyncio.run(journey(city))
     for number, line in enumerate(describe_log(events), 1):
         print(f"{number:3}. {line}")
-    print("arrived:", ", ".join(city.place_named("Arrived").tokens))
+    print("arrived:", ", ".join(city.place("Arrived").tokens))
 
 
 if __name__ == "__main__":

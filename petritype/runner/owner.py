@@ -142,7 +142,9 @@ from petritype.core.executable_graph_components import (
     MapTransitionNames,
     MutateEdge,
     NestedNets,
+    Questions,
     ReadEdge,
+    ReadOnlyError,
     SubnetPlaceNode,
     TokenIds,
     TransitionFailedError,
@@ -443,6 +445,7 @@ class Owner:
         # The outer net's version carries across load and reset (PROTOCOL.md §4).
         self._carried_version = 0
         self._loaded: Optional[_Loaded] = None
+        self._refusals_said: set[tuple[int, str]] = set()
 
     # --- read-only views for the io layer ---
 
@@ -969,7 +972,12 @@ class Owner:
                 found = _find(snapshot, token_id)
             else:
                 found = TokenIds.locate(net.graph, token_id)
-                self._flush(now, out)  # locate resyncs: report any repair first
+                # locate resyncs: report any repair first. Not while a firing is in
+                # flight: the flush would write what its body has done so far inside
+                # the nets it holds, and read those nets to compare ``fireable``, so
+                # like every other read this one leaves the events for the landing.
+                if self._loaded.in_flight is None:
+                    self._flush(now, out)
         # A port's tokens carry their subnet's ids, so only the net's own places
         # are searched (``_find``, ``TokenIds.locate``): one is read through its subnet.
         if found is None or not self._keeps(net, found[0], found[1]):
@@ -1360,6 +1368,13 @@ class Owner:
                 place_names_to_nodes=net.place_nodes,
                 transition_names_to_read_edges=net.read,
             )
+        except ReadOnlyError as refusal:
+            # A guard that asked to change a net: refused, and said on stderr once,
+            # since a transition that only reads as not fireable would hide it.
+            if (net.graph.net_id, transition.name) not in self._refusals_said:
+                self._refusals_said.add((net.graph.net_id, transition.name))
+                print(f"petritype runner: {refusal}", file=sys.stderr, flush=True)
+            return False
         except Exception:
             return False  # a guard that raises cannot let its transition fire
 
@@ -1372,7 +1387,9 @@ class Owner:
         for transition in graph.transitions:
             priority = None
             try:
-                value = float(transition.priority(graph)) if transition.priority is not None else 0.0
+                value = 0.0
+                if transition.priority is not None:
+                    value = float(Questions.ask("priority", transition.name, transition.priority, graph))
                 if math.isfinite(value):
                     priority = value
             except Exception:
@@ -1393,7 +1410,8 @@ class Owner:
         fireable = [t for t in graph.transitions if self._is_fireable(net, t)]
         if not fireable:
             return None
-        return (graph.transition_selector or default_transition_selector)(graph, fireable)
+        selector = graph.transition_selector or default_transition_selector
+        return Questions.ask("selector", None, selector, graph, fireable)
 
     def _select(self) -> Optional[tuple[_Net, FunctionTransitionNode]]:
         """The next firing anywhere: one deep step of the loaded net (§12.3),
@@ -1743,7 +1761,10 @@ class Owner:
         which does (§12.7); the port's subnet mints the id either way. The runner
         is outside every net, so a closed net takes the token only at one of its
         ports and refuses any other place, a port pair of one of its subnet places
-        included, with ``closed_net`` (since 2026-11-23, §12.7); nothing is added."""
+        included, with ``closed_net`` (since 2026-11-23, §12.7); nothing is added.
+        Since 2026-11-27 a net inside a closed net takes no token from the runner
+        at all, by ``path`` or by ``nested_id``, a closed net shielding the nets
+        inside it: every net around the one addressed must be declared open."""
         place = _string(params, "place")
         port = _optional_string(params, "port")
         if "token" not in params:
@@ -1763,7 +1784,11 @@ class Owner:
         try:
             self._apply(net, Extend(place=key, tokens=[token]))
         except ClosedNetError as error:  # the rule on closed nets (``ClosedNets``)
-            raise ProtocolError(ErrorCode.CLOSED_NET, str(error)) from error
+            # The command the inject is applied as names itself; the answer names the request.
+            said = ClosedNetError(
+                error.net, error.place, "an inject", error.undeclared, error.deeper, error.around,
+            )
+            raise ProtocolError(ErrorCode.CLOSED_NET, str(said)) from error
         except ValueError as error:  # the strict context's own type check
             raise ProtocolError(ErrorCode.INVALID_TOKEN, str(error)) from error
         events = self._flush(now, out)

@@ -79,7 +79,25 @@ put, taken or replaced only at its ports, an `inject` at any other place
 answers the new error code `closed_net`, and the topology of a net declared
 open carries the new optional field `open`, with a conformance net and a
 transcript for them (§3, §5.1, §6, §6.4, §10, §11, §12.7); the version stays
-2 (§10). Both runners
+2 (§10). On 2026-11-27 an edge's `reaches` stopped being a declaration alone
+in the Python library, which now holds a body to the ports its edge names;
+nothing on the wire changed (§5.1, §12.7). Later that day the Python library
+built stage two of the rule on closed nets: every net that does not declare
+itself open is closed, a net that marks no port included, and a body may not
+set the parameters of a net it holds, whatever the net marks. No field or
+code is new, and the conformance nets changed for it, with twelve
+transcripts re-recorded (§5.1, §6.4, §10, §11, §12.5, §12.7); the version
+stays 2 (§10). Later still that day a closed net came to shield the nets
+inside it in the Python library: the host's program and the runner write no
+place of a net inside a closed net, a subnet of it or a net one of its tokens
+carries, at any depth, unless every net around it is declared open, so an
+`inject` there by `path` or `nested_id` answers `closed_net`, at a port as
+anywhere else. No field or code is new, and three conformance nets were
+declared open for it, with five transcripts re-recorded (§3, §5.1, §6,
+§6.4, §10, §11, §12.7); the version stays 2 (§10). On 2026-11-28 the Rust
+library built all three, the reach, stage two and the shield, with its
+conformance nets changed to match, and the Rust runner replays all nineteen
+shared transcripts (§11, §12.7). Both runners
 implement it, the Rust one (`petritype-runner`, in `../petritype-rs`) and
 the Python one (`python -m petritype.runner`, `DESIGN_RUNNER.md`), and both replay the
 shared transcripts of §11; the Bevy visualiser (`../petritype-bevy`) hosts
@@ -122,7 +140,9 @@ are out of scope.
 - **Places and transitions are addressed by name.** Names are unique within a
   net (both libraries enforce it at build time). Names are what a user, a
   saved file and a URL know, and they survive a change of declaration order.
-  A name may hold any character, and none has a special meaning: a reference
+  A name may hold any character, and at least one (the Python library
+  refuses an empty name of a place, transition, group, parameter or control
+  at build since 2026-11-28), and none has a special meaning: a reference
   to something inside another thing is structured, a port place by the pair
   of its subnet place and its own name (§12.7), an inner net by a list of
   steps (§12.1).
@@ -171,6 +191,12 @@ told apart by their keys:
   `subprocess_output` itself.
 - Lines may be long (a full marking page); a host must accept lines of at
   least 16 MiB. Paged reads (§6) keep single responses well below that.
+- A request line is capped (since 2026-11-28 in the Python runner): 4 MiB
+  without its newline by default, another size where the runner's other
+  settings are (`PETRITYPE_RUNNER_MAX_LINE_BYTES`). A longer line is
+  discarded up to its newline without being read, answered with
+  `invalid_params` and the `id` `""`, since none could be read, as a line that
+  is not JSON is, and the process goes on serving the lines after it.
 - When stdin reaches end of file the net process exits; §6.3 says when,
   for a process that is running a body.
 
@@ -190,7 +216,7 @@ without parsing `message`:
 | `unknown_control` | `press` named a control the net does not declare (§6.6) |
 | `not_serializable` | the place has no JSON form, so a token cannot be injected or shown as JSON |
 | `invalid_token` | the JSON did not decode to the place's type |
-| `closed_net` | `inject` named a place of a closed net that is not one of its ports, a port pair of one of its subnet places included (§12.7, since 2026-11-23) |
+| `closed_net` | `inject` named a place of a closed net that is not one of its ports, a port pair of one of its subnet places included (§12.7, since 2026-11-23); since 2026-11-27 in the Python library and 2026-11-28 in the Rust one, also any place of a net inside a closed net, its ports included (§12.7) |
 | `unsupported` | this runtime cannot do this (for example `set_param` on a net that declares no parameters by name) |
 | `internal` | anything else; `message` says what |
 
@@ -277,12 +303,15 @@ once per generation and lays it out.
   nets in it, one of `"inner_first"`, `"take_turns"`, `"outer_first"` and
   `"passive"` (§12.3); `port?`, `true` on a place that the net's definition
   marks as a port (§12.7), which makes the net closed unless it declares
-  itself open (`open?`, below), in the net's own topology, whichever net it is: a
-  subnet, whose ports the net around it reaches by its edges, a net a token
-  carries, whose ports an outer edge may name in `reaches` (below), or the
-  loaded net (since 2026-11-23; until then only a subnet's topology showed
-  `port`, and a net that was no subnet showed none, whatever its definition
-  marked). A place whose tokens carry nets declares no ports of its own: the
+  itself open (`open?`, below; since 2026-11-27 in the Python library and
+  2026-11-28 in the Rust one, a net not declared open is closed whether or
+  not it marks a port, and its ports are where it takes tokens from
+  outside), in the net's own topology,
+  whichever net it is: a subnet, whose ports the net around it reaches by
+  its edges, a net a token carries, whose ports an outer edge may name in
+  `reaches` (below), or the loaded net (since 2026-11-23; until then only
+  a subnet's topology showed `port`, and a net that was no subnet showed
+  none, whatever its definition marked). A place whose tokens carry nets declares no ports of its own: the
   nets arrive in tokens as the net runs and may differ, so each token's net
   shows its own ports when it is read by `path` or `nested_id` (§12.3), and
   an edge's `reaches` is the outer net's statement of what it reaches;
@@ -320,11 +349,19 @@ once per generation and lays it out.
   itself): the names of the ports its body reaches in those tokens' nets, in
   the order the edge declares them, present only when it names one, such as
   `{"place": "Field", "transition": "Hand Over", "direction": "in", "kind":
-  "mutate", "reaches": ["Orders In"]}`. `reaches` is a declaration, as a
-  group is: it changes nothing about how the net runs, and neither runner
-  checks, when the net is built or when the edge fires, that a token's net
-  has the ports it names; which places of that net a body may write is the
-  rule on closed nets, whatever `reaches` names (§12.7). A reader may write the names on the edge. An output edge
+  "mutate", "reaches": ["Orders In"]}`. `reaches` changes nothing on
+  the wire, and neither runner checks, when the net is built or when the
+  edge fires, that a token's net has the ports it names. Until 2026-11-27
+  in the Python library and 2026-11-28 in the Rust one it was a declaration
+  alone: which places of that net a body may write was the rule on closed
+  nets, whatever `reaches` named (§12.7). Since then both hold a body to it:
+  a body that holds a closed net writes only the ports its edge names, and a
+  put or a take at any other port fails the firing, told as any failed
+  firing is (`failed`, §7.1). The conformance nets name every port their
+  bodies write, so the check alone changed none of their transcripts (stage
+  two of the rule on closed nets, later on 2026-11-27, gave `transit`'s
+  cabins ports and its edges `reaches`, §11, §12.7). A
+  reader may write the names on the edge. An output edge
   has no `reaches`. A `drain` edge
   takes every token of its place, oldest first, zero or more: unlike the
   kinds before it, it does not hold its transition back while the place is
@@ -349,7 +386,12 @@ once per generation and lays it out.
   (this text called the first four read edges until 2026-11-23, when the
   name passed to the last three). The order of `edges[]` is not
   significant; a reader keys an edge by its endpoints: its place, its port
-  if it has one, its transition and its direction.
+  if it has one, its transition and its direction. A transition may read one
+  place through several consuming edges (`take`, `take_where`), each taking
+  a token of its own (the Python library always; the Rust library since
+  2026-11-28, which refused it until then), so two entries of `edges[]` may share
+  their endpoints, and two plain takes are the same on the wire: a reader
+  draws one arrow for each entry.
 - **What a reader does with what it does not know** (since 2026-11-23). A
   reader that meets an edge whose `kind` it does not know keeps the edge,
   draws it as a plain edge and reads the rest of the topology. A reader that
@@ -376,14 +418,22 @@ once per generation and lays it out.
   outside it, a body of the net around it, the host's program or the runner's
   requests, a token is put, taken or replaced only at its ports (§12.7). A net
   declared open lets anyone outside write to any of its places, ports or not.
-  So a reader knows a net is closed when its topology shows a `port` and no
-  `open`, and open otherwise. In this version a net that marks no port is
-  open whether or not it says so; a later stage of the rule will close every
-  net that does not declare itself open, and a reader will then know a net is
-  open by `open` alone (§12.7). Each net's own topology carries its own
-  `open`: a net a token carries or a subnet shows its own when it is read by
-  `path` or `nested_id` (§12.3), and the topology of the net around it says
-  nothing of it.
+  Until stage two of the rule a net that marked no port was open whether or
+  not it said so, and a reader knew a net was closed when its topology showed
+  a `port` and no `open` (§12.7). Stage two came to the Python library on
+  2026-11-27 and to the Rust library on 2026-11-28: a net is closed unless
+  its topology shows `open`, a net that marks no port taking no token from
+  outside at all, so a reader knows a net is open by `open` alone.
+  Each net's own topology carries its own `open`: a net a token carries or
+  a subnet shows its own when it is read by `path` or `nested_id` (§12.3),
+  and the topology of the net around it says nothing of it. Since
+  2026-11-27 in the Python library and 2026-11-28 in the Rust one, a closed
+  net also shields the nets inside it from the host's program and the
+  runner (§12.7), so a reader who
+  wants to know whether they may write a net inside others reads the `open`
+  of every net around it as well, from the loaded net down: they may only
+  when each of those shows `open` and the net's own rule lets the write
+  land. A body of the net around is not affected.
 - `hints?`: `{"positions": {name: {"x": number, "y": number}}}`. Position
   hints an author or a runtime may supply. **Layout belongs to the viewer**: a
   viewer may honour hints (pinning those nodes) and must work without them.
@@ -404,8 +454,14 @@ once per generation and lays it out.
   no group; a group's name is unique among its net's groups and may hold any
   character, and a node keeps its own name whatever group it is in. A viewer
   may draw groups, as a frame around each group's members or as one box that
-  stands for them, and may ignore them. Each net's own topology carries its
-  own groups: an inner net read by `path` or `nested_id` (§12.3), a subnet
+  stands for them, and may ignore them. Since 2026-11-28 the Graphviz drawings
+  of both libraries draw such a frame dotted, where it was dashed, and the
+  places of a net declared open (`open?`, above) dashed, its ports apart, so
+  that the two are not confused; a port (`port?`, above) they draw with one
+  dotted ring, where it had a second ring, in an open net as in a closed one,
+  so that nothing that is not a nested net looks nested. Each net's own
+  topology carries its own groups: an inner net read by `path` or
+  `nested_id` (§12.3), a subnet
   or a net a token carries, shows the groups its own definition declares,
   and the topology of the net around it shows none of them. A port listed in
   a subnet place's `ports` carries no `group`, since any group it is in is
@@ -453,7 +509,11 @@ once per generation and lays it out.
   until it moves to the library runner.
 - `in_flight`: its body is running.
 - `priority?`: the current score the default selector would use, if the
-  runtime can compute it cheaply and safely; omitted if computing it raised.
+  runtime can compute it cheaply and safely; omitted if computing it raised,
+  and for a score that is NaN or an infinity, which JSON cannot carry (both
+  runners since 2026-11-28; the Rust runner sent `0.0` and `null` until
+  then). A NaN score is an error for whatever asks the net to choose: a
+  `step` that meets one is answered `internal` and nothing fires.
 
 Kept apart from the topology because it changes on every firing.
 
@@ -474,8 +534,9 @@ A token is `{id, label, color?, type_name?, keys?, nets?}`:
   characters counted as Unicode scalar values, *including* any truncation
   marker the runtime appends (both runners append `...`, so a cut label is
   997 characters of text plus the marker). Python: the pydantic JSON dump
-  or `repr`; Rust: the place's `Debug`. The full value is `get_token`
-  (§6.5).
+  or `repr` (since 2026-11-27 `repr` also for a model that holds a NaN or
+  an infinity, which the dump would show as `null`); Rust: the place's
+  `Debug`. The full value is `get_token` (§6.5).
 - `color?`: a CSS hex colour (`"#rrggbb"`), when the runtime has one for this
   token (Python: a `.color` attribute; Rust: the style its place is declared
   with, since 2026-10-16).
@@ -515,7 +576,7 @@ that fails counts in none of the four.
 | `start` | `{}` | `{status: "started", marking_version, running}` | |
 | `stop` | `{}` | `{status: "stopped", marking_version, running}` | lets the body in flight finish, and the net fires nothing more on its own; a Rust process answers it once a body it runs inline lands (§6.3) |
 | `reset` | `{}` | `{status: "reset", generation, marking_version}` | same factory, same params |
-| `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3); `closed_net` at a place of a closed net that is not one of its ports (§6.4) |
+| `inject` | `{place, port?, token, path?, nested_id?}` | `{status: "injected", id, marking_version, path?, nested_id?}` | emits `added`; `port` for a port place (§12.7); `path` and `nested_id` for an inner net (§12.3); `closed_net` at a place of a closed net that is not one of its ports, and since 2026-11-27 in the Python library and 2026-11-28 in the Rust one at any place of a net inside a closed net (§6.4) |
 | `enable` / `disable` | `{transition}` | `{marking_version}` | emits `toggled` if it changed |
 | `set_param` | `{param, value, transition?}` | `{marking_version}` | optional; `unsupported` otherwise |
 | `press` | `{control, value?}` | `{status: "pressed" \| "nothing", reason?, marking_version}` | runs a control the net declares (§6.6); emits the events of whatever it did |
@@ -671,16 +732,26 @@ before it moves to `describe`.
   `set_param`) follow the same rule, answering `invalid_params`. The shared
   transcripts check it. A port place takes `inject {place, port, token}` on
   the net around its subnet, or `inject {place, token}` addressed to the
-  subnet (§12.7).
+  subnet (§12.7); whether either lands is the rule on closed nets, below.
 - `inject` comes from outside every net (since 2026-11-23, §12.7). Into a
   closed net, the loaded net or an inner net addressed by `path` or
   `nested_id`, it lands only at one of the net's ports; at any other place,
   and at a port pair of one of its subnet places, which is never one of its
   own ports, it answers `closed_net`, and nothing is added or told. Into an
-  open net, a net that marks no port among them, it lands at any place. A
-  client that does not know `closed_net` treats the answer as a failed
-  request (§3). A control's `press` is the net's own, and what it does
-  lands at any place of its net (§6.6).
+  open net it lands at any place, and until stage two a net that marked no
+  port was open. Since 2026-11-27 in the Python library and 2026-11-28 in the Rust one, a
+  net that marks no port is closed unless it declares itself open, so an
+  `inject` into it answers `closed_net` wherever it is addressed (§12.7,
+  stage two). Since later on 2026-11-27 in the Python library, and since
+  2026-11-28 in the Rust one, an `inject` addressed by `path` or `nested_id`
+  to a net inside a closed net, at any depth, is refused as well: a closed
+  net shields the nets inside it (§12.7), so the `inject` answers
+  `closed_net` at a port as at any other place, an open net's places
+  included, and nothing is added or told. Into a net all of whose
+  surrounding nets, up to the loaded net, are declared open, it is judged by
+  the net's own rule, as above. A client that does not know `closed_net`
+  treats the answer as a failed request (§3). A control's `press` is the net's
+  own, and what it does lands at any place of its net (§6.6).
 - A parameter value decodes by its declared type: Rust's by the type
   registered for the parameter's wire name, Python's by the annotation of the
   factory parameter of that name, or, for one the factory does not annotate,
@@ -703,7 +774,11 @@ token's place is `serializable` (§5.1), and `kind: "text"` with `text`
 otherwise. `text` is the runtime's full rendering of the token (Python:
 `repr`; Rust: `Debug`), never truncated: `label` (§5.3) is the short form,
 this is the long one. A host that wants JSON for a place that has none gets
-`kind: "text"`, not an error; `not_serializable` is for `inject`.
+`kind: "text"`, not an error; `not_serializable` is for `inject`. A token
+that holds a NaN or an infinity has no JSON form either, in a serializable
+place too: `get_token` answers `kind: "text"` for it, a `query` match leaves
+out `json`, and a save refuses it (the Python runner since 2026-11-27, the
+Rust runner since 2026-11-28, which sent `null` for the number until then).
 
 While a body runs off the request thread (§6.3), `get_token` is answered at
 once from the marking as the firing's `launched` left it: a token the
@@ -1002,7 +1077,7 @@ enforces that by its own means (§13.4).
   and including 0.4.1 refuse it whole. The `protocol` types of
   petritype-runner (Rust) ignore a field they do not know, so those of 0.2.x
   read such a topology and drop `reaches`, and those after 0.2.x keep it. A
-  reader that rings the ports of a subnet's topology may ring the ports of
+  reader that marks the ports of a subnet's topology may mark the ports of
   any net's topology the same way.
 - Closed nets (since 2026-11-23, §5.1, §6.4, §12.7) do not change the version
   either: they bring a new optional field, `open` on a topology, and a new
@@ -1016,6 +1091,22 @@ enforces that by its own means (§13.4).
   as they refuse `reaches`, and the Python ones after that keep it. The
   `protocol` types of petritype-runner (Rust) 0.2.x ignore it and read the
   rest of the topology, and those after 0.2.x read it.
+- Stage two of the rule on closed nets (since 2026-11-27 in the Python
+  library and 2026-11-28 in the Rust one, §12.7) does not change the version
+  either: nothing new goes on
+  the wire. What changes is what an `inject` into a net that marks no port
+  does, which answers `closed_net` where it landed before unless the net
+  declares itself open, and what a body may do to a net it holds. A client
+  that injected into such a net meets the code it already meets at a closed
+  net's other places (§3).
+- A closed net's shield over the nets inside it (since 2026-11-27 in the
+  Python library and 2026-11-28 in the Rust one, §12.7) does not change the
+  version either: nothing new
+  goes on the wire. What changes is what an `inject` by `path` or
+  `nested_id` does into a net inside a closed net, which answers
+  `closed_net` where it landed before at a port of that net. A client that
+  injected so meets the code it already meets at a closed net's other
+  places (§3).
 - A host learns the version from `describe` before `load`, and refuses a net
   process whose version it does not speak with a clear message. A host may
   speak several versions, choosing per net process (§9.1).
@@ -1115,6 +1206,10 @@ described.
   parcels": places `Receiving`, `Sorting`, `Staging Area`, `Dispatched`;
   transitions `Sort`, `Stage`, `Dispatch Truck`; eight seeded parcels; a
   deterministic copy of the Rust example `petritype/examples/parcel_distribution.rs`.
+  Since 2026-11-27 `Receiving` is a port, where `02` injects a parcel, since
+  a net that does not declare itself open takes tokens from outside only at
+  its ports (§12.7, stage two); its topology in `01` shows `port: true` on
+  `Receiving`, and `02`, `03` and `04`, which pin no topology, are unchanged.
   Both runners carry it (Rust: the `petritype-runner` example binary) and
   both replay the shared set. **A shared transcript is replayed against a
   runner carrying the transcript's own net alone**, so it may pin `describe`
@@ -1247,7 +1342,36 @@ described.
   nothing back: it steps that journey from the seed
   with every transition enabled (until 2026-10-10 it held `Alight`, `Depart`
   and `Arrive` back with `disable` and fired them as the design's script
-  did).
+  did). Since 2026-11-27 (stage two of the rule on closed nets, and a body
+  held to its edge's `reaches`, §12.7) the cabins and the city mark ports and
+  the cabins have no `stopped`: every template marks `Door`, `Announcements`,
+  `Doors Open` and `Doors Closed` as ports, and no other place; the city
+  marks `Depot` as its one port, where a vehicle comes into service from
+  outside, as the transcript's `inject` of a shuttle does; each `Board L`
+  and `Alight L` edge on `L` (a `mutate` edge) has `reaches` `["Door"]`, and
+  `Arrive`'s edge on `In Transit` (a `take` edge) has `reaches` `["Doors
+  Closed", "Doors Open", "Announcements"]`; no other edge has `reaches`. The
+  parameter `stopped` is gone from every template, so `Cabin`'s parameters
+  are `seats` (`2`) and `capacity` (`6`), `Deck`'s `capacity` (`40`) and
+  `Pod`'s `seats` (`4`) and `capacity` (`4`), and `Depart L` and `Arrive`
+  set no inner parameter: a body may not set the parameters of a net it
+  holds. The story is the same 45 firings. `05_nested_nets.json` was
+  re-recorded: its topologies show the ports and the `reaches`, its cabins'
+  `params` have no `stopped`, and no `param_changed` of `stopped` is told.
+  Later that day a closed net came to shield the nets inside it in the
+  Python library (§12.7), and the city, which does not declare itself open,
+  is closed: once all seven passengers have arrived, the transcript injects
+  `"Hal"` into the bus's cabin's `Door` by the cabin's nested id, which
+  landed at that port, told as the cabin's `added` and then its `fireable`
+  with no transitions in `nested` lines and answered `injected` with the
+  cabin's `path` and `nested_id`; it now answers `closed_net`, and nothing
+  is added or told. It is the shared transcripts' case of an `inject` by
+  nested id refused inside a closed net; `19_closed_nets.json` holds one
+  that lands, into a net inside an open net (below). Nothing later in the transcript reads Hal or
+  steps the bus, so every other line is as it was. The net is unchanged and
+  stays closed; `05_nested_nets.json` was re-recorded. The Rust runner
+  answers the same since 2026-11-28, when its library built the shield;
+  until then its cabin, whose `Door` is a port, took Hal.
 
   **`wildlife`** ("Species migrate, spread and decline across habitats"),
   the net of `TOKEN_QUERYING_AND_FILTERING.md` §2, second edition
@@ -1302,7 +1426,14 @@ described.
   `"Summer"`, `spread_threshold` `1000` and front-token mutate edges in
   `Spread Savanna Reef` and `Decline Forest`, which split whatever stood
   first in `Savanna` (the zebra) onto the reef and halved the forest's robin
-  down to zero.
+  down to zero. Since 2026-11-27 the net marks ports, since a net that does
+  not declare itself open takes tokens from outside only at its ports (§12.7,
+  stage two): first `Forest` alone, where the transcript injects the gecko
+  and the owl, and since 2026-11-28 all five habitats, `Forest`, `Wetland`,
+  `Savanna`, `Reef` and `Tundra`, a species being brought in from outside at
+  any of them, while `Migrating` is the net's own;
+  `06_keys_query_filter.json` was re-recorded each time, its topologies
+  showing `port: true` on the five habitats.
 - One more conformance net came with the `drain` and `survey` kinds of §5.1
   on 2026-10-14: the example net of `EDGES_ON_EMPTY_PLACES.md` (in
   `../petritype-rs/dev-docs/`), a shop that surveyed its promotions and
@@ -1342,6 +1473,10 @@ described.
   marker and drained `Promotions` into `Expired` (`"{promotion} expired"`
   each), and its description ended "and end them at the close"; the
   transcript closed the day twice, with two promotions running and with none.
+  Since 2026-11-27 `Orders` and `Promotions` are ports, where the transcript
+  injects, since a net that does not declare itself open takes tokens from
+  outside only at its ports (§12.7, stage two); `07_empty_place_edges.json`
+  was re-recorded, its topologies showing `port: true` on both.
 
   **`traffic-light`** ("Cars wait at a light that cycles red, green and
   amber, and all go when it turns green"), since 2026-10-16 (revised the
@@ -1413,7 +1548,11 @@ described.
   On 2026-10-16 the light went from three places (`Red`, `Green`, `Amber`)
   to one place (with three transitions: `Turn Green`, `Pass on Green`,
   `Change`) to these two transitions, and then gained its controls and its
-  colours.
+  colours. Since 2026-11-27 `Waiting` is a port, where the transcript
+  injects cars, since a net that does not declare itself open takes tokens
+  from outside only at its ports (§12.7, stage two; a `press` of `car` is
+  the net's own and lands anywhere, §6.6); `08_traffic_light.json` was
+  re-recorded, its topologies showing `port: true` on `Waiting`.
 - Version 2 (2026-11-21) re-records the shared set: every transcript that
   carries the version pins `protocol_version` 2, and `05_nested_nets.json`
   is recorded afresh, its paths spelt as lists of steps (§12.1) and the
@@ -1516,7 +1655,28 @@ described.
   `port` (`invalid_params`), `inject` naming the port `Arena` of `Level 1`,
   which is no port (`unknown_place`), and `get_place_tokens` naming the port
   `Lobby` of `Door`, an ordinary place (`unknown_place`); reads the log, whose
-  world entries name the ports by the object; and resets.
+  world entries name the ports by the object; and resets. Since 2026-11-27
+  the world, which marks no port and does not declare itself open, is
+  closed (§12.7, stage two), and a closed net refuses a write from outside at
+  the pair of a subnet's port, which is never one of its own ports: the
+  `inject` of Bram by the pair on the world answers `closed_net` and adds
+  nothing, while Cato's, addressed to level 2, landed at its port as before,
+  so the query that follows matched two tokens where it had matched three.
+  The net was unchanged; `09_subnet_places.json` was re-recorded. It was
+  then the one shared transcript whose outcome depended on stage two itself:
+  under the rule as it stood before, which the Rust library followed until
+  2026-11-28, a world that marks no port was open and took Bram. Later that
+  day a closed
+  net came to shield the nets inside it in the Python library (§12.7), and
+  the world stays closed: Cato's `inject`, addressed to level 2 by path, now
+  answers `closed_net` too, and nothing is added or told, where it was told
+  as level 2's `added` in a `nested` line, with `outer_marking_version`,
+  then a `fireable` naming `Leave`, and answered `injected` with level 2's
+  `path` and `nested_id`. `Leave` does not become fireable, and the query
+  that follows matches one token, Ada in level 2's `Lobby`; the lines after
+  it are as they were. The net is unchanged; `09_subnet_places.json` was
+  re-recorded again. The Rust runner gives the same answers since
+  2026-11-28, when its library built stage two and the shield.
 - Groups (§5.1) got their conformance net and transcript on 2026-11-21,
   `11_groups.json` over `tests/protocol_nets/groups.py`: a net with two
   groups, a transition in each, a place in no group, and a subnet place in one
@@ -1611,7 +1771,28 @@ described.
   pieces; a failure inside an inner net, or of a body with a mutate or a
   read edge, is
   one `failed` from the Rust runner (§6.3) and two pieces from the Python
-  runner, so no shared transcript holds one. - A subnet's port seen from
+  runner, so no shared transcript holds one. Since 2026-11-27 `Bench` is a
+  port, where the transcript injects pots, since a net that does not declare
+  itself open takes tokens from outside only at its ports (§12.7, stage
+  two), and the transcript brings `"Cracked jug"` and `"Cracked vase"` into
+  the kiln's `Hatch` with `inject {place: "Hatch", path: [{"place":
+  "Kiln"}], token}`, addressed to the kiln, whose port it is, where it named
+  the pair on the workshop, which the workshop, closed, refused. Each of the
+  two is now told as the kiln's `added` in a `nested` line, with
+  `outer_marking_version`, and answered with the kiln's `path` and
+  `nested_id`, where it was an `added` naming the pair with
+  `subnet_marking_versions`; the firings are as before.
+  `12_failures.json` was re-recorded, its topologies showing `port: true`
+  on `Bench`. Later that day a closed net came to shield the nets inside it
+  in the Python library (§12.7), which refuses an `inject` into the kiln
+  while the workshop is closed, however it is addressed. So the workshop
+  declares itself open, and its topology shows `open: true`; the kiln stays
+  closed, and takes the two pots at `Hatch` because `Hatch` is its port.
+  The transcript keeps addressing the kiln by path (by the pair on the open
+  workshop they would land as well), and everything it sends and is told is
+  as before. `12_failures.json` was re-recorded again, its four topologies
+  of the workshop showing `open: true`.
+- A subnet's port seen from
   outside got its conformance net and transcript on 2026-11-22,
   `13_ports_from_outside.json` over `tests/protocol_nets/cellar.py`: a port
   holding tokens while the net around it is read, a port's token changed by
@@ -1668,7 +1849,30 @@ described.
   runner reports each firing of it in one piece, its `mutated` (or the
   `removed` or `hidden` standing in for it) then `fired`, and the Python
   runner in two, with that line between them; both folds give the same lines
-  (above).
+  (above). Since 2026-11-27 the house, which marks no port and did not
+  declare itself open, was closed (§12.7, stage two) and refused a write
+  from outside at the pair of the cellar's port, so the transcript injected
+  Merlot with `inject {place: "Rack", path: [{"place": "Cellar"}], token}`,
+  addressed to the cellar, whose port it is: the cellar's filter hid it,
+  told as the cellar's `hidden {kind: "added", place}` in a `nested` line
+  with `outer_marking_version`, where it was `hidden {kind: "added", place,
+  port}` with `subnet_marking_versions`, and the answer carried the
+  cellar's `path` and `nested_id` beside the id the cellar minted. The net
+  was unchanged and so was everything after; `13_ports_from_outside.json`
+  was re-recorded. Later that day a closed net came to shield the nets
+  inside it in the Python library (§12.7), which refuses that `inject` too
+  while the house is closed. So the house declares itself open, and its
+  topology shows `open: true`; the cellar stays closed, and takes Merlot at
+  `Rack` because `Rack` is its port. The transcript went back to injecting
+  Merlot by the pair on the house, `inject {place: "Cellar", port: "Rack",
+  token}`, told and answered as it was before 2026-11-27: `hidden {kind:
+  "added", place, port}` with `subnet_marking_versions`, and an answer with
+  the house's version and the id the cellar minted, without `path` or
+  `nested_id`. So the shared set again holds a token added from outside and
+  told by the port pair, here as the `hidden {kind: "added"}` that stands in
+  for an `added` under the subnet's filter. Everything else is as it
+  was; `13_ports_from_outside.json` was re-recorded again, its two
+  topologies of the house showing `open: true`.
 - A subnet inside a net that a token carries got its conformance net and
   transcript on 2026-11-22, `14_subnet_in_a_token.json` over
   `tests/protocol_nets/harbour.py`: the subnet's path through the token's
@@ -1767,7 +1971,11 @@ described.
   into the inbox and enables it again, `toggled` naming it each time and
   `fireable` naming it at the end; reads the state, whose progress names it
   in `last_fired` and `fired_counts`; and reads the log, both firings with
-  their names and the inner one with its path.
+  their names and the inner one with its path. Since 2026-11-27
+  `Inbox #1 / "new"` is a port, where the transcript injects the note, since
+  a net that does not declare itself open takes tokens from outside only at
+  its ports (§12.7, stage two); `15_odd_names.json` was re-recorded, its
+  topologies showing `port: true` on the inbox.
 - Keyed edges that choose their token by another input (§13.2, §13.5) got
   their conformance net and transcript on 2026-11-23,
   `16_keyed_by_input.json` over `tests/protocol_nets/couriers.py`: the take
@@ -1830,7 +2038,11 @@ described.
   edge, so the Rust runner reports each firing of it in one piece and the
   Python runner in two, and both folds give the same lines (above);
   `Dispatch` has none, so its failure stands as its `launched` then its
-  `failed` in both.
+  `failed` in both. Since 2026-11-27 `Couriers` and `Calls` are ports,
+  where the transcript injects Cleo and the calls, since a net that does not
+  declare itself open takes tokens from outside only at its ports (§12.7,
+  stage two); `16_keyed_by_input.json` was re-recorded, its topologies
+  showing `port: true` on both.
 - Read edges (§5.1) got their conformance net and transcript on 2026-11-23,
   `17_read_edges.json` over `tests/protocol_nets/roll_call.py`: the three
   read kinds on a place of tokens that carry nets, each read where it lies,
@@ -1888,14 +2100,24 @@ described.
   the three lines; and queries with the filter `{"places": ["Roll"]}`, whose
   matches' `json` pins the three lines in order. Every transition has a
   read edge, so the Rust runner reports each firing in one piece and the
-  Python runner in two, and both folds give the same lines (above).
+  Python runner in two, and both folds give the same lines (above). Since
+  2026-11-27 `Calls`, `Checks` and `Inspections` are ports, where the
+  transcript injects, since a net that does not declare itself open takes
+  tokens from outside only at its ports (§12.7, stage two); and the template
+  `Squad` takes the squad's members, which its `Members` starts with, in
+  order, where a squad was built empty and then given them, a write from
+  outside at `Members`, which is no port, that a closed squad refuses. Built
+  with none, as a saved squad is rebuilt before its marking is loaded
+  (§12.5), it holds none; it still has no net parameters, so nothing on the
+  wire shows the change. `17_read_edges.json` was re-recorded, its topology
+  showing `port: true` on the three places.
 - Ports on a net that a token carries, and the ports an edge reaches (§5.1,
   §12.7), got their conformance net and transcript on 2026-11-23,
   `18_ports_on_a_token.json` over `tests/protocol_nets/trays.py`: a token
   whose net marks two places as ports, that net's own topology read by path
   showing `port` on both, and outer edges that each declare the port their
-  body reaches with `reaches`, a declaration that changes nothing about the
-  firings. Its names, places, transitions, template, guard and seed are
+  body reaches with `reaches`, which changes nothing about these firings,
+  each body writing the port its edge names (§5.1). Its names, places, transitions, template, guard and seed are
   fixed here, since the transcript depends on them:
 
   **`trays`** ("A unit is handed an order through one tray and its shots
@@ -1944,7 +2166,11 @@ described.
   inside a token's net, so the Rust runner reports each firing in one piece
   and the Python runner in two, the `nested` and `mutated` lines of an outer
   firing standing between its pieces, and both folds give the same lines
-  (above).
+  (above). Since 2026-11-27 the net's own `Orders` is a port, where the
+  transcript injects the order, since a net that does not declare itself
+  open takes tokens from outside only at its ports (§12.7, stage two);
+  `18_ports_on_a_token.json` was re-recorded, its topology showing `port:
+  true` on `Orders`.
 - Closed nets (§5.1, §6.4, §12.7) got their conformance net and transcript
   on 2026-11-23, `19_closed_nets.json` over
   `tests/protocol_nets/post_office.py`: a net a token carries that marks a
@@ -1952,7 +2178,8 @@ described.
   that writes at the closed net's port and lands, and one that writes to its
   other place and fails; and an `inject` by path at that port that lands,
   one at the other place that is refused with `closed_net`, and the same
-  `inject` into the open net, which lands. Its
+  `inject` into the open net, which lands (addressed by nested id since
+  2026-11-27, below). Its
   names, places, transitions, templates and seed are fixed here, since the
   transcript depends on them:
 
@@ -1963,8 +2190,12 @@ described.
   a net with places, in this order, `Inbox`, a port, and `Ledger`, not a
   port, both of strings, serializable and empty, and no transitions. A
   `Post` marks a port, so it is closed; an `Open Post` is the same net
-  declared open. The net's places, in this order: `Letters` and `Forgeries`,
-  of strings, serializable; and `Posts`, a place of nets (nested,
+  declared open. (Since 2026-11-27 a `Post` would be closed without its
+  port too, as every net that does not declare itself open is, §12.7; the
+  net and its transcript were unchanged by that.) The net around the posts
+  declares itself open (since later on 2026-11-27, below). The net's
+  places, in this order:
+  `Letters` and `Forgeries`, of strings, serializable; and `Posts`, a place of nets (nested,
   serializable through the templates, with the default stepping rule,
   `inner_first`), whose tokens are posts, each holding one inner net, named
   with the empty string (§12.1). Labels are the runtime's own. Its
@@ -2000,7 +2231,8 @@ described.
   and answered `injected` with the path and the nested id; injects `"Note"`
   into the first post's `Ledger` by the same path, answered with the error
   `closed_net` and nothing told; injects `"Note"` into the second post's
-  `Ledger` by its path, which lands, since that post is open; reads the
+  `Ledger` by its path (by its nested id since 2026-11-27, below), which
+  lands, since that post is open; reads the
   first post by path, its `Inbox` holding the letter and then the note, and
   its `Ledger` empty; steps, `Forge` taking the forgery and the first post
   and failing as its body puts the forgery into the post's `Ledger`, told as
@@ -2011,7 +2243,67 @@ described.
   mutate edge, so the Rust runner reports its firing in one piece and the
   Python runner in two, the `nested` and `mutated` lines standing between
   the pieces, and both folds give the same lines (above); `Forge` has none,
-  so its failure stands as its `launched` then its `failed` in both.
+  so its failure stands as its `launched` then its `failed` in both. Later
+  on 2026-11-27 a closed net came to shield the nets inside it in the Python
+  library (§12.7), the nets its tokens carry included, which refuses every
+  `inject` into a post, by path or by nested id, while the net around the
+  posts is closed. So the net declares itself open, and its own topology
+  shows `open: true`, in the first and the last state the transcript reads;
+  each post is left to its own rule, and the three injects answer as
+  before: the note lands at the first post's `Inbox`, its port, is refused
+  at its `Ledger` with `closed_net`, and lands at the second post's
+  `Ledger`. The third names the second post by its nested id, `inject
+  {place: "Ledger", nested_id, token}`, the nested id first given by the
+  post's `nets[]` entry in the state the transcript reads first, where it
+  named the post by path; it is told and answered as before, the `nested`
+  line and the answer carrying the post's `path` and `nested_id`. So the
+  shared transcripts hold an `inject` by nested id that lands, beside the
+  one `05_nested_nets.json` shows refused. The first two stay by path. The
+  bodies are not affected, so `Deliver` and `Forge` fire and fail as
+  before. `19_closed_nets.json` was re-recorded, its two topologies of the
+  net showing `open: true`.
+- Stage two of the rule on closed nets (§12.7), built in the Python library
+  on 2026-11-27, changed the conformance nets, each change stated above
+  where its net is described: ports on `parcel-distribution`, `transit`
+  (its city and every cabin template), `wildlife`, `shop`, `traffic-light`,
+  `workshop`, `odd-names`, `couriers`, `roll-call` and `trays`, `reaches` on
+  `transit`'s edges, `stopped` gone from `transit`'s cabins, and `roll-call`'s
+  squads built with their members; `levels`, `cellar`, `stepping-rules`,
+  `groups`, `harbour` and `post-office` are unchanged. No net was declared
+  open for it. Twelve transcripts were re-recorded by
+  `tests/record_transcript.py` from the Python runner: `01`, `05`, `06`,
+  `07`, `08`, `09`, `12`, `13`, `15`, `16`, `17` and `18`, of which `09`,
+  `12` and `13` changed what they send or what it answers, and the rest only
+  their topologies (`05` its cabins' `params` too, and it tells no
+  `param_changed` of `stopped`); `02`,
+  `03`, `04`, `10`, `11`, `14` and `19` are as they were. Every transcript
+  but `09` writes from outside only at ports, so it holds under the rule as
+  it stood before as well, once a runtime's conformance nets make the same
+  changes. (That was so until the next change, the same day.)
+- A closed net's shield over the nets inside it (§12.7), built in the Python
+  library later on 2026-11-27, changed three conformance nets, each change
+  stated above where its net is described: `workshop`, `cellar` and
+  `post-office` declare themselves open, so that their topologies show
+  `open: true` and their transcripts' writes into the nets inside them still
+  land; `transit` and `levels` stay closed, and every other net is
+  unchanged. Five transcripts were re-recorded by
+  `tests/record_transcript.py` from the Python runner: `05`, whose `inject`
+  of Hal into the bus's cabin by nested id answers `closed_net`; `09`, whose
+  `inject` of Cato into level 2 by path answers `closed_net`, and whose
+  query after it matches one token; `13`, which went back to injecting
+  Merlot by the pair on the house, as before that day, and whose topologies
+  show `open: true`; `12`, whose topologies show `open: true` and nothing
+  else changed; and `19`, whose topologies show `open: true` and whose
+  `inject` into the open post's `Ledger` names the post by its nested id,
+  where it named it by path, and lands as before. The other fourteen are as
+  they were. `05` and
+  `09` hold only under the shield: under the rule as it stood before, the
+  cabin takes Hal at its port and level 2 takes Cato at its port (and the
+  world, open there, takes Bram). The Rust library built the reach, stage
+  two and the shield on 2026-11-28, and its conformance nets made the same
+  changes, `workshop`, `cellar` and `post-office` declared open among them,
+  so the Rust runner replays all nineteen shared transcripts, `05` and `09`
+  included.
 
 ## 12. Nested nets
 
@@ -2185,8 +2477,9 @@ the list counted from 0.
 - **Driving.** Inner nets are live. Both runners' drivers make one deep step
   of the outer net at each `step` and at each firing of a running net. The
   stepping rule decides only which net fires next; within a net the
-  selector, the tie-break included, is the runtime's own (`DESIGN_RUNNER.md`,
-  Rust `DESIGN.md` §6.6). The `step` result and the log entry of a firing in
+  selector, the tie-break included, is the runtime's own (Python
+  `petritype.runner.owner.Owner._choose`, Rust `DESIGN.md` §6.6). The
+  `step` result and the log entry of a firing in
   an inner net carry its `path` and `nested_id`; the `marking_version` of a
   `step` result is the outer net's. A net is **quiescent deep** when it and
   every net in its places whose rule is not `passive` are at rest, at every
@@ -2208,7 +2501,8 @@ the list counted from 0.
   runtime first knows of the net: at `load` for the inner nets the factory
   seeded and for every subnet of the loaded net, at the `inject` that
   carried the token, or at the landing of the outer firing that produced
-  the token; a subnet inside a token's net is known, and its baseline
+  the token or put a new net in a token it was lent; a subnet inside a
+  token's net is known, and its baseline
   taken, when that net is. No `fireable` is
   sent for the baseline itself; the first `nested` `fireable` for that net
   reports the first change from it. `reset` and `load` retake every
@@ -2302,10 +2596,13 @@ each inner net, that net's state:
  "cabin": {"template": "Cabin",
            "marking": {"Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": [],
                        "Doors Open": ["Front"], "Doors Closed": []},
-           "params": {"stopped": true, "seats": 2, "capacity": 6},
+           "params": {"seats": 2, "capacity": 6},
            "enabled": {"Sit": true, "Stand": true, "Go To Door": true,
                        "Go To Door From Standing": true, "Close Doors": true, "Clear Announcement": true}}}
 ```
+
+(Until 2026-11-27 the cabin's `params` began with `"stopped": true`, a
+parameter the `Cabin` template no longer declares, §11.)
 
 - `template` names the factory, registered by name with the runtime, that
   built the inner net and rebuilds it on `inject` or load. `marking` lists
@@ -2581,19 +2878,28 @@ at whatever depth, and the loaded net is the one the process loaded.
   token as the net runs: a body handed the token, by a mutate edge for one,
   reaches into its net, and the edge may declare which ports the body
   reaches with `reaches` (§5.1), which a reader may write on the edge.
-  `reaches` is a declaration: neither runner checks that the net has the
-  ports an edge names, when the net is built or when the edge fires, so a
-  name the net does not have goes unnoticed. Which places of the net a body
-  may write is the rule on closed nets, below, whatever `reaches` names.
+  Neither runner checks that the net has the ports an edge names, when the
+  net is built or when the edge fires, so a name the net does not have goes
+  unnoticed. Which places of the net a body may write is the rule on closed
+  nets, below; within it, a body that holds a closed net writes only the
+  ports its edge names in `reaches`, in the Python library since 2026-11-27
+  and in the Rust library since 2026-11-28 (§5.1).
 - **Closed nets** (since 2026-11-23). A net whose definition marks at least
   one place as a port, whether it is a subnet, a net a token carries or the
   loaded net, is **closed** unless its definition declares it open (`open?`,
-  §5.1). **Outside** a net are a body, guard or key function of a transition
+  §5.1); since 2026-11-27 in the Python library and 2026-11-28 in the Rust
+  one, so is every net that does not declare itself open, whether or not it marks a port (stage two,
+  below). **Outside** a net are a body, guard or key function of a transition
   of the net around it, by any edge; the host's program and its drivers; and
   the runner's requests. **Inside** it are its own transitions' bodies,
   guards and keys, the controls it declares (`press`, §6.6), the tokens its
   definition starts it with, and the runtime's own moves: a firing's inputs
   and outputs, a failed firing's restore and a deep step's inner firings.
+  Since 2026-11-27 in the Python library and 2026-11-28 in the Rust one,
+  the host's program, its drivers and the runner's requests are outside
+  every net around the net they write as well, so a closed net keeps them
+  out of the nets inside it (below, the nets inside a closed net); a body is
+  outside the nets it holds as before.
   From outside a closed net:
   - **Tokens** are put, taken, removed, replaced or mutated only at its
     ports. A body that writes to another of its places fails its firing, an
@@ -2604,35 +2910,71 @@ at whatever depth, and the loaded net is the one the process loaded.
     error. The runner's `inject`, at the top level or by `path` or
     `nested_id`, answers `closed_net` and adds nothing (§6.4). The outer
     net's own edges on a subnet's ports are inside it, and land as before.
+    Since 2026-11-27 the Python library, and since 2026-11-28 the Rust
+    library, hold a body that holds a closed net to the ports its edge names
+    in `reaches` (§5.1), and refuse a body's write at a port of a net inside
+    the net it holds, carried by one of that net's tokens or a subnet of it,
+    whatever its edge names: an edge names ports of the net it hands over,
+    and the net it holds carries the token further in by a transition of its
+    own.
   - **A port pair** names a place of the net around the subnet place, so a
     write at `{place, port}` is judged by that net's rule first, then by the
     subnet's at the port. A closed net refuses it from outside, since a port
     of a subnet place is never one of its own ports; an open one lets it
     land, the subnet's port allowing it. The net's own bodies' outputs into
-    the port are inside it, and land.
+    the port are inside it, and land. Addressed to the subnet by `path` or
+    `nested_id` instead, a write is judged by the subnet's rule, and from
+    the host's program or the runner it landed at the subnet's port even
+    when the net around was closed; since 2026-11-27 in the Python library
+    and 2026-11-28 in the Rust one, a closed net refuses that too (below,
+    the nets inside a closed net), so from outside a closed net a token
+    comes into a subnet's port only by a transition of the closed net. When
+    every net around the subnet is declared open, both ways land, the
+    subnet's port allowing it.
   - **Knobs and firing by name** (setting a parameter, a transition's switch
     or keywords, the tie-break, the stepping rule or a selector, and firing a
     transition by name) stay with the program, its drivers and the runner,
     on every net. A body of the net around a net that marks a port is
     refused them while it holds the net, whether the net is closed or
-    declared open: `open` opens the places, not the knobs. A net that marks
-    no port keeps today's behaviour for them, so a body still sets its
-    parameters, as `Depart` and `Arrive` of the conformance net `transit`
-    set their cabin's `stopped` (§11).
+    declared open: `open` opens the places, not the knobs. Until stage two
+    a net that marked no port kept the earlier behaviour for them, so a body
+    set its parameters, as `Depart` and `Arrive` of the conformance net
+    `transit` set their cabin's `stopped` (§11). Since 2026-11-27 in the
+    Python library and 2026-11-28 in the Rust one (stage two, below), a body
+    is refused them on every net it holds, a net that marks no port
+    included, and `transit`'s cabins have no `stopped` any more (§11).
   - **Reading and stepping** are allowed for everyone, a body included: a
     body may step a net it holds, whose own transitions are inside it.
   - **Whole-state acts**, loading or importing a marking, restoring,
     forking, resetting and saving, stay allowed for the program and for the
     runner's `load` and `reset`: they replace the state as a whole and are
-    how a save is loaded.
+    how a save is loaded. Since 2026-11-27 the Python library, and since
+    2026-11-28 the Rust library, refuse a body the loading of a marking or a
+    saved form into a net it holds, or into a net inside one, since that
+    writes every place, the ports its edge does not name among them.
   - A body that builds a new net and puts it in place of a token's net has
     made a new net, and the tokens that net's definition starts it with are
     inside it.
+  - **Guards and keys change no net.** Since 2026-11-27 the Python library
+    refuses a guard, a priority, a key function, a selector and the function
+    that chooses a result's output places every change to every net: tokens,
+    parameters and the loading of a marking, on the net the function belongs
+    to or any other, closed or open, at a port or not. They decide what
+    fires, between the runtime planning a firing and making it, and a net's
+    drawing shows them changing nothing. Nothing on the wire changes: under
+    the Python runner such a guard's transition reads as not fireable, as
+    for any guard that raises, and the refusal is said on stderr. The Rust
+    library holds the same rule by its types, with no check at run time: a
+    guard, a priority, a key function and a selector are handed the net, or
+    the token, by shared reference, so they have nothing to change it with.
 
   An **open** net lets anyone outside write to any of its places, ports or
   not. `open` is the net's own: it does not open the nets inside it, each of
   which keeps its own rule, a net two levels down included, however it is
-  reached. Each runtime enforces the rule in its library. The Rust core
+  reached. Since 2026-11-27 in the Python library and 2026-11-28 in the
+  Rust one, the reverse holds for the host's program and the runner: a
+  closed net closes the nets inside it to them, open ones included (below). Each runtime enforces the rule in its
+  library. The Rust core
   checks it in every method of a net that writes a token and marks each net
   a firing lends its body. The Python library checks it in its own
   functions, its runtime's commands and the runner, and compares, when a
@@ -2642,14 +2984,60 @@ at whatever depth, and the loaded net is the one the process loaded.
   net's parameters or its switches directly is not caught, and neither is a
   change made inside a token object where it lies.
 
-  **Stage two**, not yet built, will close every net that does not declare
-  itself open, a net that marks no port included. A net whose places a body
-  or the program writes from outside then marks them as ports, starts with
-  its tokens in its definition, or declares itself open. A body that sets
-  the parameters of a net that marks no port, as `transit`'s do, will be
-  refused, since every net will then be under the rule and `open` opens the
-  places, not the knobs: such a net gives that setting to a transition of
-  its own, or leaves it to the program.
+  **Stage two** closes every net that does not declare itself open, a net
+  that marks no port included. Until 2026-11-27 this paragraph called it not
+  yet built; that day the Python library built it, and the Rust library
+  built it on 2026-11-28. A net whose places a body or the program writes from
+  outside marks them as ports, starts with its tokens in its definition, or
+  declares itself open; a net that does none of these takes nothing from
+  outside, the loaded net included, so an `inject` into it answers
+  `closed_net` (§6.4). A body that sets the parameters of a net it holds is
+  refused on every net, since `open` opens the places, not the knobs: such
+  a net gives that setting to a transition of its own, or leaves it to the
+  program. The conformance nets changed for it that day, each change stated
+  where the net is described (§11): `transit`'s cabins dropped `stopped`,
+  which its bodies used to set; a place a transcript injects into became a
+  port; and a transcript that injected by the pair of a subnet's port came
+  to address the subnet, whose port it is, or to show the refusal. Later
+  that day addressing the subnet was refused as well (below): `workshop` and
+  `cellar` came to declare themselves open, and `cellar`'s transcript went
+  back to the pair; `levels` stayed closed, and its transcript shows both
+  refusals.
+
+  **The nets inside a closed net** (since 2026-11-27 in the Python library
+  and 2026-11-28 in the Rust one). A closed net shields the nets
+  inside it from the host's program, its drivers and the runner: a token
+  put, taken or replaced by any of them, with no body of a transition
+  running, at a place of a net inside a closed net, a subnet of it or a net
+  one of its tokens carries, at any depth, is refused, at a port as at any
+  other place and however the net is addressed. The runner answers such an
+  `inject`, by `path` or `nested_id`, with `closed_net` and adds nothing
+  (§6.4). Such a write lands only when every net around the net it writes,
+  from the loaded net down, is declared open, and the net's own rule lets
+  it land: at its ports when it is closed, anywhere when it is open. So the
+  drawing of a closed net shows every way a token comes into it from
+  outside, the nets inside it included: a token reaches a subnet's port, or
+  a port of a net a token carries, by a transition the closed net draws. An
+  author who wants the program or the runner to write such a port declares
+  every net around it open, or gives the outer net a port and a transition
+  that carries the token in. A body that holds a net is held there as
+  before, to its edge's `reaches` (above). Anywhere else a body is outside
+  as the program is: it is refused at a net no edge handed it that is
+  inside a closed net, and at every net inside a closed net it holds, an
+  open one as much as a closed one, where the looking stops at the net it
+  holds. Not affected are the runtime's own moves, a firing's outputs into
+  a subnet's port among them, the runner's `load` and `reset`, which act
+  on the loaded net as a whole, and a control's `press`, which acts on the
+  loaded net from inside it (§6.6). A host's program that loads a marking
+  or a saved form into a net inside a closed net is refused as for a put,
+  since the load writes every place of that net; it loads the net around
+  as a whole. No field or
+  code is new, and the version stays 2 (§10). The conformance nets changed
+  for it the same day, each change stated where the net is described (§11):
+  `workshop`, `cellar` and `post-office` declare themselves open, and the
+  transcripts over `transit` and `levels`, which stay closed, show an
+  `inject` by nested id into a cabin and one by path into a level refused
+  with `closed_net`.
 
 ## 13. Keys, queries and filters
 
@@ -2820,8 +3208,9 @@ the net is built, a bound edge:
 - that names a key its own place does not declare, or an input key the
   source's place does not declare;
 - whose place, or whose source, its transition reads through a second edge
-  (the Rust core refuses any place a transition reads twice, and both
-  runtimes any place a read edge reads, §5.1).
+  (both runtimes refuse a bound edge, or its source, on a place the
+  transition reads twice, and any place a read edge reads, §5.1; until
+  2026-11-28 the Rust core refused every place a transition read twice).
 
 Several edges may be bound to one source, and one filter may hold several
 input clauses naming the same source, beside constant and parameter

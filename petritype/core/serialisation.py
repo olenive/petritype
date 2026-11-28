@@ -15,7 +15,7 @@ the saved form of a net that a nested token carries (nets as tokens, R5).
 
       {"template": "Cabin",
        "marking": {"Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": []},
-       "params": {"stopped": true, "seats": 2, "capacity": 6},
+       "params": {"seats": 2, "capacity": 6},
        "enabled": {"Sit": true, "Stand": true, ...}}
 
   ``export_marking`` and ``import_marking`` are the marking part on their own,
@@ -50,6 +50,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from petritype.core.events import Resynced
 from petritype.core.executable_graph_components import (
+    ClosedNets,
     ExecutableGraph,
     GraphEvents,
     SubnetPlaceNode,
@@ -70,9 +71,29 @@ def _model_has_json_schema(cls: type[BaseModel]) -> bool:
     return True
 
 
+def _unwritable_float(dumped: Any, path: str = "") -> Optional[tuple[str, float]]:
+    """Where a model's dump holds a float JSON cannot write, a NaN or an infinity,
+    and the float; ``None`` when it holds none. Through dicts and lists, the path
+    spelt by key and by position."""
+    if isinstance(dumped, float):
+        return None if math.isfinite(dumped) else (path, dumped)
+    if isinstance(dumped, dict):
+        for key, item in dumped.items():
+            found = _unwritable_float(item, f"{path}.{key}" if path else str(key))
+            if found is not None:
+                return found
+    elif isinstance(dumped, list):
+        for index, item in enumerate(dumped):
+            found = _unwritable_float(item, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
 class JsonForm:
     """Functions that decide and use a place's JSON form."""
 
+    @staticmethod
     def scalar(place_type: Any) -> Optional[type]:
         """The JSON scalar type ``place_type`` is or derives from (``str`` for a
         ``class Colour(str)``), else ``None``."""
@@ -80,6 +101,7 @@ class JsonForm:
             return None
         return next((scalar for scalar in JSON_SCALARS if issubclass(place_type, scalar)), None)
 
+    @staticmethod
     def place_type(place_type: Any) -> bool:
         """True for a pydantic model (whose JSON schema builds, so it has a JSON
         form; ``ExecutableGraph`` and models holding one included) or a JSON
@@ -96,13 +118,21 @@ class JsonForm:
             return _model_has_json_schema(place_type)
         return False
 
+    @staticmethod
     def encode(token: Any) -> Any:
         """The token as plain JSON (for a serializable place). Raises if it has
         none. A pydantic model dumps by alias, so a field spelt differently in
         Python (``class_`` for ``class``) carries its JSON name, the one
-        ``decode`` accepts."""
+        ``decode`` accepts. A model that holds a NaN or an infinity has no JSON
+        form, as a bare float that is one has none: the dump keeps the float, and
+        whatever wrote it out next would spell it ``null`` or ``NaN``, which says
+        something else or is not JSON."""
         if isinstance(token, BaseModel):
-            return token.model_dump(mode="json", by_alias=True)
+            dumped = token.model_dump(mode="json", by_alias=True)
+            found = _unwritable_float(dumped)
+            if found is not None:
+                raise ValueError(f"Out of range float values are not JSON compliant: {found[1]!r} at {found[0]!r}")
+            return dumped
         token_type = type(token)
         if token_type in (bool, int, str):
             return token
@@ -112,6 +142,7 @@ class JsonForm:
             return token
         return json.loads(json.dumps(token, allow_nan=False))
 
+    @staticmethod
     def validate(target: Any, value: Any) -> Any:
         """Validate wire input as the JSON it arrived as, in pydantic's strict
         mode. ``target`` is a model class or a ``TypeAdapter``. Raises
@@ -134,6 +165,7 @@ class JsonForm:
             return target.validate_json(text, strict=True)
         return target.model_validate_json(text, strict=True)
 
+    @staticmethod
     def message(error: ValueError) -> str:
         """Pydantic's first message for a ``ValidationError``, else the text."""
         errors = getattr(error, "errors", None)
@@ -143,6 +175,7 @@ class JsonForm:
                 return first[0].get("msg", str(error))
         return str(error)
 
+    @staticmethod
     def decode(place_type: Any, payload: Any) -> Any:
         """Build a token of ``place_type`` from plain JSON: ``validate`` for a
         pydantic model (strict all the way down), the constructor for a scalar.
@@ -197,6 +230,7 @@ class Templates:
 
     _factories: dict[str, Callable[..., ExecutableGraph]] = {}
 
+    @staticmethod
     def register(name: str, factory: Callable[..., ExecutableGraph]) -> Callable[..., ExecutableGraph]:
         """Register ``factory`` under ``name`` (replacing a previous one of that
         name) and return a factory that stamps the name on what it builds."""
@@ -217,18 +251,22 @@ class Templates:
         Templates._factories[name] = stamped
         return stamped
 
+    @staticmethod
     def template(name: str):
         """``@Templates.template("Cabin")`` on a factory function."""
         def decorator(factory):
             return Templates.register(name, factory)
         return decorator
 
+    @staticmethod
     def get(name: str) -> Optional[Callable[..., ExecutableGraph]]:
         return Templates._factories.get(name)
 
+    @staticmethod
     def names() -> tuple[str, ...]:
         return tuple(Templates._factories)
 
+    @staticmethod
     def build(name: str) -> ExecutableGraph:
         """A fresh net from the template ``name``; ``LookupError`` if none is registered."""
         factory = Templates._factories.get(name)
@@ -236,6 +274,7 @@ class Templates:
             raise LookupError(f"no template named {name!r} is registered (known: {sorted(Templates._factories)})")
         return factory()
 
+    @staticmethod
     def forget(name: str) -> None:
         Templates._factories.pop(name, None)
 
@@ -243,6 +282,7 @@ class Templates:
 class NetJson:
     """Functions that save a net as JSON and load one back (the module docstring)."""
 
+    @staticmethod
     def export_marking(graph: ExecutableGraph) -> dict[str, list]:
         """``{place: [tokens as JSON]}`` for every place, oldest token first, and
         for a subnet place ``[its subnet's saved form]``. Raises ``TypeError``
@@ -262,6 +302,7 @@ class NetJson:
                 raise ValueError(f"a token of {place.name!r} will not encode as JSON: {error}") from error
         return marking
 
+    @staticmethod
     def import_marking(graph: ExecutableGraph, marking: dict[str, list]) -> None:
         """Replace the whole marking with ``marking``: every place listed gets
         the tokens given, decoded strictly to its type; a place not listed is
@@ -271,9 +312,14 @@ class NetJson:
         events cannot describe a marking replaced wholesale. A subnet place's
         entry, a list of one saved form, is loaded into the subnet the place
         holds, by the subnet, and checked with the rest before anything changes;
-        a subnet place not listed has its subnet's marking emptied."""
+        a subnet place not listed has its subnet's marking emptied. A whole-state
+        act, the program's: a running body is refused it on a net it holds, and
+        everyone on a net inside a closed net, which is loaded with the net around
+        it (``ClosedNets.ensure_whole_state``)."""
+        ClosedNets.ensure_whole_state(graph, "loading a marking")
         NetJson._apply_marking(graph, NetJson._marking_plan(graph, marking))
 
+    @staticmethod
     def _ensure_stamped(place: SubnetPlaceNode, consequence: str) -> None:
         """``TypeError`` naming ``place`` if its subnet was built without a template:
         it then has no saved form."""
@@ -282,6 +328,7 @@ class NetJson:
                 f"subnet place {place.name!r} holds a net built without a template, so {consequence}"
             )
 
+    @staticmethod
     def _marking_plan(graph: ExecutableGraph, marking: dict[str, list]) -> dict[str, Any]:
         """``marking`` checked against ``graph`` and decoded, at every depth, with
         nothing changed: for each place its decoded tokens, and for each subnet
@@ -307,6 +354,7 @@ class NetJson:
                 raise ValueError(f"a token of {name!r} does not decode as {place.type}: {JsonForm.message(error)}") from error
         return plan
 
+    @staticmethod
     def _subnet_plan(place: SubnetPlaceNode, marking: dict[str, list]) -> tuple:
         """The plan of a subnet place's entry: its one saved form loaded into the
         subnet, or, when the marking leaves the place out, the subnet's marking
@@ -325,6 +373,7 @@ class NetJson:
             kind = type(error) if type(error) in (KeyError, TypeError, ValueError, LookupError) else ValueError
             raise kind(within) from error
 
+    @staticmethod
     def _apply_marking(graph: ExecutableGraph, plan: dict[str, Any]) -> None:
         """Carry out a checked marking: every place gets its tokens with fresh
         ids and records ``Resynced``, every subnet loads its own, in place order."""
@@ -337,6 +386,7 @@ class NetJson:
             TokenIds.append(graph, place, plan[place.name])
             GraphEvents.record(graph, Resynced(place.name))
 
+    @staticmethod
     def save(graph: ExecutableGraph) -> dict:
         """The saved form: ``{template?, marking, params, enabled}``. ``template``
         is left out when the net records none (a top-level net built by a
@@ -356,14 +406,19 @@ class NetJson:
         saved["enabled"] = {t.name: t.name not in graph.disabled for t in graph.transitions}
         return saved
 
+    @staticmethod
     def load_into(graph: ExecutableGraph, saved: dict) -> ExecutableGraph:
         """Load a saved form into ``graph``: its marking (``import_marking``),
         parameters (each must be one the net declares) and switches (each must
         name a transition), its subnets' saved forms included. Checked at every
-        depth before anything is changed. Returns the graph."""
+        depth before anything is changed. Returns the graph. A whole-state act,
+        the program's, refused to a running body on a net it holds, and to
+        everyone on a net inside a closed net (``ClosedNets.ensure_whole_state``)."""
+        ClosedNets.ensure_whole_state(graph, "loading a saved form")
         NetJson._apply_load(graph, NetJson._load_plan(graph, saved))
         return graph
 
+    @staticmethod
     def _load_plan(graph: ExecutableGraph, saved: dict) -> tuple:
         """A saved form checked against ``graph`` and decoded, with nothing
         changed: ``(marking plan, params, enabled)``."""
@@ -390,6 +445,7 @@ class NetJson:
             raise KeyError(f"the net has no transition {', '.join(map(repr, unknown))}")
         return NetJson._marking_plan(graph, saved.get("marking", {})), params, enabled
 
+    @staticmethod
     def _apply_load(graph: ExecutableGraph, plan: tuple) -> None:
         """Carry out a checked load. Parameters and switches given as ``None`` are
         left as they are, and so are the cursors: that is a subnet place missing
@@ -404,6 +460,7 @@ class NetJson:
         # starts its rounds afresh.
         graph.forget_cursors()
 
+    @staticmethod
     def restore(saved: dict) -> ExecutableGraph:
         """A net rebuilt from its saved form: ``Templates.build(saved["template"])``
         then ``load_into``. ``LookupError`` when the template is unknown or the
@@ -412,6 +469,7 @@ class NetJson:
             raise LookupError("a saved net names the template that rebuilds it")
         return NetJson.load_into(Templates.build(saved["template"]), saved)
 
+    @staticmethod
     def looks_saved(value: Any) -> bool:
         """Whether ``value`` is a saved form rather than a graph's own fields
         (what ``ExecutableGraph`` validation uses to tell the two apart)."""

@@ -12,6 +12,7 @@ from typing import Any, Literal, TypeAliasType, Union, get_args, get_origin
 class TypeNames:
     """Functions that spell Python types and callables for display."""
 
+    @staticmethod
     def of(annotation: Any) -> str:
         """Short text for a type or annotation: class names without module paths,
         generics with their arguments, unions with ``|``. A string annotation
@@ -38,6 +39,7 @@ class TypeNames:
             return name
         return re.sub(r"(?:\w+\.)+(\w+)", r"\1", str(annotation))
 
+    @staticmethod
     def callable_name(fn: Any) -> str:
         """Readable name for a callable: ``__qualname__`` when present,
         ``partial(<inner>)`` for ``functools.partial``, ``__name__`` otherwise,

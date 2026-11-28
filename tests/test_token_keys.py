@@ -78,6 +78,31 @@ class TestKeys:
     def test_one_is_not_true(self):
         assert same_value(1, 1) and not same_value(1, True) and not same_value("1", 1)
 
+    def test_one_key_is_extracted_without_the_others(self):
+        calls = {"a": 0, "b": 0}
+
+        def extract_a(tok):
+            calls["a"] += 1
+            return tok["a"]
+
+        def extract_b(tok):
+            calls["b"] += 1
+            return tok["b"]
+
+        place = ListPlaceNode("P", dict, [{"a": "hello", "b": 42}], keys={"a": extract_a, "b": extract_b})
+        assert Keys.one(place, place.tokens[0], "a") == "hello"
+        assert calls == {"a": 1, "b": 0}
+
+    def test_one_key_is_type_checked_and_a_missing_one_is_a_key_error(self):
+        place = ListPlaceNode("P", object, [1.5], keys={"bad": lambda x: x})
+        with pytest.raises(TypeError, match="key 'bad' of a token in 'P' is float"):
+            Keys.one(place, 1.5, "bad")
+        with pytest.raises(KeyError):
+            Keys.one(place, 1.5, "missing")
+        plain = ListPlaceNode("Q", int, [1])
+        with pytest.raises(KeyError):
+            Keys.one(plain, 1, "any")
+
 
 # --- filters --------------------------------------------------------------------------------------
 
@@ -123,6 +148,19 @@ class TestFilters:
         assert seasonal.matches(graph, forest, robin)
         del graph.params["wanted"]
         assert not seasonal.matches(graph, forest, robin), "a missing parameter accepts nothing"
+
+    def test_a_clause_tells_one_from_true_and_refuses_an_unhashable_value(self):
+        clause_int = Clause("k", (1, 0, "1"))
+        assert clause_int.accepts({"k": 1}, {})
+        assert clause_int.accepts({"k": 0}, {})
+        assert clause_int.accepts({"k": "1"}, {})
+        assert not clause_int.accepts({"k": True}, {})
+        assert not clause_int.accepts({"k": False}, {})
+        assert not clause_int.accepts({"k": [1]}, {})
+
+        clause_bool = Clause("k", (True,))
+        assert clause_bool.accepts({"k": True}, {})
+        assert not clause_bool.accepts({"k": 1}, {})
 
 
 # --- the visualiser: a place label that honours a filter ------------------------------------------
@@ -297,6 +335,33 @@ class TestQueries:
         assert Query.distinct(graph, "class") == ["Bird", "Mammal", "Fish", "Reptile"]
         assert Query.distinct(graph, "diet", places=["Tundra"]) == ["Omnivore", "Herbivore", "Carnivore"]
         assert Query.distinct(graph, "colour") == []
+
+    def test_distinct_values_tell_one_from_true_and_extract_only_their_key(self):
+        other_calls = 0
+
+        def unused_extractor(_tok):
+            nonlocal other_calls
+            other_calls += 1
+            return "never"
+
+        graph = ExecutableGraphOperations.construct_graph([
+            ListPlaceNode(
+                "P",
+                object,
+                [1, True, 0, False, "1", 1, True, 2, False],
+                keys={"v": lambda x: x, "other": unused_extractor},
+            ),
+        ])
+        distinct = Query.distinct(graph, "v")
+        assert [(type(v), v) for v in distinct] == [
+            (int, 1),
+            (bool, True),
+            (int, 0),
+            (bool, False),
+            (str, "1"),
+            (int, 2),
+        ]
+        assert other_calls == 0
 
     def test_count_and_first(self):
         graph = build_wildlife()

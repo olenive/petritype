@@ -1,11 +1,32 @@
+import typing
 from typing import Sequence
-from petritype.core.relationship_graph_components import RelationshipEdges
+
+from pydantic import TypeAdapter
+
+from petritype.core.relationship_graph_components import (
+    FunctionToTypeEdges,
+    RelationshipEdges,
+    TypeToFunctionEdges,
+    TypeToTypeEdges,
+)
 from petritype.core.data_structures import (
     COMMON_TYPES,
+    FunctionWithAnnotations,
     ImportPath,
     TypeVariableWithAnnotations,
     TypeRelationship,
 )
+
+
+def _dummy_import_path(
+    class_name: str | None = None,
+    function_name: str | None = None,
+) -> ImportPath:
+    return ImportPath(
+        module_path_components=("pkg", "mod"),
+        class_name=class_name,
+        function_name=function_name,
+    )
 
 
 def example_types_01() -> Sequence[TypeVariableWithAnnotations]:
@@ -332,3 +353,108 @@ class TestRelationshipEdges:
         #     ('AnnotationsCollection', 'TeamDocument'): TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE,
         # }
         assert result == expected
+
+    def test_type_to_type_handles_custom_attribute_without_attribute_error(self):
+        types = [
+            TypeVariableWithAnnotations(
+                name="Leaf",
+                parent_type=None,
+                subtypes=set(),
+                attribute_types={},
+                import_path=_dummy_import_path(class_name="Leaf"),
+                code="",
+            ),
+            TypeVariableWithAnnotations(
+                name="Branch",
+                parent_type=None,
+                subtypes=set(),
+                attribute_types={"leaf": "Leaf", "pair": "Pair[Leaf]"},
+                import_path=_dummy_import_path(class_name="Branch"),
+                code="",
+            ),
+        ]
+        result = RelationshipEdges.type_to_type(types=types, ignored_types=COMMON_TYPES)
+        assert result[("Leaf", "Branch")] == TypeRelationship.CONTAINS_AS_ATTRIBUTE_SUBTYPE
+        assert result[("Pair[Leaf]", "Branch")] == TypeRelationship.CONTAINS_AS_ATTRIBUTE_TYPE
+
+    def test_type_to_function_distinguishes_exact_and_subtype_arguments(self):
+        types = [
+            TypeVariableWithAnnotations(
+                name="Item",
+                parent_type=None,
+                subtypes=set(),
+                attribute_types={},
+                import_path=_dummy_import_path(class_name="Item"),
+                code="class Item(BaseModel): pass",
+            ),
+            TypeVariableWithAnnotations(
+                name="Tag",
+                parent_type=None,
+                subtypes=set(),
+                attribute_types={},
+                import_path=_dummy_import_path(class_name="Tag"),
+                code="class Tag(BaseModel): pass",
+            ),
+        ]
+        functions = [
+            FunctionWithAnnotations(
+                function_full_name="process_exact",
+                class_name=None,
+                function_name="process_exact",
+                argument_types={"item": "Item"},
+                return_type=None,
+                import_path=_dummy_import_path(function_name="process_exact"),
+                code="def process_exact(item: Item): pass",
+            ),
+            FunctionWithAnnotations(
+                function_full_name="process_optional",
+                class_name=None,
+                function_name="process_optional",
+                argument_types={"item": "Optional[Item]", "tags": "list[Tag]"},
+                return_type=None,
+                import_path=_dummy_import_path(function_name="process_optional"),
+                code="def process_optional(item: Optional[Item], tags: list[Tag]): pass",
+            ),
+            FunctionWithAnnotations(
+                function_full_name="process_union",
+                class_name=None,
+                function_name="process_union",
+                argument_types={"item": "Item | None"},
+                return_type=None,
+                import_path=_dummy_import_path(function_name="process_union"),
+                code="def process_union(item: Item | None): pass",
+            ),
+        ]
+        result = RelationshipEdges.type_to_function(
+            types=types, functions=functions, ignored_types=COMMON_TYPES
+        )
+        assert result == {
+            ("Item", "process_exact"): TypeRelationship.TAKES_AS_EXACT_TYPE_OF_ARGUMENT,
+            ("Item", "process_optional"): TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT,
+            ("Tag", "process_optional"): TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT,
+            ("Item", "process_union"): TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT,
+        }
+
+
+class TestEdgeTypeAliases:
+
+    def test_edge_type_aliases_are_valid_two_arg_dicts(self):
+        for alias in (TypeToTypeEdges, TypeToFunctionEdges, FunctionToTypeEdges):
+            resolved = alias.__value__
+            assert typing.get_origin(resolved) is dict
+            assert len(typing.get_args(resolved)) == 2
+
+        type_to_type_adapter = TypeAdapter(TypeToTypeEdges)
+        assert type_to_type_adapter.validate_python(
+            {("A", "B"): TypeRelationship.PARENT_OF}
+        ) == {("A", "B"): TypeRelationship.PARENT_OF}
+
+        type_to_fn_adapter = TypeAdapter(TypeToFunctionEdges)
+        assert type_to_fn_adapter.validate_python(
+            {("A", "fn"): TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT}
+        ) == {("A", "fn"): TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT}
+
+        fn_to_type_adapter = TypeAdapter(FunctionToTypeEdges)
+        assert fn_to_type_adapter.validate_python(
+            {("fn", "A"): TypeRelationship.RETURNS_EXACTLY_THIS_TYPE}
+        ) == {("fn", "A"): TypeRelationship.RETURNS_EXACTLY_THIS_TYPE}

@@ -134,9 +134,10 @@ def tick(x: int) -> int:
 
 
 def build_counter(start: list[int], template: str = "Counter") -> ExecutableGraph:
-    """``Low -Up-> High``: one firing per seed token."""
+    """``Low -Up-> High``: one firing per seed token. ``Low`` is a port, where the
+    program puts more when every net around the counter is declared open."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Low", int, start),
+        ListPlaceNode("Low", int, start, port=True),
         ArgumentEdgeToTransition("Low", "Up", "x"),
         FunctionTransitionNode("Up", tick),
         ReturnedEdgeFromTransition("Up", "High"),
@@ -337,13 +338,14 @@ class TestRunningInnerNets:
         assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == ([], ["Front"])
         assert run(step(city)) == "Depart Depot"
         assert bus.destination == "Central", "the next stop of the loop"
-        assert bus.cabin.params["stopped"] is False
+        assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == ([], ["Front"]), (
+            "Depart leaves the cabin as it is"
+        )
         assert fireable(bus.cabin) == [], "nothing inside moves in transit: the doors are closed"
         assert run(step(city)) == "Arrive"
         assert tokens(city, "Central") == [bus] and bus.destination is None
         # Arrive opened the doors itself, so Depart Central is not fireable and the cabin has its turn.
         assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == (["Front"], [])
-        assert bus.cabin.params["stopped"] is True
         assert tokens(bus.cabin, "Announcements") == ["Arrived at Central"]
         assert fireable(city) == []
         assert fireable(bus.cabin) == ["Go To Door", "Go To Door From Standing"]
@@ -382,7 +384,7 @@ class TestReachingInside:
         assert tokens(city, "Platform@Central") == ["Dara", "Eve"], "nobody alights onto a platform"
         assert tokens(bus.cabin, "Standing") == ["Cato"]
         assert tokens(city, "Depot") == [] and tokens(city, "In Transit") == []
-        assert bus.cabin.params["stopped"] is True
+        assert (tokens(bus.cabin, "Doors Open"), tokens(bus.cabin, "Doors Closed")) == (["Front"], []), "stopped"
         ferry = tokens(city, "Harbour")[0]
         assert ferry.cabin.fired_counts == {}, "the bus's cabin, first in place order, had the inner turns"
         assert tokens(ferry.cabin, "Door") == ["Finn", "Gwen"]
@@ -449,6 +451,22 @@ class TestReachingInside:
         assert tokens(cabin, "Door") == ["Bram"] and cabin.place_named("Door").token_ids == (3,)
         assert cabin.drain_events() == [Added("Door", 2), Added("Door", 3), Removed("Door", 2)]
 
+    @pytest.mark.parametrize("bad_count", [-1, -100, True, False, 1.5, "1"])
+    def test_take_refuses_a_count_that_is_negative_or_not_an_int_and_takes_nothing(self, bad_count):
+        graph = ExecutableGraphOperations.construct_graph(
+            [ListPlaceNode("P", int, tokens=[1, 2, 3], port=True)]
+        )
+        with pytest.raises(ValueError):
+            NestedNets.take(graph, "P", count=bad_count)
+        assert graph.place_named("P").tokens == [1, 2, 3]
+
+    def test_take_of_zero_takes_nothing(self):
+        graph = ExecutableGraphOperations.construct_graph(
+            [ListPlaceNode("P", int, tokens=[1, 2], port=True)]
+        )
+        assert NestedNets.take(graph, "P", count=0) == []
+        assert graph.place_named("P").tokens == [1, 2]
+
     def test_a_sink_transition_fires_and_deposits_nothing(self):
         seen = []
         graph = ExecutableGraphOperations.construct_graph([
@@ -491,13 +509,15 @@ class TestObservability:
         assert (fired.transition, fired.consumed, fired.produced) == ("Board Depot", (("Platform@Depot", 3),), ())
 
     def test_the_bus_keeps_its_nested_id_from_depot_to_central(self):
+        """Nothing happens in the cabin in transit, and what ``Arrive`` does inside is
+        told under the place the bus lands in."""
         city = build_city()
         bus, ferry = tokens(city, "Depot")[0], tokens(city, "Harbour")[0]
         run(until(city, "Alight Central"))
         events = city.drain_events()
         assert {e.nested_id for e in events if isinstance(e, Nested)} == {bus.cabin.net_id, ferry.cabin.net_id}
         assert {e.path for e in events if isinstance(e, Nested) and e.nested_id == bus.cabin.net_id} == {
-            BUS_AT_DEPOT, at("In Transit", 10), BUS_AT_CENTRAL,
+            BUS_AT_DEPOT, BUS_AT_CENTRAL,
         }
         assert NestedNets.find(city, bus.cabin.net_id) == (BUS_AT_CENTRAL, bus.cabin)
         assert NestedNets.resolve(city, BUS_AT_CENTRAL) is bus.cabin
@@ -525,12 +545,13 @@ class TestObservability:
         def crush(box: Box) -> None:
             return None
 
-        # Outer first, so that the crush comes before the counter can count the 5.
+        # Outer first, so that the crush comes before the counter can count the 5;
+        # declared open, so that the program reaches the counter's port.
         shelf = ExecutableGraphOperations.construct_graph([
             ListPlaceNode("Shelf", Box, [Box(label="a", inner=build_counter([1]))], nested=True, stepping="outer_first"),
             ArgumentEdgeToTransition("Shelf", "Crush", "box"),
             FunctionTransitionNode("Crush", crush, guard=lambda g: g.params["crush"]),
-        ], params={"crush": False}, record_events=True)
+        ], params={"crush": False}, record_events=True, open=True)
         box = tokens(shelf, "Shelf")[0]
         run(ExecutableGraphOperations.execute_graph(shelf, stop_after_n_firings=None))  # the inner Up fires
         assert box.inner.fired_counts == {"Up": 1}
@@ -550,7 +571,7 @@ class TestObservability:
         assert box.inner.record_events is False and box.inner.drain_events() == []
 
     def test_drain_events_gathers_what_inner_nets_recorded_on_their_own(self):
-        shelf = build_shelf([Box(label="a", inner=build_counter([]))])
+        shelf = build_shelf([Box(label="a", inner=build_counter([]))], open=True)
         box = tokens(shelf, "Shelf")[0]
         NestedNets.put(box.inner, "Low", [7])
         assert shelf.drain_events() == [Nested(at("Shelf", 1, "counter"), box.inner.net_id, Added("Low", 1))]
@@ -623,8 +644,10 @@ class TestSummary:
 
     def test_a_nested_token_is_summarised_by_its_fields_and_inner_counts(self):
         city = build_city()
+        # Two passengers boarded by the city's own Board Depot, the cabin being inside
+        # the closed city, where the program puts nothing.
+        assert run(steps(city, 2)) == ["Board Depot", "Board Depot"]
         bus = tokens(city, "Depot")[0]
-        NestedNets.put(bus.cabin, "Door", ["Ada", "Bram"])
         # Three: the two passengers and the door token, Front.
         assert NestedNets.summary(bus) == "Vehicle(name='Bus 1', kind='Bus', destination=None) \u2282 cabin: 3"
         assert NestedNets.summary(bus, maximum_length=20) == "Vehicle(name='Bus 1'..."

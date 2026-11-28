@@ -22,14 +22,23 @@ from pydantic import BaseModel
 from petritype import petri_net
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    DrainEdge,
+    ExecutableGraph,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
     MutateEdge,
+    MutateWhereEdge,
+    ReadAllEdge,
+    ReadEdge,
+    ReadWhereEdge,
     ReturnedEdgeFromTransition,
     SnapshotEdge,
+    TakeWhereEdge,
 )
+from petritype.core.keys import Clause, Filter
 from petritype.runner.owner import Executing, Owner
+from petritype.runner.process import Frames
 from petritype.runner.registry import Registry
 
 pytestmark = pytest.mark.asyncio
@@ -114,6 +123,11 @@ def methods(lines):
     return [line.get("method") or ("result" if "result" in line else "error") for line in lines]
 
 
+def result(lines):
+    assert lines and "result" in lines[-1], lines
+    return lines[-1]["result"]
+
+
 def note(method, marking_version, running=False, **params):
     return {"method": method, "params": {**params, "marking_version": marking_version, "running": running}}
 
@@ -128,8 +142,9 @@ def double(x: int) -> int:
 
 @petri_net(name="chain", description="Doubles numbers")
 def chain(n: int = 2, start: int = 1):
+    """``Input`` is a port, where the runner injects."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Input", int, list(range(start, start + n))),
+        ListPlaceNode("Input", int, list(range(start, start + n)), port=True),
         ArgumentEdgeToTransition("Input", "Double", "x"),
         FunctionTransitionNode("Double", double),
         ReturnedEdgeFromTransition("Double", "Output"),
@@ -202,7 +217,7 @@ def parcels():
         ArgumentEdgeToTransition("Receiving", "Sort", "parcel"),
         FunctionTransitionNode("Sort", sort),
         ReturnedEdgeFromTransition("Sort", "Sorted"),
-        ListPlaceNode("Sorted", Parcel),
+        ListPlaceNode("Sorted", Parcel, port=True),  # where the runner injects
     ])
 
 
@@ -330,6 +345,22 @@ def prioritised():
     ])
 
 
+class Item(BaseModel):
+    name: str
+    tag: str
+    value: int = 0
+
+
+class Order(BaseModel):
+    oid: str
+    courier: str
+
+
+class Courier(BaseModel):
+    name: str
+    load: int = 0
+
+
 # --- describe, load and the errors before a load -------------------------------------------
 
 
@@ -447,7 +478,7 @@ async def test_get_state_shape():
         "running": False,
         "topology": {
             "places": [
-                {"name": "Input", "type_name": "int", "serializable": True},
+                {"name": "Input", "type_name": "int", "serializable": True, "port": True},
                 {"name": "Output", "type_name": "int", "serializable": True},
             ],
             "transitions": [{"name": "Double", "detail": {
@@ -483,6 +514,48 @@ async def test_edge_kinds_slots_and_priorities():
     assert {"place": "Seen", "transition": "Low", "direction": "in", "kind": "snapshot"} in state["topology"]["edges"]
     assert state["transitions"]["High"]["priority"] == 2.5
     assert "priority" not in state["transitions"]["Low"]  # it raised
+
+
+async def test_nan_and_infinity_priorities_are_omitted_and_produce_valid_json():
+    def noop(x: int) -> int:
+        return x
+
+    @petri_net(name="wild-priorities")
+    def wild_priorities() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode("In", int, [1]),
+            ListPlaceNode("Out", int),
+            ArgumentEdgeToTransition("In", "T1", "x"),
+            FunctionTransitionNode("T1", noop, priority=lambda _g: float("nan")),
+            ReturnedEdgeFromTransition("T1", "Out"),
+            ArgumentEdgeToTransition("In", "T2", "x"),
+            FunctionTransitionNode("T2", noop, priority=lambda _g: float("inf")),
+            ReturnedEdgeFromTransition("T2", "Out"),
+            ArgumentEdgeToTransition("In", "T3", "x"),
+            FunctionTransitionNode("T3", noop, priority=lambda _g: float("-inf")),
+            ReturnedEdgeFromTransition("T3", "Out"),
+            ArgumentEdgeToTransition("In", "T4", "x"),
+            FunctionTransitionNode("T4", noop, priority=lambda _g: 3.5),
+            ReturnedEdgeFromTransition("T4", "Out"),
+        ])
+
+    harness = Harness(wild_priorities)
+    await harness.send("load", {"net": "wild-priorities"})
+    [line] = await harness.send("get_state")
+    transitions = line["result"]["transitions"]
+    assert "priority" not in transitions["T1"]
+    assert "priority" not in transitions["T2"]
+    assert "priority" not in transitions["T3"]
+    assert transitions["T4"]["priority"] == 3.5
+    # Must encode cleanly as strict RFC 8259 JSON without raising.
+    encoded = Frames.encode([line])
+    assert b"NaN" not in encoded and b"Infinity" not in encoded
+    # A NaN priority is an error (since 2026-11-28): the step fails as when a
+    # priority raises, where it fired T1, the first declared.
+    [answer] = await harness.send("step")
+    assert answer["error"]["code"] == "internal" and "is NaN" in answer["error"]["message"]
+    [line] = await harness.send("get_state")
+    assert line["result"]["marking"]["places"]["In"]["count"] == 1
 
 
 async def test_token_limit_caps_tokens_but_not_count():
@@ -746,6 +819,116 @@ async def test_get_token_waits_only_for_a_token_handed_over_through_a_mutate_edg
     }}
 
 
+async def test_get_token_does_not_wait_for_a_plain_token_handed_over_through_a_read_edge():
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def look(trigger: int, item: Item) -> str:
+        entered.set()
+        await gate.wait()
+        return item.name
+
+    @petri_net(name="read-plain")
+    def read_plain() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode("Triggers", int, [1]),
+            ListPlaceNode("Items", Item, [Item(name="widget", tag="x", value=5)]),
+            ListPlaceNode("Done", str),
+            ArgumentEdgeToTransition("Triggers", "Look", "trigger"),
+            ReadEdge("Items", "Look", "item"),
+            FunctionTransitionNode("Look", look),
+            ReturnedEdgeFromTransition("Look", "Done"),
+        ])
+
+    harness = Harness(read_plain)
+    await harness.send("load", {"net": "read-plain"})
+    item_id = result(await harness.send("get_state"))["marking"]["places"]["Items"]["tokens"][0]["id"]
+
+    await harness.send("step", land=False)
+    task = asyncio.create_task(harness.pending.coroutine)
+    harness.pending = None
+    await entered.wait()
+
+    # Non-nested read token does not block get_token.
+    token = result(await harness.send("get_token", {"id": item_id}))
+    assert token["value"]["name"] == "widget"
+
+    gate.set()
+    landing = await task
+    await harness._follow(await harness.owner.completed(landing, NOW), True)
+
+
+async def test_a_keyed_take_shifts_the_snapshot_of_a_mutated_token_and_its_get_token_waits():
+    """A transition with TakeWhereEdge and MutateWhereEdge on the same place
+    removes an earlier index while mutating a later index; the surviving
+    mutated token must keep its eagerly captured snapshot at the shifted
+    index and block ``get_token`` while airborne."""
+    gate = asyncio.Event()
+    mutated_ready = asyncio.Event()
+
+    async def process(taken: Item, target: Item) -> str:
+        target.value = 999
+        mutated_ready.set()
+        await gate.wait()
+        return taken.name
+
+    @petri_net(name="keyed-remap")
+    def keyed_remap() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode(
+                "Items",
+                Item,
+                [
+                    Item(name="keep-before", tag="keep", value=1),
+                    Item(name="drop-me", tag="take", value=2),
+                    Item(name="mutate-me", tag="mut", value=3),
+                    Item(name="keep-after", tag="keep", value=4),
+                ],
+                keys=("tag",),
+            ),
+            ListPlaceNode("Done", str),
+            TakeWhereEdge("Items", "Work", "taken", where=Filter.where(tag="take")),
+            MutateWhereEdge("Items", "Work", "target", where=Filter.where(tag="mut")),
+            FunctionTransitionNode("Work", process),
+            ReturnedEdgeFromTransition("Work", "Done"),
+        ])
+
+    harness = Harness(keyed_remap)
+    await harness.send("load", {"net": "keyed-remap"})
+    before = result(await harness.send("get_state"))["marking"]["places"]["Items"]["tokens"]
+    before_by_label_name = {t["id"]: t for t in before}
+    keep_before_id = before[0]["id"]
+    mutated_id = before[2]["id"]
+    keep_after_id = before[3]["id"]
+
+    await harness.send("step", land=False)
+    task = asyncio.create_task(harness.pending.coroutine)
+    harness.pending = None
+    await mutated_ready.wait()
+
+    # The body has already set target.value = 999 in memory while airborne.
+    # get_state must still return the eagerly captured pre-mutation label at the shifted index (1).
+    mid_state = result(await harness.send("get_state"))
+    mid_tokens = mid_state["marking"]["places"]["Items"]["tokens"]
+    assert [t["id"] for t in mid_tokens] == [keep_before_id, mutated_id, keep_after_id]
+    assert mid_tokens[1]["label"] == before_by_label_name[mutated_id]["label"]
+    assert '"value":3' in mid_tokens[1]["label"]
+
+    # get_token on the surviving mutated token must WAIT because its remapped index is in view.eager.
+    assert await harness.send("get_token", {"id": mutated_id}) == []
+    # Untouched surviving tokens answer immediately.
+    assert result(await harness.send("get_token", {"id": keep_before_id}))["value"]["value"] == 1
+    assert result(await harness.send("get_token", {"id": keep_after_id}))["value"]["value"] == 4
+
+    gate.set()
+    landing = await task
+    lines = await harness._follow(await harness.owner.completed(landing, NOW), True)
+    # The deferred get_token for mutated_id is answered after landing with value 999.
+    token_answers = [line["result"] for line in lines if "result" in line and line["result"].get("id") == mutated_id]
+    assert len(token_answers) == 1
+    assert token_answers[0]["value"]["value"] == 999
+
+
 async def test_get_state_does_not_wait_for_a_body_running_on_its_thread():
     RELEASE.clear()
     ENTERED.clear()
@@ -786,6 +969,193 @@ async def test_a_stale_landing_is_ignored():
     assert methods(first.lines) == ["distributed", "result"]
     again = await h.owner.completed(landing, NOW)
     assert again.lines == [] and again.launch is None
+
+
+# --- what a firing hands over, as launched and the reads while it is airborne show it ---------------------
+
+
+def ids_by_place(state) -> dict:
+    return {name: [token["id"] for token in place["tokens"]] for name, place in state["marking"]["places"].items()}
+
+
+async def test_what_plain_drain_mutate_read_and_snapshot_edges_hand_over():
+    """``launched`` names what the argument edges take, the front token of a plain
+    edge and every token of a drain, an empty one's none. While the body runs, the
+    taken tokens are gone from the state; ``get_token`` waits for what the mutate
+    edge handed over and answers at once for what the read and snapshot edges did."""
+    def work(a: int, drained: list[int], empty: list[int], mut: list[int], r_one: str, r_all: list[str],
+             snap: int) -> int:
+        return a
+
+    @petri_net(name="mixed-edges")
+    def mixed_edges() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode("Plain", int, [10, 20]),
+            ListPlaceNode("Drained", int, [30, 40]),
+            ListPlaceNode("EmptyDrain", int, []),
+            ListPlaceNode("Mut", int, [50, 60]),
+            ListPlaceNode("ROne", str, ["r0", "r1"]),
+            ListPlaceNode("RAll", str, ["a0", "a1"]),
+            ListPlaceNode("Snap", int, [99]),
+            ListPlaceNode("Out", int),
+            ArgumentEdgeToTransition("Plain", "Work", "a"),
+            DrainEdge("Drained", "Work", "drained"),
+            DrainEdge("EmptyDrain", "Work", "empty"),
+            MutateEdge("Mut", "Work", "mut"),
+            ReadEdge("ROne", "Work", "r_one"),
+            ReadAllEdge("RAll", "Work", "r_all"),
+            SnapshotEdge("Snap", "Work", "snap"),
+            FunctionTransitionNode("Work", work),
+            ReturnedEdgeFromTransition("Work", "Out"),
+        ])
+
+    h = Harness(mixed_edges)
+    await h.loaded("mixed-edges")
+    assert await h.send("step", land=False) == [
+        note("launched", 1, transition="Work", consumed=[["Plain", "1"], ["Drained", "3"], ["Drained", "4"]]),
+    ]
+    assert ids_by_place(result(await h.send("get_state"))) == {
+        "Plain": ["2"], "Drained": [], "EmptyDrain": [], "Mut": ["5", "6"], "ROne": ["7", "8"],
+        "RAll": ["9", "10"], "Snap": ["11"], "Out": [],
+    }
+    for read in ("7", "8", "9", "10", "11"):
+        assert result(await h.send("get_token", {"id": read}))["id"] == read
+    for mutated in ("5", "6"):
+        assert await h.send("get_token", {"id": mutated}) == []
+    [line] = await h.send("get_token", {"id": "1"})
+    assert line["error"]["code"] == "unknown_token"
+    lines = await h.land()
+    assert [line["result"].get("id") for line in lines if "result" in line][1:] == ["5", "6"]
+
+
+async def test_a_keyed_take_beside_a_plain_take_on_one_place_hands_over_both():
+    """The two takes leave the place at two indices apart, or at the two at the
+    front taken in the other order; either way the state while the body runs
+    lacks exactly the two that ``launched`` names, as the place does after it."""
+    def pair(first: int, second: int) -> int:
+        return first + second
+
+    @petri_net(name="multi-same-place")
+    def multi_same_place(transition: str = "NonContig") -> ExecutableGraph:
+        edges = {
+            # The front (10) by the plain edge, then 30 by the keyed one.
+            "NonContig": [
+                ArgumentEdgeToTransition("Nums", "NonContig", "first"),
+                TakeWhereEdge("Nums", "NonContig", "second", where=Filter.where(v=30)),
+            ],
+            # 20 by the keyed edge, then the front (10) by the plain one.
+            "Contig": [
+                TakeWhereEdge("Nums", "Contig", "first", where=Filter.where(v=20)),
+                ArgumentEdgeToTransition("Nums", "Contig", "second"),
+            ],
+        }
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode("Nums", int, [10, 20, 30, 40], keys={"v": lambda x: x}),
+            ListPlaceNode("Out", int),
+            *edges[transition],
+            FunctionTransitionNode(transition, pair),
+            ReturnedEdgeFromTransition(transition, "Out"),
+        ])
+
+    for transition, consumed, left in (
+        ("NonContig", [["Nums", "1"], ["Nums", "3"]], ["2", "4"]),
+        ("Contig", [["Nums", "2"], ["Nums", "1"]], ["3", "4"]),
+    ):
+        h = Harness(multi_same_place)
+        await h.loaded("multi-same-place", {"transition": transition})
+        assert await h.send("step", land=False) == [note("launched", 1, transition=transition, consumed=consumed)]
+        assert ids_by_place(result(await h.send("get_state")))["Nums"] == left, transition
+        await h.land()
+        assert ids_by_place(result(await h.send("get_state")))["Nums"] == left, transition
+
+
+async def test_bound_edges_hand_over_what_their_source_names():
+    """The order taken is the one whose courier is there; the bound mutate edge
+    hands over that courier, so ``get_token`` waits for it alone."""
+    def dispatch(order: Order, courier: Courier, info: Courier) -> str:
+        courier.load += 1
+        return f"{order.oid}:{courier.name}:{info.name}"
+
+    @petri_net(name="bound-handover")
+    def bound_handover() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode(
+                "Orders", Order,
+                [Order(oid="o1", courier="missing"), Order(oid="o2", courier="bob")],
+                keys=("courier",),
+            ),
+            ListPlaceNode(
+                "Couriers", Courier,
+                [Courier(name="alice"), Courier(name="bob")],
+                keys=("name",),
+            ),
+            ListPlaceNode(
+                "Directory", Courier,
+                [Courier(name="carol"), Courier(name="bob")],
+                keys=("name",),
+            ),
+            ListPlaceNode("Log", str),
+            ArgumentEdgeToTransition("Orders", "Dispatch", "order"),
+            MutateWhereEdge(
+                "Couriers", "Dispatch", "courier",
+                where=Filter((Clause("name", input="Orders", input_key="courier"),)),
+            ),
+            ReadWhereEdge(
+                "Directory", "Dispatch", "info",
+                where=Filter((Clause("name", input="Orders", input_key="courier"),)),
+            ),
+            FunctionTransitionNode("Dispatch", dispatch),
+            ReturnedEdgeFromTransition("Dispatch", "Log"),
+        ])
+
+    h = Harness(bound_handover)
+    await h.loaded("bound-handover")
+    assert await h.send("step", land=False) == [note("launched", 1, transition="Dispatch", consumed=[["Orders", "2"]])]
+    assert ids_by_place(result(await h.send("get_state"))) == {
+        "Orders": ["1"], "Couriers": ["3", "4"], "Directory": ["5", "6"], "Log": [],
+    }
+    for untouched in ("3", "5", "6"):
+        assert result(await h.send("get_token", {"id": untouched}))["id"] == untouched
+    assert await h.send("get_token", {"id": "4"}) == []
+    lines = await h.land()
+    assert lines[-1]["result"]["value"] == {"name": "bob", "load": 1}
+
+
+async def test_the_snapshot_drops_the_keyed_taken_tokens_and_keeps_the_mutated_ones_at_their_new_indices():
+    """Two keyed takes from one place, each with a token handed to the body by a
+    mutate edge after it: while the body runs the state lists the rest in order,
+    and ``get_token`` waits for the two mutated tokens and for no other."""
+    def work(first: Item, second: Item, one: Item, other: Item) -> str:
+        return first.name + second.name
+
+    @petri_net(name="two-keyed-takes")
+    def two_keyed_takes() -> ExecutableGraph:
+        return ExecutableGraphOperations.construct_graph([
+            ListPlaceNode("Items", Item, [
+                Item(name="k0", tag="keep"), Item(name="t1", tag="take-1"), Item(name="m2", tag="mut-1"),
+                Item(name="t3", tag="take-2"), Item(name="m4", tag="mut-2"), Item(name="k5", tag="keep"),
+            ], keys=("tag",)),
+            ListPlaceNode("Done", str),
+            TakeWhereEdge("Items", "Work", "first", where=Filter.where(tag="take-1")),
+            TakeWhereEdge("Items", "Work", "second", where=Filter.where(tag="take-2")),
+            MutateWhereEdge("Items", "Work", "one", where=Filter.where(tag="mut-1")),
+            MutateWhereEdge("Items", "Work", "other", where=Filter.where(tag="mut-2")),
+            FunctionTransitionNode("Work", work),
+            ReturnedEdgeFromTransition("Work", "Done"),
+        ])
+
+    h = Harness(two_keyed_takes)
+    await h.loaded("two-keyed-takes")
+    assert await h.send("step", land=False) == [
+        note("launched", 1, transition="Work", consumed=[["Items", "2"], ["Items", "4"]]),
+    ]
+    assert ids_by_place(result(await h.send("get_state")))["Items"] == ["1", "3", "5", "6"]
+    for untouched in ("1", "6"):
+        assert result(await h.send("get_token", {"id": untouched}))["id"] == untouched
+    for mutated in ("3", "5"):
+        assert await h.send("get_token", {"id": mutated}) == []
+    lines = await h.land()
+    assert [line["result"].get("id") for line in lines if "result" in line][1:] == ["3", "5"]
 
 
 # --- start, quiescence, idle -----------------------------------------------------------------

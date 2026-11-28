@@ -1,4 +1,4 @@
-"""Stable token ids on ``ExecutableGraph`` (DESIGN_RUNNER.md, "Token ids").
+"""Stable token ids on ``ExecutableGraph`` (DESIGN_RUNNER.md, "Token ids and events").
 
 Every token gets a monotonic integer id from ``graph.next_token_id`` when it
 enters a place; ``place.token_ids`` runs parallel to ``place.tokens``. Ids move
@@ -33,12 +33,13 @@ def increment(x: int) -> int:
 
 
 def _chain(tokens=(1, 2, 3), **graph_options):
+    """``In`` -(Inc)-> ``Out``, both ports, which the program's commands write."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("In", int, list(tokens)),
+        ListPlaceNode("In", int, list(tokens), port=True),
         ArgumentEdgeToTransition("In", "Inc", "x"),
         FunctionTransitionNode("Inc", increment),
         ReturnedEdgeFromTransition("Inc", "Out"),
-        ListPlaceNode("Out", int),
+        ListPlaceNode("Out", int, port=True),
     ], **graph_options)
 
 

@@ -157,14 +157,14 @@ class TestSavedForm:
     def test_save_and_restore_a_net(self):
         cabin = build_cabin()
         NestedNets.put(cabin, "Door", ["Ada", "Bram"])
-        NestedNets.set_param(cabin, "stopped", False)
+        NestedNets.set_param(cabin, "seats", 3)
         cabin.disabled = {"Stand"}
         saved = NetJson.save(cabin)
         assert saved == {
             "template": "Cabin",
             "marking": {"Door": ["Ada", "Bram"], "Seats": [], "Standing": [], "Announcements": [],
                         "Doors Open": ["Front"], "Doors Closed": []},
-            "params": {"stopped": False, "seats": 2, "capacity": 6},
+            "params": {"seats": 3, "capacity": 6},
             "enabled": {"Sit": True, "Stand": False, "Go To Door": True, "Go To Door From Standing": True,
                         "Close Doors": True, "Clear Announcement": True},
         }
@@ -185,13 +185,51 @@ class TestSavedForm:
             NetJson.load_into(cabin, {"template": "Deck", "marking": {}})
         with pytest.raises(KeyError, match="no key 'extra'"):
             NetJson.load_into(cabin, {"marking": {}, "extra": 1})
-        assert cabin.params == {"stopped": True, "seats": 2, "capacity": 6}
+        assert cabin.params == {"seats": 2, "capacity": 6}
 
     def test_restore_needs_a_template(self):
         with pytest.raises(LookupError, match="names the template"):
             NetJson.restore({"marking": {}})
         with pytest.raises(LookupError, match="no template named 'Zeppelin'"):
             NetJson.restore({"template": "Zeppelin", "marking": {}})
+
+    def test_load_into_deep_copies_mutable_params(self):
+        graph = ExecutableGraphOperations.construct_graph(
+            [ListPlaceNode("In", int, [1])],
+            params={"tags": ["initial"], "config": {"nested": [1, 2]}},
+        )
+        saved_params = {"tags": ["loaded"], "config": {"nested": [3, 4]}}
+        saved = {"marking": {"In": [1]}, "params": saved_params, "enabled": {}}
+        NetJson.load_into(graph, saved)
+
+        # Mutate the input dictionary and its nested containers after load_into.
+        saved_params["tags"].append("mutated")
+        saved_params["config"]["nested"].append(99)
+        saved_params["config"]["extra"] = True
+
+        assert graph.params == {"tags": ["loaded"], "config": {"nested": [3, 4]}}
+
+    def test_restore_deep_copies_mutable_params(self):
+        @Templates.template("Inbox With Mutable Params")
+        def make_graph() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph(
+                [ListPlaceNode("In", int)],
+                params={"items": [], "meta": {"k": "v"}},
+            )
+
+        try:
+            saved = {
+                "template": "Inbox With Mutable Params",
+                "marking": {"In": [7]},
+                "params": {"items": ["a"], "meta": {"k": "loaded"}},
+                "enabled": {},
+            }
+            restored = NetJson.restore(saved)
+            saved["params"]["items"].append("b")
+            saved["params"]["meta"]["k"] = "mutated"
+            assert restored.params == {"items": ["a"], "meta": {"k": "loaded"}}
+        finally:
+            Templates.forget("Inbox With Mutable Params")
 
     def test_a_graph_dumps_as_its_saved_form_in_json_mode_only(self):
         cabin = build_cabin()
@@ -201,15 +239,15 @@ class TestSavedForm:
 
     def test_a_nested_token_has_the_json_form_of_the_design(self):
         city = build_city()
+        assert run(step(city)) == "Board Depot", "Ada boards, by the closed city's own route into the cabin"
         bus = tokens(city, "Depot")[0]
-        NestedNets.put(bus.cabin, "Door", ["Ada"])
         assert JsonForm.encode(bus) == {
             "name": "Bus 1", "kind": "Bus", "destination": None,
             "cabin": {
                 "template": "Cabin",
                 "marking": {"Door": ["Ada"], "Seats": [], "Standing": [], "Announcements": [],
                             "Doors Open": ["Front"], "Doors Closed": []},
-                "params": {"stopped": True, "seats": 2, "capacity": 6},
+                "params": {"seats": 2, "capacity": 6},
                 "enabled": {"Sit": True, "Stand": True, "Go To Door": True, "Go To Door From Standing": True,
                             "Close Doors": True, "Clear Announcement": True},
             },
@@ -219,11 +257,11 @@ class TestSavedForm:
     def test_a_nested_token_decodes_strictly_and_rebuilds_its_net(self):
         saved = {"name": "Bus 2", "kind": "Bus", "destination": "Central",
                  "cabin": {"template": "Cabin", "marking": {"Seats": ["Ada"]},
-                           "params": {"stopped": False}, "enabled": {"Sit": False}}}
+                           "params": {"seats": 3}, "enabled": {"Sit": False}}}
         bus = JsonForm.decode(Vehicle, saved)
         assert bus.name == "Bus 2" and bus.destination == "Central"
         assert bus.cabin.template == "Cabin" and tokens(bus.cabin, "Seats") == ["Ada"]
-        assert bus.cabin.params == {"stopped": False, "seats": 2, "capacity": 6}
+        assert bus.cabin.params == {"seats": 3, "capacity": 6}
         assert bus.cabin.disabled == {"Sit"}
         with pytest.raises(ValueError, match="not a saved net"):
             JsonForm.decode(Vehicle, {**saved, "cabin": {"template": "Zeppelin", "marking": {}}})
@@ -261,7 +299,7 @@ class TestSaveAndLoadTheCity:
             "Door": [], "Seats": ["Ada", "Bram"], "Standing": ["Cato"], "Announcements": [],
             "Doors Open": [], "Doors Closed": ["Front"],
         }
-        assert bus_in_transit["cabin"]["params"]["stopped"] is False
+        assert bus_in_transit["cabin"]["params"] == {"seats": 2, "capacity": 6}
         assert in_transit["params"] == {"destination": None}
 
         loaded = NetJson.load_into(build_city(), in_transit)
@@ -297,8 +335,8 @@ class TestFork:
 
     def test_a_fork_is_a_new_net_with_the_same_marking(self):
         city = build_city()
+        assert run(step(city)) == "Board Depot", "Ada boards, by the closed city's own route into the cabin"
         bus = tokens(city, "Depot")[0]
-        NestedNets.put(bus.cabin, "Door", ["Ada"])
         fork = NestedNets.fork(bus)
         assert fork is not bus and fork.cabin is not bus.cabin
         assert fork.cabin.net_id != bus.cabin.net_id

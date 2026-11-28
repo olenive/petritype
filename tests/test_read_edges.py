@@ -22,7 +22,6 @@ from petritype.core.executable_graph_components import (
     MapPlaceNames,
     MapTransitionNames,
     MutateEdge,
-    NestedNets,
     ReadAllEdge,
     ReadEdge,
     ReturnedEdgeFromTransition,
@@ -193,9 +192,7 @@ class TestWhatHoldsATransitionBack:
 
 
 def squad(*names: str) -> ExecutableGraph:
-    net = ExecutableGraphOperations.construct_graph([ListPlaceNode("Members", str)])
-    NestedNets.put(net, "Members", list(names))
-    return net
+    return ExecutableGraphOperations.construct_graph([ListPlaceNode("Members", str, list(names))])
 
 
 def barracks(*nodes, calls=("Sarge",)):
@@ -519,8 +516,9 @@ class TestTheConcurrentRuntime:
         )
         assert firing_ids.read == [("Barracks", token_id) for token_id in ids(graph, "Barracks")]
         assert firing_ids.mutated == []
-        from petritype.runtime import _held
-        assert _held({"Call": (graph.transitions[0], {}, firing_ids)}) == frozenset(firing_ids.read)
+        from petritype.runtime import _Claims, _held
+        in_flight = {"Call": (graph.transitions[0], {}, firing_ids, _Claims())}
+        assert _held(in_flight, MapPlaceNames.to_list_place_nodes(graph)) == frozenset(firing_ids.read)
 
 
 # --- over the wire ----------------------------------------------------------------------------------------

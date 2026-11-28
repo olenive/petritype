@@ -27,9 +27,9 @@ a running net's state and respond to input promptly, it isn't done.
 - **Tier 1 (application):** input places + output places + clock + lifecycle.
   Data-only, safe, portable. The normal way to use a net.
 - **Tier 2 (operator/debug):** force-fire, change guard/selector, edit topology,
-  snapshot/restore. Privileged. Snapshot/restore exists in the library as the JSON save
-  and restore (`NetJson.save` / `NetJson.restore`, "Nets as tokens", phase 2). The
-  `Fire` command fires a named transition only when it is fireable; forcing one stays Tier 2.
+  snapshot/restore. Privileged. Only snapshot/restore exists, as the JSON save and
+  restore (`NetJson.save` / `NetJson.restore`). The `Fire` command fires a named
+  transition only when it is fireable, so it is not force-fire.
 
 ## Scope discipline
 
@@ -38,614 +38,324 @@ this." Stop when it traces to "well, it's a game" (renderers, physics, ECS, fram
 timing, netcode). The tiny game is a **test vehicle** that proves the model — not
 the product.
 
----
+## What this file holds
 
-# Runner & state-flow design
-
-Decisions settled in design discussion (2026-06-21). These specify the runtime that
-replaces the hand-rolled `while`/`for` loops currently copy-pasted into every example
-notebook. **One way to define a net; one runner; selectable execution modes.**
-
-## Execution is functions over data, not an object
-
-- **`Runner`** is a namespace class of functions (matching `ExecutableGraphOperations`) —
-  no instances, no hand-written `__init__`.
-- Run-state lives in (a) the `ExecutableGraph`, mutated in place, and (b) a passive
-  **`RunContext`** dataclass the *caller* owns (`graph`, `mode`, `observers`, `inbox`,
-  `stop`, `strict`). `RunContext` is the typed replacement for the notebooks' ad-hoc
-  `session` dict.
-- **Lifecycle is the caller's.** `run_indefinitely` is a coroutine the caller launches and
-  cancels; the runner owns no hidden background object. Stdlib resources (`Queue`,
-  `Event`, `Task`, an executor) are held by the caller — they are resources, not our
-  behavior objects.
-
-## Observation — live reference out, render at your own cadence
-
-- Observers are functions `(graph) -> None` handed the **live graph by reference**
-  (zero copy). The graph already carries everything a renderer needs: marking,
-  structure, and `step_count` / `last_fired` / `fired_counts`.
-- **"Don't mutate" is a contract** for observers, as today's visualizers already honor.
-  Two opt-in guards, both off the hot path: `Runner.read_only(graph)` (a deep
-  read-only view for dev / untrusted visualizers) and a *serializing* observer that
-  projects to a small renderable summary at a process boundary.
-- **Immutable snapshots rejected as the default:** per-step copy cost for high-rate
-  nets, and tokens are not guaranteed serializable. A `NetSnapshot` survives only as
-  *one consumer's* concern — the web/remote observer that projects to a serializable
-  render-summary (place names + token counts/labels), never raw tokens.
-- Visualizers **re-derive structure per render** (already the default via
-  `from_executable_graph`), so topology changes need no special handling on the view side.
-
-## Input — commands on an inbox, drained between steps
-
-- Input is typed **commands** placed on `RunContext.inbox` (an `asyncio.Queue` the
-  caller owns). The runner **drains all pending commands at each step boundary**
-  (between fires), applies them in FIFO order, then steps. It is the dual of the
-  observation stream, and the same channel works in-process and cross-process.
-- **Never direct mutation from a UI callback** — that risks torn mid-fire writes (the
-  engine caches its lookup maps at the top of an `execute_graph` call). The runner is
-  the only thing that mutates the marking.
-- **The visualizer is the input *surface* but produces commands, never touching the
-  graph** — so "visualizers don't mutate the net" holds even for interactive controls.
-- **Tier-1 command vocabulary:**
-  - Places: `Extend(place, tokens)` — append a list of tokens (single token = `[token]`;
-    the argument is *always* a list); `SetTokens(place, tokens)` — replace all tokens
-    (`[]` clears the place).
-  - Transitions: `SetParam(transition, …)` (over `kwargs`); `Enable` / `Disable`;
-    `Fire(transition)`, which fires it once now if it is fireable (since 2026-10-16).
-  - The append/extend ambiguity (one list-valued token vs many tokens) is resolved by
-    *always* treating the argument as a list of tokens. Guardrails: require an actual
-    `list` (kills the `str`-is-iterable footgun) plus a per-element type-check against
-    the place type. `Append(place, token)` may return later as pure unambiguous sugar.
-- **`strict` flag** on `RunContext`: default (non-strict) drops-and-logs malformed input
-  (right for live interactive nets); `strict=True` raises (right for tests / dev / CI).
-
-## Topology may change — do not preclude it
-
-- The runner **assumes it is handed a valid net.** Whatever mutates structure owns
-  keeping it valid — structurally, *and* by mutating only between steps. `validate_graph`
-  is exposed as a tool the mutator may call on itself.
-- **Do not build a topology-edit API yet**; just don't assume static structure
-  (re-derive per render; reserve an optional `structure_version` for bandwidth caching).
-
-## Ordering is intentional — earlier wins
-
-- **Token extraction is FIFO** (`place.tokens.pop(0)`), not the prototype's accidental
-  LIFO (`pop()`). Makes `Extend` order = processing order, and matches the already
-  insertion-ordered bulk-extraction path. (Switch the container to `deque` only if
-  profiling demands it.)
-- **Transition selection defaults to first-defined-wins**, implemented directly (remove
-  the double-reversal; delete the vestigial `next_transition`). `transition_selector`
-  remains the override for priority / round-robin / random.
-- **The tie-break is a setting** (0.1.3; `round_robin` since 2026-10-12).
-  `ExecutableGraph.tie_break`, also a `construct_graph` keyword, decides which of the
-  top-priority fireable transitions the default selector fires: `"first_declared"` (the
-  default, the rule above), `"last_declared"`, or `"round_robin"`, the first one declared
-  after the transition it chose last in this net (its cursor), wrapping to the first, and
-  the first declared when there is no cursor yet (a fresh net, or one loaded from its saved
-  form: the cursor is kept in memory only, `_last_pick`). Only the default selector reads
-  the setting; it moves the cursor on every pick, whatever the tie-break, though only
-  `round_robin` reads it, so a tie-break switched to `round_robin` mid-run resumes after
-  the last pick, and a custom selector neither reads nor moves it; a disabled
-  transition is not fireable and so never a candidate; each net, inner nets included, has
-  its own. A FIFO pipeline runs in batches under the first, token by token under the
-  second, and its live stages in turn under the third. The Rust port's
-  `TieBreak::RoundRobin` is the same rule in the same words.
-
-## Read arcs / non-consuming reads (implemented)
-
-Two non-consuming edge types let a transition read a place without consuming it — modelling
-parameters, toggles, and guard-state **uniformly as places you write a token to** (each a
-visible, pokable node):
-
-- **`SnapshotEdge`** — the transition receives a **deep-copy snapshot**; the place is untouched
-  (the read cannot disturb it).
-- **`MutateEdge`** — the transition receives the **live tokens** and may modify them in place;
-  they stay (not consumed) but may be changed.
-
-Both require **presence** to enable (a token must exist to read) and never consume (a
-`SurveyEdge`, a snapshot of every token that also reads an empty place, does not require it:
-"Input edges that accept an empty place", below). The
-argument receives all tokens (list-typed arg) or the single token (scalar arg). Rendered
-distinctly: `SnapshotEdge` is a dashed grey arrow into the transition; `MutateEdge` is a thicker
-bidirectional grey line with dot ends — read vs read/write at a glance. Both edges (and their
-read-place nodes) recolour magenta when their transition fires, like the consuming / producing
-edges. Wired into the engine, both run modes, and the input layer (update a read-arc place with
-`SetTokens`).
-
-## Co-located controls — node-keyed panel + control-map
-
-- A control is bound to a node via a separate **control-map** `{name: ControlSpec}`, keyed
-  by the control's own name, authored by the app and kept *off* the net (the
-  `ExecutableGraph` stays pure data).
-- `ControlSpec` is a passive record: target `node`, `kind` (toggle / button / slider /
-  select / text), `label`, and `to_command(value) -> Command` (UI value → inbox command),
-  or `to_command(value, graph) -> Command` for a command that depends on the marking.
-- The UI renders a **panel keyed by node name** beside the diagram, binds each widget to
-  its `to_command`, and enqueues onto `ctx.inbox` (see Input) — never touching the graph.
-- Needs **no renderer change** (node-keyed = names we already have). Pixel-on-node overlay
-  is a future additive upgrade, once the renderer emits node coordinates.
-
-## Observation control regimes — who holds the clock
-
-Observers are **always coalescing** best-effort views of current state; there is no
-lossless-recording observer. The real distinction is who drives firing:
-
-- **Net-driven (autonomous):** `run_indefinitely` (+ tick) fires on its own cadence;
-  observers coalesce against a latest-reference slot + wake event (zero copy). If a
-  renderer can't keep up it shows a stale-but-current semblance — dropping intermediate
-  frames is correct. The engine **never blocks on a renderer** (which also protects input
-  draining).
-- **Observer-driven (stepped):** `Runner.step(ctx)` fires one and returns; the caller
-  renders and decides when to advance — the **advance signal can be anything** (a button,
-  an animation-complete callback, a timer). The net is *gated* on the observer: a
-  deliberate control inversion, not back-pressure. No frames missed, because the net never
-  runs ahead.
-
-Where lossless completeness is genuinely needed (audit / replay of an autonomous net), it
-is the **engine's own cheap in-loop log** (`step_count` / `fired_counts` /
-`transition_history`), not a buffering observer. Observers view; the engine records.
-`runtime.fired_since(previous, current)` is the bridge between the two: an observer
-snapshots `fired_counts` and diffs at its next wake-up, recovering every firing as
-per-transition counts even though the notifications themselves coalesce. (`last_fired`
-stays a UI convenience — it names only one completion per concurrent deposit batch.)
-
-## Execution responsiveness — two independent axes
-
-Responsiveness under a long-running transition decomposes into two *separate* axes, often
-conflated as "concurrency":
-
-1. **Where the body runs** (#8) — inline on the event loop vs **offloaded** to an executor.
-   Pure responsiveness; **no Petri-net semantic change**.
-2. **How many transitions are in flight** (#7) — **sequential** (one resolves fully before
-   the next is picked) vs **concurrent** (multiple bodies run as tasks, deposit on
-   completion). The semantically loaded axis.
-
-A long op needs axis 1 (offload). It needs axis 2 only if the *rest of the pipeline must
-keep firing during* the long op.
-
-## Concurrent firing (#7)
-
-**Default `SEQUENTIAL`; `CONCURRENT` is opt-in** via `RunContext.mode` — one definition,
-two run modes.
-
-**The engine's stages are already factored** for this: a fire is `stage_1_extract`
-(consume tokens — *synchronous*), `stage_2_call` (run body — *async*), `add_tokens`
-(deposit — *synchronous*). Sequential runs them inline, one transition at a time.
-Concurrent is the **same stages, re-orchestrated** — not a rewrite. `Runner` picks the
-orchestrator by `ctx.mode`.
-
-**Concurrent semantics — maximal, conflict-free, lock-free:**
-
-```
-each round:
-  for each enabled transition (re-checking as you go):
-      stage_1 consume its tokens     # synchronous — removes them now
-      launch stage_2 body as a task
-  await FIRST_COMPLETED
-  for each finished task:
-      stage_3 deposit; mark not-in-flight; step_count += 1
-  repeat until nothing enabled AND nothing in-flight
-```
-
-- **No locks.** Single-threaded asyncio + synchronous `stage_1` means there is no `await`
-  between "is it enabled?" and "consume its tokens" — so two transitions can't double-spend.
-- **Conflicts auto-resolve** via consume-as-you-go: consuming transition A's tokens disables
-  a conflicting B in the same round. No separate conflict resolver.
-- **Independent branches overlap** (the `execution_modes` example: two slow branches →
-  sequential ≈ sum of durations, concurrent ≈ max).
-
-**In-flight marking:** while a body runs, its inputs are consumed-and-gone, outputs not yet
-deposited. The cue is the transition shown **in-flight** (the `in_flight` view field + the
-existing activation-colour highlight); tokens reappear on completion. A fuller
-reserved-token holding-area model is deferred.
-
-**Trades accepted in concurrent mode (why sequential stays default):**
-
-- **No deterministic replay** — completion order is wall-clock-dependent. `step_count` still
-  counts fires monotonically, but their order isn't reproducible. Need replay → sequential.
-- **Error = consumed tokens lost** — a body that raises has already consumed its inputs.
-  Default **log + drop** (matches `strict` / drop); rollback or an error-place is a later
-  option.
-- **Visualization blurs** — multiple transitions lit at once; the crisp one-per-step
-  animation lives in sequential mode.
-
-**Deferred:** the per-transition concurrency flag ("only these overlap") — maximal
-concurrency is simplest and most illustrative for v1.
-
-## Offloading blocking transitions (#8)
-
-A body that doesn't yield blocks the single event-loop thread (freezing firing, clock, input
-draining, observers). `async` does **not** rescue CPU-bound work — a coroutine that computes
-without `await` never yields. The fix is `await loop.run_in_executor(...)`. Which executor is
-entirely a **GIL** story (only one thread runs Python bytecode at a time):
-
-| body | executor | why |
-|---|---|---|
-| async I/O (awaits) | none — just a task | already yields |
-| blocking-sync I/O (`requests`, DB, `sleep`) | **Thread**Pool | GIL released while waiting |
-| native compute (PyTorch / NumPy / BLAS) | **Thread**Pool | GIL released in C / CUDA kernels |
-| pure-Python CPU (tight Python loop) | separate **process** | only way past the GIL |
-
-**Key practical point:** the thread pool already covers I/O *and* library compute — so it
-parallelizes most real work, including most ML inference, **with no serialization**.
-Pure-Python CPU that's a genuine bottleneck and can't be vectorized into a GIL-releasing
-library is the *rare tail*.
-
-**Decision — the engine offers `execution = inline | thread` only.** Both are shared-memory:
-**no pickling, no assumptions about token types.**
-- `inline` (default) — instant bodies.
-- `thread` — opt-in offload for blocking I/O and library compute. Engine-managed, safe for
-  any tokens.
-
-**Process-level parallelism is the transition function's own concern (approach A).** A
-transition needing a separate process does it *inside its own body*: brings its own process
-pool, serializes only the clean payload it knows is picklable, awaits the result, returns it.
-To the engine it is a normal async transition that awaits — the **engine never owns a process
-pool or pickles a token.** Rationale: tokens may not be picklable, and the framework must not
-assume otherwise (a `ProcessPoolExecutor` pickles args + return + the function itself); the
-author who needs processes is the one who knows their data.
-
-> A net-level "all tokens picklable" contract enabling engine-managed process offload
-> (approach **B**) is **left out** for now — process-level parallelism in Python is likely to
-> improve (free-threaded / no-GIL builds, CPython 3.13+), which may remove the need for
-> process pools and their pickling altogether. Revisit then.
-
-**Executors are caller-owned resources on `RunContext`** (`thread_pool`, or `None` → default);
-pool size is the caller's knob. **Offload composes with both modes:** sequential + thread =
-responsive single-stream (solves "stay responsive during a 10 s inference" with *no*
-concurrency); concurrent + thread = parallel multi-core throughput. Errors surface via the
-awaited future — same `strict` / log-drop policy.
+The code is the source of truth: its docstrings and tests, `PROTOCOL.md` (the wire
+contract shared with the Rust runtime) and `CHANGELOG.md` (what changed in each
+release). This file keeps, per area, a short overview and where to look in the code,
+the decisions whose reasons the code cannot hold (alternatives rejected included), and
+what is not built yet, listed at the end of each area. The protocol runner has its own
+file, `DESIGN_RUNNER.md`.
 
 ---
 
-**Status: design complete (2026-06-21); implementation underway.** Concerns #1–#11 resolved.
+# Runner and state flow
 
-**Done:**
-- The **ordering cleanup** (#9 FIFO extraction `place.tokens.pop(0)` + #11 first-defined
-  selection, implemented directly — the double-reversal and the vestigial `next_transition`
-  removed) and removal of the `stage_1` debug-print cruft (the lone remaining info line is now
-  `verbose`-gated). All 17 notebook tests pass; gallery regenerated.
-- **`petritype/runtime.py`** — the **core `Runner`**: a namespace class of functions over a
-  passive `RunContext` (`graph`, `mode`, `observers`), with `run_to_completion` / `step` and
-  the `SEQUENTIAL` / `CONCURRENT` orchestrators. Observers are sync-or-async callables handed
-  the live graph after each state change.
-- **Input layer (#4)** in `petritype/runtime.py` — typed commands on `RunContext.inbox`
-  (`Extend` / `SetTokens` for places; `SetParam` / `Enable` / `Disable` for transitions),
-  drained FIFO **between steps** and wired into both modes and `step`. `RunContext.strict`
-  raises on malformed input vs the default drop-and-log. The runner is the only thing that
-  mutates the graph; a control/UI only produces commands.
-- **`run_indefinitely` (#6 real-time)** in `petritype/runtime.py` — drives the net on an
-  internal `tick` until `RunContext.stop` is set, draining input each tick and **surviving idle
-  ticks** (it never stops just because nothing is enabled). Works in both modes (concurrent
-  polls in-flight tasks per tick). Verified headlessly: autonomous ticking, live mid-run
-  injection, clean stop.
-- **`examples/execution_modes/`** — `net.py` (two independent 3-stage branches) and two
-  **animated** notebooks that now import the lifted `Runner` and differ in exactly one value
-  (`ExecutionMode.SEQUENTIAL` vs `.CONCURRENT`), proving "one definition, two run modes."
-- **`examples/interactive/parcel_sorter.py`** — a user-driven net (`Inbox → Sort → Sorted`)
-  where each button *produces a command onto the inbox* (`Extend` to inject a parcel,
-  `Enable` / `Disable` to toggle the sorter, `SetTokens` to clear, `step` to advance). The
-  first example where you poke a net *while it runs*; exercises the whole input layer.
-- **`examples/interactive/realtime_sorter.py`** — the same net running on a clock: marimo's
-  `mo.ui.refresh` timer drives `Runner.step` every 0.4 s, draining queued input each tick, so
-  you inject *while it runs*. (Marimo owns the clock here; `run_indefinitely` is the owned-loop
-  equivalent.) Structurally verified via export; the live ticking + injection needs confirming
-  in `marimo edit`.
-- **`examples/interactive/read_arc_scaler.py`** — read arcs live: `Scale` reads a `Multiplier`
-  via a `SnapshotEdge` (adjust the factor live with ➖ / ➕; it's never consumed) and increments
-  a `Processed` tally via a `MutateEdge` (a running total kept in place). Both render dashed —
-  the demo of read arcs composing with the input layer.
-- **Read arcs (#10)** — non-consuming `SnapshotEdge` (deep-copy read, place untouched) and
-  `MutateEdge` (live read/write) edge types: `construct_graph` routing, name + type validation,
-  presence-required enabledness, non-consuming read in both run modes (deep-copy vs live), and
-  dashed rendering (snapshot: no head; mutate: diamond). Verified.
+`petritype/runtime.py` replaced the hand-rolled `while`/`for` loops the example
+notebooks used to carry: one way to define a net, one `Runner`, selectable execution
+modes. Its module docstring lists the layers (execution modes, observation, input
+commands, real-time ticking, offload, non-consuming edges, limits, nested nets, closed
+nets, controls). `petritype/marimo_controls.py` renders a control-map as marimo
+widgets. Examples: `examples/execution_modes/` (one net, two modes) and
+`examples/interactive/`. The concern numbers (#1 to #11) are those of the design
+discussion of 2026-06-21; the module docstring uses some of them.
 
-- **Offload (#8)** — `FunctionTransitionNode.execution = "inline" | "thread"`; a sync body
-  marked `thread` runs via `loop.run_in_executor` (the caller's `RunContext.thread_pool`, else
-  the default) so it never blocks the loop. Async bodies run inline (already yield). Verified:
-  sequential + thread keeps the loop responsive under a 0.3 s blocking body (55 loop ticks vs 0);
-  concurrent + thread runs two such bodies in parallel (0.31 s vs 0.61 s). Process-level
-  parallelism stays the function's own concern — the engine never pickles a token.
+## Decisions
 
-- **In-flight visualisation** — concurrent mode maintains `ExecutableGraph.in_flight` (transitions
-  whose bodies are running but haven't deposited yet); the runner notifies after launching, so
-  those transitions render **gold ("working")** and clear as each deposits. Verified: two
-  overlapping bodies show gold mid-flight, then clear.
+- **Functions over data, not an object.** `Runner` is a namespace class of functions,
+  like `ExecutableGraphOperations`. Run state lives in the `ExecutableGraph` (mutated in
+  place) and a passive `RunContext` the caller owns. The lifecycle is the caller's:
+  `run_indefinitely` is a coroutine the caller launches and cancels, and the stdlib
+  resources (queue, event, task, executor) are held by the caller, so the runner owns no
+  hidden background object.
+- **Observers get the live graph by reference** (zero copy); not mutating it is a
+  contract. Immutable per-step snapshots were rejected as the default: a copy per step
+  costs too much at high firing rates, and tokens are not guaranteed serializable. A
+  serializable summary (place names, counts, labels, never raw tokens) is the concern of
+  the one consumer that crosses a process boundary. Renderers re-derive structure on
+  each render, so a topology change needs nothing on the view side.
+- **Observers coalesce; the engine records.** There is no lossless observer. An
+  autonomous net (`run_indefinitely`) never blocks on a renderer, which also keeps input
+  draining; a renderer that falls behind shows the latest state, and dropping frames is
+  correct. A stepped net (`Runner.step`) is gated on its caller, who decides when to
+  advance (a button, an animation finishing, a timer), so no frame is missed. Where
+  completeness matters (audit, replay) it comes from the engine's own record
+  (`step_count`, `fired_counts`, `transition_history`, the events), and `fired_since`
+  recovers every firing from two snapshots of `fired_counts`.
+- **Input is commands on an inbox, drained between firings** (#4). Never direct mutation
+  from a UI callback: that risks writes torn mid-fire, since the engine builds its lookup
+  maps once at the start of a call. A visualiser is the input surface but only produces
+  commands, so "visualisers don't mutate the net" holds for interactive controls too.
+- **A command's tokens are always a list.** `Extend(place, [token])`, never a bare
+  token, which settles one list-valued token versus many tokens. An actual `list` is
+  required (a `str` is iterable too), and each element is type-checked against the
+  place.
+- **`strict`** on `RunContext`: drop and log malformed input by default (right for a
+  live net), raise under `strict=True` (right for tests and CI).
+- **Topology may change; the runner does not police it** (#1). The runner assumes it is
+  handed a valid net. Whatever changes structure keeps it valid and does so only between
+  firings. No topology-edit API is built, but nothing may assume static structure.
+  The lookups by name and the firing maps are kept between calls for speed, so the
+  editor also tells the net (`ExecutableGraph.structure_changed`, decided 2026-11-27):
+  a key that noticed every edit would cost as much as the lookups it saves, and an edit
+  made to a built net directly is already the editor's responsibility.
+- **Earlier wins** (#9, #11). Tokens are taken first in, first out, so `Extend` order is
+  processing order and matches the list-mode path (the prototype's last-in-first-out
+  `pop()` was an accident). The default selector picks the highest priority, ties to the
+  first declared; `tie_break` (`default_transition_selector`) and `transition_selector`
+  are the overrides.
+- **Non-consuming edges model parameters, toggles and guard state as places** you write a
+  token to (#10), so each is a visible node you can poke, with no mechanism of its own.
+- **Controls stay off the net** (#5). A control-map `{name: ControlSpec}` is authored by
+  the app and kept beside the net, so `ExecutableGraph` stays pure data. The panel is
+  keyed by node name, so it needs no renderer change.
+- **Responsiveness has two independent axes**, often both called concurrency: where a
+  body runs (inline, or offloaded to a thread: no change to Petri-net semantics), and how
+  many transitions are in flight (sequential or concurrent: a semantic change). A long
+  body needs the first; it needs the second only if the rest of the net must keep firing
+  meanwhile.
+- **Offload is `execution = "inline" | "thread"` and nothing more** (#8). `async` does not
+  help CPU-bound work that never awaits. A thread pool covers blocking I/O and native
+  compute that releases the GIL (NumPy, PyTorch), which is most real work, with no
+  pickling and no assumption about token types. A body that needs a separate process
+  brings its own pool and pickles only what it knows is picklable (approach A): the
+  engine never owns a process pool or pickles a token, since tokens may not be
+  picklable and the author is the one who knows their data. A net-level "all tokens
+  picklable" contract for engine-managed process offload (approach B) is left out:
+  free-threaded CPython (3.13+) may remove the need for process pools. Offload composes
+  with both modes.
 
-- **Control-map (#5)** — `ControlSpec` + `apply_control` (framework, in `runtime.py`) and
-  `petritype/marimo_controls.py` (`build_controls` / `controls_row` / `drain_controls`): a
-  declarative `{name: ControlSpec}` map keyed by control name, kept off the net, rendered as
-  marimo widgets that only *produce inbox commands* (buttons on click, toggles / sliders /
-  selects on change, a text box on its send button). A `to_command` that takes a second
-  argument is handed the net as well, `(value, graph)`; the text kind and the net argument
-  came on 2026-10-16. `examples/interactive/parcel_sorter.py` refactored onto it. Verified.
+## Concurrent mode (#7)
 
-**Status: the runtime spec (concerns #1–#11) is fully built and verified.** Possible future
-work, none blocking: **pixel-on-node** co-located controls (vs the current node-keyed panel);
-**operator / Tier-2** capabilities (force-fire and topology editing; `Fire`, since 2026-10-16,
-fires a named transition only when it is fireable, and snapshot / restore is built as the
-JSON save and restore, `NetJson.save` / `NetJson.restore`, since 2026-10-09); the
-**serializing observer** for a cross-process / web frontend; and the fuller reserved-token
-in-flight model (the current cue is the gold transition highlight).
+`SEQUENTIAL` is the default; `CONCURRENT` is opt-in through `RunContext.mode`, one
+definition and two run modes. Concurrent mode reuses the engine's stages (take the
+inputs synchronously, run the body as a task, deposit on completion) and only
+orchestrates them differently: `_run_concurrent`, `_tick_concurrent` and
+`_launch_sweep` in `petritype/runtime.py`. Independent branches overlap: in
+`examples/execution_modes/` sequential takes about the sum of the branch durations,
+concurrent about the longest.
+
+**Claims (since 2026-11-26).** Before a launch the runner plans which tokens the firing
+will take or be handed (`plan_stage_1` in `petritype/core/executable_graph_components.py`)
+and derives reader/writer claims from the plan, per token, or on the whole place for an
+edge that takes or reads every token (`_Claims`, `_claims_from_plan`). A transition whose
+claims conflict with those of the firings in flight does not launch (`_conflicts`). A
+`Fire` command is one of the library's own, so it is held to the same claims and does
+nothing when they conflict (decided 2026-11-27).
+
+- **Why.** The earlier design was lock-free: single-threaded asyncio and a synchronous
+  take meant no two launches could take one token, and a launch that took a token
+  disabled its rivals. That holds only while every input leaves its place at launch. It
+  predates the edges that leave a token in its place while a body works on it (mutate
+  and read edges). Without claims, two mutators of one token overlapped, and another
+  transition could take a token a body in flight was mutating.
+- **The trade: head-of-line waiting.** A transition picks its token as it would
+  sequentially: the front token, or the oldest match for a keyed edge. If that token is
+  claimed, the transition waits; it does not skip to the next token. So a slow reader or
+  mutator of the front token holds back consumers of the tokens behind it. Measured: with
+  three tokens, a 50 ms reader of the front token and a plain consumer, the consumer took
+  nothing until the read ended; before, it took all three during the read.
+- **Why wait rather than skip.** Skipping would make which token a transition gets
+  depend on timing, and would break first-in-first-out order and the agreement with
+  sequential mode on which token is chosen.
+- **No lock deadlock.** A launch's claims are checked all at once, and nothing is held
+  while a transition waits.
+- **Ordering.** Each sweep picks one launchable transition at a time with the net's
+  selector, so priorities, `tie_break` and `transition_selector` apply in concurrent
+  mode as in sequential.
+- **Inner nets** fire inline beside outer bodies in flight (since 2026-11-21), except the
+  nets of a token an outer body in flight holds through a mutate or read edge, and the
+  subnet of a subnet place whose port an outer firing in flight has an edge on (`_held`,
+  `_fire_inner`): a body may run on a thread while the loop fires inline. A body handed
+  every token of a place to change holds the place's own list, so the nets of tokens
+  that land there while it runs are held still too (decided 2026-11-27). Making the
+  deposit itself wait was rejected: the firing that produced the token has finished with
+  it, and waiting would add another queue behind a slow body.
+
+**The limit of the guarantee.** Python has no ownership model, so the claims cover only
+the firings the concurrent runner launches and those a `Fire` command makes. A body, a guard, an observer or the program
+can reach any token or the net itself at any time, and a body can keep a reference to a
+token after it returns. The library does not and cannot prevent that; a user who makes
+such changes takes responsibility for them. This is the position the README takes for
+closed nets ("What Python cannot catch").
+
+**Trades accepted, and why sequential stays the default.**
+
+- No deterministic replay: completion order depends on the wall clock. `step_count`
+  still counts every firing, but their order is not reproducible.
+- A failed body fails the run with `TransitionFailedError`, as in sequential mode; its
+  consumed tokens are lost unless `restore_tokens_on_failure` puts them back (README,
+  "Failure semantics": a visible loss beats silent corruption).
+- The drawing blurs: several transitions are lit at once. A body's inputs are gone from
+  their places until it lands; the cue is `graph.in_flight`, drawn gold.
+
+## Open / not yet implemented
+
+Not built:
+
+- `Runner.read_only(graph)`, a deep read-only view for untrusted visualisers, and a
+  serializing observer that projects the net to a small renderable summary at a process
+  boundary. (The protocol runner serves a serializable view of a net to other
+  processes, `DESIGN_RUNNER.md`, but not as an observer.)
+- Tier 2: force-fire, changing a guard or selector at run time, and a topology-edit
+  API. With it would come an optional `structure_version` for bandwidth caching, and a
+  `validate_graph` a mutator can call on itself: neither exists; the build's checks are
+  `ExecutableGraph`'s validators and `ExecutableGraphCheck`.
+- Pixel-on-node controls, once the renderer emits node coordinates (today's panel is
+  keyed by node name).
+- A per-transition concurrency flag ("only these overlap").
+- A reserved-token holding area showing a body's inputs while it runs (today's cue is
+  the in-flight highlight).
+- Rollback or an error place for a failed firing. Expected failures are the body's to
+  catch and route to an error place by its return type.
+- `Append(place, token)` as sugar for `Extend(place, [token])`.
+- A `deque` for a place's tokens, only if profiling asks.
+- Engine-managed process offload (approach B, above), to revisit once free-threaded
+  CPython is usable.
+- `examples/interactive/realtime_sorter.py` is checked by export only; its live ticking
+  and injection were to be confirmed in `marimo edit`.
 
 ---
 
 # Nets as tokens
 
-Decided and built 2026-10-09 from `Cyberpunk2020-Simulation/dev-docs/NETS_AS_TOKENS.md`
-(the consumer's proposal; its "As built (Python)" section records what differs). The wire
-side is PROTOCOL.md §12. A token may hold Petri nets of its own; the net holding the token
-runs them, observes them and (phase 2) saves them *through the boundary*.
+A token may hold Petri nets of its own; the net holding the token runs them, observes
+them and saves them through the boundary. Decided and built 2026-10-09 from
+`Cyberpunk2020-Simulation/dev-docs/NETS_AS_TOKENS.md` (the consumer's proposal; its "As
+built (Python)" section records what differs). Wire side: PROTOCOL.md §12.
 
-## The model
+Where to look: `NestedNets` and `NetParams` in
+`petritype/core/executable_graph_components.py` (short import `petritype/core/nested.py`),
+`Nested`, `PathStep` and `InnerFiring` in `petritype/core/events.py`, and `JsonForm`,
+`Templates` and `NetJson` in `petritype/core/serialisation.py`. Example:
+`examples/tokens_as_nets/transit.py` with its notebook `transit_journey.py`. Tests:
+`tests/test_nested_nets.py`, `tests/test_nested_serialisation.py`,
+`tests/test_stepping_rules.py`.
 
-- **Declaring.** `ListPlaceNode(..., nested=True)` says the place's tokens hold nets: each
-  token is an `ExecutableGraph` (one unnamed inner net, `""`) or implements
-  `__petritype_nets__(self) -> dict[str, ExecutableGraph]`. Checked at seed, deposit and
-  `Extend`/`SetTokens` time with an error naming the place. Since 2026-11-21 the place
-  also has a stepping rule, `stepping=` one of `"inner_first"` (the default),
-  `"take_turns"`, `"outer_first"` and `"passive"` (below); a place that holds no nets has
-  none, and giving it one is an error. `"passive"` keeps the engine's hands off the inner
-  nets: an outer body steps them.
-- **Running (R2).** Inner nets are live. `fire_one_transition` with `descend` makes one
-  deep step, which fires at most one transition in the whole tree, trying in this order:
-  the nets of the inner-first places, in walk order (place order, then token order, then
-  net order within a token); the ring of the net itself and the nets of its take-turns
-  places, starting after the member that fired last; the nets of the outer-first places,
-  while no body of the net is in flight. A member's turn is a deep step of that net, by its
-  own selector and the rules of its own places (`NestedNets.take_turn`). Both
-  `execute_graph` and the sequential `Runner` loops get this for free; the concurrent loops
-  take the same three parts round their launch sweep, firing an inner net inline beside
-  outer bodies in flight but never inside a token one of them holds through a mutate edge.
-  Quiescence means nothing fireable in the net or in any net of a non-passive place. An
-  inner firing counts as a firing of the outer net under its `InnerFiring`, the path to the
-  net (a tuple of `PathStep(place, token, net)`) and the transition's own name: that is what
-  `step_count`, `last_fired`, `fired_counts`, `RunSummary` and the pacing and fuse limits
-  see, so every existing driver and limit stays coherent without a second counter. Until
-  2026-11-21 the outer net's selector went first and the inner firing was counted under a
-  name joined with `/`, `"Depot/#17/cabin/Sit"`.
-- **Reaching inside (R3).** An outer body reaches into the tokens it holds (an argument or a
-  mutate edge) with `NestedNets.put(inner, place, tokens)`, `take(inner, place, n)` and
-  `set_param(inner, name, value)`, which type-check, move ids and record `Added`,
-  `Removed` and `ParamChanged` on the inner net. Guards read inner markings through the token
-  (`graph.place_named(...).tokens[0].cabin`). That is the whole coupling (R10): no shared
-  place, no inner transition sees the outer net.
-- **Net parameters.** New on `ExecutableGraph`: `params: dict[str, Any]`, declared at
-  construction (`construct_graph(params=...)`), read by guards, priorities and selectors as
-  `graph.params`, and handed to a body as a keyword argument when it declares a parameter of
-  that name that no edge and no `kwargs` entry supplies (`depart(vehicle, destination)`).
-  `NetParams.set` records `ParamChanged(None, name)`; the runtime gains the `SetNetParam`
-  command. Inner nets needed them (`stopped`, `seats`, `capacity`) and the Rust port already
-  has net-wide parameters, so the saved form of a net (phase 2) and `set_param` without a
-  transition can mean the same in both runtimes.
-- **Observability (R4, R7).** Inner events reach the outer log wrapped in one `Nested(path,
-  nested_id, event)` record, whatever the depth (an inner net's own `Nested` records are
-  re-based onto the longer path). The path is as the marking stood when the event was
-  gathered: the place the token stood in at the time. `nested_id` is the inner graph's
-  `net_id`, minted per graph from a process-wide counter, and stable across the moves of the
-  token that holds it. Gathering happens in `drain_events`, before a firing's own events are
-  recorded (so what a body did inside comes before its `Fired`), and at the start of every
-  firing, so a firing that drops a nested token loses none of its events. Inner nets record
-  exactly when the outer net does.
-- **Sink transitions.** A transition with no output edge now fires: its body must return
-  `None` and nothing is deposited. `Board` and `Clear Announcement` needed it; before, the
-  engine raised `KeyError` on such a transition.
+## Decisions
 
-## Defaults taken from the design document (section 7)
+- **The token is the whole coupling** (R10). No shared place, and no inner transition
+  sees the outer net. An outer body reaches into the nets of the tokens it holds with
+  `NestedNets.put` and `take`, at the ports its edge names; guards read inner markings
+  through the token.
+- **An inner firing counts as a firing of the outer net**, under its `InnerFiring`, so
+  `step_count`, `fired_counts`, `RunSummary` and the pacing and fuse limits stay
+  coherent without a second counter. (The protocol runner keeps progress per net,
+  PROTOCOL.md §5.4.)
+- **A stepping rule per place, not per net** (since 2026-11-21): `stepping=` on a nested
+  place, default `"inner_first"`. It replaced the net-wide `deep_policy` and
+  `passive=True`, removed in 0.4.0; the rule and what it replaced are in
+  `../petritype-rs/dev-docs/subnet-place-spec.md` §1.3 (and its principle in §0). The
+  transit city states `"outer_first"`, the order its guards were written for.
+- **Inner events are wrapped in one `Nested` record**, not a path field on every record
+  (the reason is in `petritype/core/events.py`).
+- **A failing body's changes inside the nets it holds are not rolled back.**
+  `restore_tokens_on_failure` conserves the outer tokens only.
+- **Every net is closed unless it declares itself open, and `reaches` is enforced**
+  (built 2026-11-27 on Oleg's word; from 2026-11-23 only a net that marked a port was
+  closed, and `reaches` was a label nothing checked). The code and the drawing of a net
+  must not disagree, so every way tokens enter a net from outside is a port on its
+  drawing, and every way a body reaches into a token's net is named on its edge. Hence a
+  top-level net is closed too, a body writes no port of a net inside the one it holds,
+  which no edge could name, and the knobs and whole-state loads of a held net stay with
+  the program. `reaches` stays an upper bound, since nets arrive in tokens as the net
+  runs and need not have every port named.
+- **A closed net shields the nets inside it** (built 2026-11-27, Oleg: "unexpected
+  skipping sounds bad"). The program and the runner write no place of a net inside a
+  closed net, a subnet or a net a token carries, at any depth, its ports included,
+  unless every net around it is declared open; the inner net's own rule applies on top.
+  The drawing of a closed net must show every way a token comes into it from outside,
+  and addressing the inner net skipped it: in the example it was decided on, a pot put
+  into a workshop's kiln through `NestedNets.subnet_scope` or an inject by path skipped
+  the workshop's drawn route `Yard -> Inspect and Load -> Hatch`. `open` is the
+  override, chosen over a new way to expose an inner port because it already exists in
+  the API, on the wire and on the drawing. It is coarse, since it opens the outer net's
+  own places too; the fine way is a port on the outer net and a transition that carries
+  the token in. A body is judged by the same rule wherever no edge covers it: at a net
+  no edge handed it, and at any net inside a closed net it holds, an open one included
+  (found by the tests' author, 2026-11-27: a body reaching a net by a closure wrote what
+  the program was refused). The net a body holds is where the looking stops, the body
+  being on that net's side of whatever is around it. A net keeps a note of
+  the net and place it was last seen at rest in, checked against that place, rather
+  than a reference to the net around, so that no net keeps the one around it alive.
+- **A question changes no net** (built 2026-11-27, Oleg's go-ahead): a guard, a priority,
+  a key function, a selector and an output distribution function are refused every
+  change to every net, their own and one they built included. Stricter than holding a
+  guard to an edge's `reaches`, and simpler: a drawing shows a guard as a condition, so
+  there is no reach to permit. The second reason is the engine's own: these run between
+  planning a firing and making it, where a moved token could already be promised. A
+  refusal fails whatever asked rather than reading as "cannot fire", which would hide
+  it; the protocol runner, whose contract is that a raising guard cannot fire, says it
+  on stderr instead.
+- **Net parameters** (`graph.params`) exist because the inner nets needed them and the
+  Rust port already had net-wide parameters, so a saved net and a `set_param` without a
+  transition mean the same in both runtimes.
+- **Templates are a process-wide registry by name**: Python has no builder to hang a
+  template on, and a token restored from JSON knows its template by name alone.
+- **Every copy of a net is a new net**: a deep copy mints a new `net_id`, so a fork, or a
+  snapshot-edge copy, is told apart from its original. A copy that must share no Python
+  objects at all is `NetJson.restore(NetJson.save(net))`.
+- **Sink transitions fire.** A transition with no output edge returns `None` and
+  deposits nothing; the transit example needed it.
+- **An example runs its process on its own**, by plain stepping, never a net plus a
+  script that makes it work. The transit net was redesigned on 2026-10-10 for this: its
+  first form needed `Alight`, `Depart` and `Arrive` held back and fired by hand, and under
+  plain stepping it ping-ponged `Alight Depot` / `Board Depot` for ever. A vehicle's state
+  is now where the door tokens in its cabin are (the module docstring).
+- **Where the transit example departs from the proposal**: built as worded, the cabin
+  ping-pongs between `Go To Door` and `Sit` and never reaches "three at the door,
+  announcement cleared", so passengers at the door are not re-seated and the announcement
+  stands until the last passenger has alighted; and one `Go To Door` drawing from either
+  of two places is two transitions, since an input edge draws from one place.
 
-1. Driver policy: outer first, then inner nets in place, token and net order, repeated.
-   Since 2026-11-21 a rule per place instead, `stepping`, whose default is inner first
-   (`PROTOCOL.md` §12.3), the setting below and `passive=True` removed; the transit city
-   states outer first on its places of vehicles, the order its guards were written for.
-   From 2026-10-12 it was a setting, `ExecutableGraph.deep_policy`, also a `construct_graph`
-   keyword: `"outer_first"`, the default, was this rule; `"interleaved"` made the nets a
-   cycle, the outer net and then the inner nets in the same order, and each deep step
-   started from the net after the one the previous step fired in, went round once and
-   fired in the first net with a firing, by that net's own selector, so an outer net that
-   could always fire no longer starved the inner ones (`NestedNets.deep_turns`). The cursor
-   was the `net_id` of the net that fired last (`_last_turn`), kept in memory only and
-   recorded under both policies whenever a deep step fires anywhere, outer or inner, in
-   success or failure, so a policy switched to `interleaved` mid-run resumes after the net
-   that fired last; the
-   policy of the net being stepped governed the whole step, at any depth; quiescence was
-   unchanged; the concurrent loops, which launch every fireable outer transition, were
-   unaffected. `fire_one_transition`, `execute_graph`, the sequential `Runner` and the
-   protocol runner honoured it (`DESIGN_RUNNER.md`). The transit example kept the default,
-   since its guards let the city fall quiet while a cabin has work; the Rust port's
-   `DeepPolicy::Interleaved` was the same rule. One place of take-turns nets steps as
-   `"interleaved"` did, and outer first at every place as the old default did.
-2. Both token-id paths and the stable nested id on the wire (PROTOCOL.md §12.1).
-3. Inner events wrapped in a new `Nested` record, not a path field on every record.
-4. Inner changes made by a failing body are not rolled back; `restore_tokens_on_failure` is
-   conservation of the outer tokens only, and its docs say so.
+## Subnet places
 
-## What differs from the design document, and why
+A place may hold a net of its own for the whole life of the net around it, reached only
+through the subnet's port places (2026-11-21, from
+`../petritype-rs/dev-docs/subnet-place-spec.md` §1 and §5; wire side PROTOCOL.md §12.7).
+Where to look: `SubnetPlaceNode` and `Port`, `NestedNets.held_subnets` and `subnet_scope`;
+example `examples/subnet_places/levels.py`; tests `tests/test_subnet_places.py`.
 
-- The cabin of the transit example (`examples/tokens_as_nets/transit.py`) does not re-seat passengers who
-  came to the door to leave. Built as the document words it (`Sit` guarded by seats alone,
-  the announcement cleared once nobody is seated or standing), the net ping-pongs between
-  `Go To Door` and `Sit` and can never hold "three at the door, announcement cleared". The
-  first fix (2026-10-09) made `Sit` and `Stand` wait while an announcement stands; since
-  2026-10-10 they wait on the cabin's doors instead (below). Either way the
-  document's expected result "Announcements emptied" after step 4 does not hold: the
-  announcement stands until the last passenger has alighted.
-- One `Go To Door` drawing from either of two places is two transitions (`Go To Door`,
-  `Go To Door From Standing`): an input edge draws from one place.
-- There is no acceptance script any more (2026-10-10, below). Until then its "run to quiet"
-  held `Alight`, `Depart` and `Arrive` back (`RunContext.disabled`): the design fires them by
-  hand, and the driver would otherwise fire `Arrive` the moment a vehicle is in transit and
-  `Alight` the moment someone is at the door. Driven by plain stepping with nothing held
-  back, that net ping-ponged `Alight Depot` / `Board Depot` for ever and the cabin never
-  fired once.
+- **One place, two views, and nothing moves.** The outer net's maps key a port by its
+  `Port` pair and point at the subnet's own `ListPlaceNode`, so both nets use one token
+  list and one id list. The Rust core tried moving a port's queue into the outer net for
+  the length of a firing and gave it up; Python never moves it.
 
-## As built, 2026-10-09 (phase 1: core)
+## Open / not yet implemented
 
-`petritype/core/executable_graph_components.py` (`NestedNets`, `NetParams`, the nested
-checks, the descent in `fire_one_transition`, sinks), `petritype/core/events.py`
-(`Nested`; `ParamChanged.transition` may be `None`), `petritype/core/nested.py` (the short
-import), `petritype/runtime.py` (`SetNetParam`, nested checks on commands, the inner turn in
-concurrent mode), `examples/tokens_as_nets/transit.py` (the design's §2 net, its acceptance script as
-`main`; since 2026-10-10 its journey, below), `tests/test_nested_nets.py` (R1 to R4, R7, R10: 32 tests,
-depth two included).
-
-## As built, 2026-10-09 (phase 2: saving and templates)
-
-`petritype/core/serialisation.py`, three namespaces:
-
-- **`JsonForm`** (R5a's ground): which place types have a JSON form (a pydantic model, a
-  JSON scalar, `ExecutableGraph`), `encode` (a model dumps by alias) and strict `decode`.
-  Moved here from the runner's `translate.py`, which now delegates, so a token the library
-  saves is a token the runner injects, by one rule.
-- **`Templates`** (R5b): a process-wide registry, `Templates.register("Cabin", factory)` or
-  `@Templates.template("Cabin")`, stamping `graph.template` on what the factory builds; a
-  factory is called with no arguments, so its own arguments need defaults. Python has no
-  builder to hang it on, and a token restored from JSON needs the template by name alone.
-- **`NetJson`** (R5, R5a): `export_marking` / `import_marking` (by place name, oldest first;
-  a place not listed loads empty, an unknown place is a `KeyError`, a token that does not
-  decode a `ValueError`, both before anything changes; ids are not preserved, each place
-  records `Resynced`), and the whole saved form `{template?, marking, params, enabled}` with
-  `save`, `load_into` (onto a net built the same way: the top-level case, where the
-  `@petri_net` factory is the template) and `restore` (build from the template, then load).
-  `ExecutableGraph.export_marking()` and `.import_marking()` are the short spellings.
-
-`ExecutableGraph` itself dumps in JSON mode as its saved form, validates from one (a wrap
-validator rebuilds through the template), and declares the saved form as its JSON schema,
-so a pydantic token type with an `ExecutableGraph` field (`Vehicle.cabin`) has the JSON form
-of PROTOCOL.md §12.5 with no further work and counts as serializable. Python-mode dumps
-keep the field form, which existing code reads.
-
-`enabled` needed a switch on the graph: inner nets run without a `RunContext`, so
-`ExecutableGraph.disabled` (honoured by `transition_is_fireable`) is the net's own switch,
-saved and loaded as the `enabled` map; the runtime's `Enable`/`Disable` stay the runner's
-switch on the net it drives.
-
-R6, forking: `NestedNets.fork(token)` is a deep copy, and `ExecutableGraph.__deepcopy__`
-mints a new `net_id`, so every copy of a graph is a new net (a snapshot-edge copy included)
-and a fork is told apart from its original. The design's "rebuild from the template and
-import the marking" is what `NetJson.restore(NetJson.save(net))` does when a copy must not
-share Python objects at all.
-
-Tests: `tests/test_nested_serialisation.py` (20), including step 6 of the acceptance script
-through JSON text at both save points (since 2026-10-10: saved with the bus in transit and
-once everyone has arrived, continued by plain stepping).
-
-## As built, 2026-10-09 (phases 3 and 4: the protocol runner; the visualiser)
-
-The runner is `DESIGN_RUNNER.md`, "As built, 2026-10-09: nested nets", and the wire form
-PROTOCOL.md §12. The visualiser: `NodeLabel.default_token_summariser`
-(`petritype/plotting/rustworkx_to_graphviz.py`) marks a token that holds nets by printing
-its own fields and each inner net's name and token count in place of the net
-(`NestedNets.summary`: `Vehicle(name='Bus 1', kind='Bus', destination=None) ⊂ cabin: 3`),
-so a place of vehicles reads at a glance and the label never embeds a whole net. A descend
-view needs nothing new: `NodeLabel.inner_nets(token)` names the nets a token holds, and each
-is an `ExecutableGraph` that `RustworkxGraph.from_executable_graph` renders as any other,
-so a notebook draws the city and, beside it, the cabin of the vehicle it is following:
-`examples/tokens_as_nets/transit_journey.py` does exactly that, stepping the journey (45 firings from the
-seed until every passenger has arrived, pinned by `tests/test_notebooks.py`; until 2026-10-10 the
-acceptance script, 13 firings).
-
-## As built, 2026-10-10: the transit net runs its own journey
-
-An example illustrates how to build a net that runs its process correctly on its own, never
-a net plus a script that makes it work. The transit net did not: under plain stepping with
-nothing disabled (the Bevy viewer's Step, any `fire_one_transition` loop) the outer net
-ping-ponged `Alight Depot` / `Board Depot` for ever, since the default tie-break takes the
-first declared fireable transition and the driver gives an inner net the turn only when the
-outer net has nothing to fire. The fix is the Petri net idiom: the vehicle's state is where
-the control tokens in its cabin are, one per door, read by the outer guards and moved by an
-inner transition and by `Arrive`.
-
-- Every cabin template gains two places, `Doors Open` and `Doors Closed`, holding one token
-  per door, the door's name (a bus or a shuttle has one door, `Front`, a ferry two, `Bow`
-  and `Stern`), every door open when built. A door open with no announcement standing is
-  boarding, a door open with an announcement standing is alighting, every door closed is
-  under way. Two places and not one token naming the phase, so that the canvas shows it and
-  more doors are simply more tokens. `Board` needs boarding, `Alight` alighting, `Depart`
-  every door closed; inside, `Sit`, `Stand` and `Go Below` need boarding, the `Go To Door`
-  transitions an announcement. `Close Doors` (new) moves one door from open to closed once
-  nobody is left at the door and no announcement stands, aboard or not, so an empty vehicle
-  moves on rather than block a stop; the ferry fires it twice. `Arrive` opens every door in
-  its own body as it puts up the announcement: left to the cabin, `Depart` would fire first.
-  `Clear Announcement` only takes the announcement down. `stopped` stays, set and shown,
-  read by no guard.
-- Alighted passengers go to a new place `Arrived`, never back onto a platform, where they
-  would board again. The vehicles follow a loop (Depot, Central, Harbour, Airport); the net
-  parameter `destination` is now an override (`None` by default).
-- The seed adds two passengers at Central and two at the harbour; from it plain stepping
-  delivers all seven to `Arrived` in 45 firings, and the same holds under `last_declared`
-  and random tie-breaks at every level and in concurrent mode. A driver that gave the cabins
-  the first turn would close every door before anyone boarded; both drivers fire the outer
-  net first.
-- The example keeps two helpers, `step` (one firing, the engine's choice) and `journey`
-  (step until everyone has arrived or a budget runs out); the acceptance script, `fire`,
-  `run_to_quiet` and `HELD_BACK` are gone. The notebook's Step and Repeat Step are those two.
-  PROTOCOL.md §11 fixes the redesigned net, and `tests/protocol/05_nested_nets.json` was
-  re-recorded with `tests/record_transcript.py` (`DESIGN_RUNNER.md`).
-
-## As built, 2026-11-21: subnet places
-
-The library side of `petritype-rs/dev-docs/subnet-place-spec.md` (§1 and §5), the wire side
-being PROTOCOL.md §12.7. A place may hold a net of its own for the whole life of the net
-around it, beside the nets tokens carry.
-
-- **Declaring.** `SubnetPlaceNode(name, graph, stepping="inner_first")` stands among a net's
-  places and holds one built net, its subnet. The subnet's definition marks its ports,
-  `ListPlaceNode(..., port=True)`, each an ordinary place or a nested one; a subnet place
-  cannot be one. An edge of the outer net names a port by `Port(subnet place, port)` where
-  it would name a place (`PlaceKey`, a name or that pair), and nothing else of the subnet.
-  The build refuses a port the subnet does not have, an edge whose type does not fit the
-  port's, an edge on the subnet place itself, a `Port` beside a place that is not a subnet
-  place, a subnet place marked as a port, and one net given to two subnet places.
-- **One place, two views.** The outer net's maps (`MapPlaceNames.to_list_place_nodes`) key
-  a port by its pair and point at the subnet's own `ListPlaceNode`, so both nets use the
-  one list and the one id list, and nothing ever moves. The engine names places by the key
-  its edges give, in the firing's ids and in stage 2's routing, where two ports may share a
-  name; a deposit into a port takes its ids from the subnet's counter (`TokenIds.minter`),
-  whichever net makes it. `place_named` takes a pair too, and a name alone never finds a
-  port. The Rust core tried moving a port's queue into the outer net for the length of a
-  firing and gave it up; Python never moves it.
-- **Events.** A change is told once, by the net through which it was made: an outer firing,
-  `Extend`/`SetTokens` or `NestedNets.put`/`take` through the outer net, names the pair in
-  the outer log; a firing of the subnet names the place by its own name and is lifted as
-  `Nested`, its path step naming the subnet place with no token, `PathStep("Level 3")`. A
-  firing inside is an `InnerFiring` with that path, as for a token's net.
-- **Stepping.** `NestedNets.walk` yields a subnet as one net at its place's position, so
-  the three bands of the deep step, the fuse, quiescence and both runtimes take it in with
-  no logic of their own. While a transition with an edge on one of a subnet's ports is in
-  `in_flight`, the subnet is left out of the deep step (`NestedNets.held_subnets`), and the
-  program's `NestedNets.subnet_scope`, its way to step or change a subnet, raises
-  `SubnetHeldError`; `ExecutableGraph.subnet(name)` reads one at any time.
-- **Saving.** A subnet place's entry in a marking is a list of one, its subnet's saved form;
-  a port's tokens are written once, in the subnet's marking; a subnet built without a
-  template refuses to be saved, naming its place. Loading fills the subnet the outer net
-  already holds and is checked at every depth before anything changes; a subnet place left
-  out of a marking loads its subnet's marking empty. A deep copy copies every subnet as a
-  new net. Stepping rules are not saved.
-- **Drawing.** A subnet place is a `Mrecord` node, a box with rounded corners, its title
-  and a cell per port with the port's name and count; an edge on a port ends at its cell
-  (`headport` or `tailport`), and in the subnet's own drawing a port has `peripheries=2`.
-
-Example: `examples/subnet_places/levels.py`, a world of two levels built from one template
-`Level`, heroes entering through `Lobby` and leaving through `Exit Hall`, with its notebook
-`levels_journey.py` (21 firings, pinned by `tests/test_notebooks.py`). Tests:
-`tests/test_subnet_places.py`. The protocol runner serves a net with subnet places since the
-same day (PROTOCOL.md §12.7, `DESIGN_RUNNER.md`), the example as `levels-world`.
+- A guard, a priority, a key function, a selector or an output distribution function
+  that edits a place's list, `params` or `disabled` directly is not caught: the rule that
+  a question changes no net holds through the library's functions only, and comparing
+  the net before and after each guard, as is done for a body, would cost every sweep.
+- Python's limit: a body that edits a port's list directly, writes from a thread it
+  starts itself, or reaches a net through a closure rather than an edge is not caught,
+  since the check after the body sees only private places, and a hold and its reach are
+  known only on the nets an edge hands over, in the body's own context.
+- The Rust library has built none of these rules yet: closing every net not declared
+  open, holding a body to its edge's `reaches`, refusing a question every change, and a
+  closed net shielding the nets inside it.
+- A net that code puts into a place's list directly is not known to be inside that
+  place's net, and so not shielded, until an engine entry point re-ids the place; one
+  put in place of another, the length kept, is not known at all.
+- The knobs of a net inside a closed net are still the program's (decided 2026-11-27:
+  a parameter puts no token anywhere). A load into such a net is refused, as a put is.
 
 ---
 
 # Groups
 
-Decided 2026-11-21 in `petritype-rs/dev-docs/group-spec.md`, for both runtimes; the wire side
-is PROTOCOL.md §5.1. A group is a named set of places and transitions of one net, set in the
-net's definition, that only drawings read. It replaces the viewer's clusters by name prefix:
-no character in a name has a meaning, so nothing is found by splitting one.
+Decided 2026-11-21 in `../petritype-rs/dev-docs/group-spec.md`, for both runtimes; the
+wire side is PROTOCOL.md §5.1. A group is a named set of places and transitions of one
+net, set in the net's definition, that only drawings read: `group=` on the nodes,
+`ExecutableGraph.groups`, and the clusters of `RustworkxToGraphviz.dot_source`. Example:
+`examples/groups/hike.py`; tests `tests/test_groups.py`. It replaces the viewer's clusters
+by name prefix: no character in a name has a meaning, so nothing is found by splitting
+one.
 
-## A group and a subnet place
-
-A net whose rules all read and change one shared place cannot be split into subnets without
-moving those rules into the net around them, which leaves the first view no simpler. Such a
-net stays flat, and is read by gathering its parts under names. The two are kept apart in
-name, in the definition and in the picture:
+A net whose rules all read and change one shared place cannot be split into subnets
+without moving those rules into the net around them, which leaves the first view no
+simpler. Such a net stays flat and is read by gathering its parts under names. The two
+are kept apart in name, in the definition and in the picture:
 
 | | Group | Subnet place |
 |---|---|---|
@@ -654,112 +364,38 @@ name, in the definition and in the picture:
 | Shared places | yes, freely | no, only ports |
 | What it is for | reading a large flat net | a part that is really separate |
 
-## As built, 2026-11-21
-
-- **Declaring.** `group=` on `ListPlaceNode`, `SubnetPlaceNode` and `FunctionTransitionNode`
-  names the group the node is in, or `None` for none. A group exists from its first mention
-  and that is its place in the order, reading the definition as the graph holds it: the
-  places in declaration order, subnet places among them, then the transitions. The order in
-  which places and transitions are declared is never touched, since it decides stepping and
-  ties. A subnet, or a net a token carries, has groups of its own, and a port's group is one
-  of its subnet's.
-- **Reading.** `ExecutableGraph.groups`, the names in order, is computed from the nodes, so
-  it cannot disagree with them; `node.group` is each node's.
-- **Errors.** None of the spec's build errors can arise in Python: a node names one group,
-  so it is never in two; a group is its name, so two of one name are one group; there are
-  no group handles to bring from another net; and an outer net has no node for a port to
-  put in a group. A name that is not a string is refused by the node's validation.
-- **Running and saving.** Nothing in the engine, the runtimes or `NetJson` reads a group. A
-  net built with and without groups fires the same transitions in the same order under each
-  tie-break, mints the same ids, records the same events and saves to the same text. A deep
-  copy carries the groups, as it carries the rest of the definition, and a template carries
-  them by building them.
-- **Drawing.** `RustworkxToGraphviz.dot_source` is `to_dot`'s source with each group added
-  as a Graphviz cluster, a dashed frame titled with the group's name, in order, holding its
-  places, subnet places and transitions; a frame is named by its position and its title
-  quoted, so no character of a name reaches the syntax. A net with no groups gets `to_dot`'s
-  source unchanged. `RustworkxToGraphviz.draw` renders it as `graphviz_draw` does, and
-  `SimpleGraphvizVisualization` draws through it. Closing a group is the viewer's and is not
-  drawn here.
-
-Example: `examples/groups/hike.py`, a hiker whose walking, eating and resting all read and
-change one store of energy, each concern a group and the energy in none, with its notebook
-`hike_day.py` (7 firings, pinned by `tests/test_notebooks.py`). Tests: `tests/test_groups.py`.
+None of the spec's build errors can arise in Python: a node names one group, so it is
+never in two; a group is its name, so two of one name are one group; there are no group
+handles to bring from another net; and an outer net has no node for a port to put in a
+group. Closing a group in a drawing is the viewer's, not this library's.
 
 ---
 
 # Token keys, queries and filters
 
-Decided and built 2026-10-09 from `Cyberpunk2020-Simulation/dev-docs/TOKEN_QUERYING_AND_FILTERING.md`
-(the consumer's proposal; its "As built (Python)" section records what differs). The wire
-side is PROTOCOL.md §13. Tokens carry *keys*, named attributes a place derives from each
-token's value; one mechanism then gives queries, viewer filtering, projections and (phase 3)
-keyed input edges.
+Decided and built 2026-10-09 from
+`Cyberpunk2020-Simulation/dev-docs/TOKEN_QUERYING_AND_FILTERING.md` (the consumer's
+proposal; its "As built (Python)" section records what differs). The wire side is
+PROTOCOL.md §13. A place derives *keys* from each token's value; one mechanism then gives
+queries, viewer filtering, the protocol's projections and keyed input edges. Where to
+look: `petritype/core/keys.py` (`Keys`, `Clause`, `Filter`, `Query`), `KeyedEdges` and the
+keyed edges in the engine module, the `filter` argument of the Graphviz renderer. Example:
+`examples/token_view_filtering/wildlife.py` with its notebook `wildlife_filter.py`.
 
-## The model
+- **No index.** The proposal asks for an index per key and value, kept in step on
+  `Added`, `Removed` and `Mutated`. Not built: Python's tokens are plain objects in plain
+  lists, moved by the engine at several points, and a scan is cheap at this library's net
+  sizes.
+- **A keyed edge takes only the token it needs**, the oldest one its filter keeps, so the
+  other tokens are never removed and re-added and keep their ids. It replaced
+  take-all-and-put-back.
+- **A filtered drawing says how many tokens it hides**, so a hidden token is never
+  mistaken for an absent one (the proposal's rule for the Bevy viewer, applied to the
+  Graphviz renderer). The tabs and filter bar are the viewer's; a notebook builds its own
+  controls from `Query.distinct`.
 
-- **Keys (R1).** `ListPlaceNode(..., keys={"species": lambda s: s.name, "class": lambda s:
-  s.class_})`, or `keys=("name", "diet")` for attribute names; `place.key_names` is the
-  declaration order. A key value is a string, an integer or a boolean, and `1` is not `True`
-  (`same_value` compares type and value). Keys are derived on demand (`Keys.of(place,
-  token)`), so a token mutated in place has new keys the next time they are read.
-- **No index.** The design asks for an index per key and value kept in step on `Added`,
-  `Removed` and `Mutated`. Not built: Python's tokens are plain objects in plain lists, moved
-  by the engine at several points, and a query over a net of this library's size costs a
-  scan; an index is a later optimisation if profiling asks for one, behind the same
-  `Query` functions.
-- **Filters (R2).** `Filter(clauses, places?, prefix?)`, a `Clause(key, values)` ORing its
-  values or `Clause(key, param=name)` accepting the net parameter's current value; AND across
-  clauses; `Filter.where(class_="Bird", diet=[...])` as the short spelling (a trailing
-  underscore is dropped, so Python keywords can name keys). A place that declares no keys
-  matches no clause; no clauses and no restriction keeps everything.
-- **Queries (R2).** `Query.matches(graph, filter)` in place order then token order, each a
-  `Match(place, token_id, keys, token)`; `Query.distinct(graph, key, places?)` in order of
-  first appearance; `Query.count` and `Query.first` for a place.
-- `examples/token_view_filtering/wildlife.py` is the design's §2 net: habitats as places, `Species` tokens with
-  `class` as a key they carry (the field is `class_`, aliased `class` on the wire), `Migrate`
-  as take-all-and-put-back until keyed edges land, `Settle` routing by destination, `Spread`
-  and `Decline` through mutate edges. Its five questions and section 6's answers are
-  `tests/test_token_keys.py`.
-
-## As built, 2026-10-09 (phase 1: core)
-
-`petritype/core/keys.py` (`Keys`, `Clause`, `Filter`, `Match`, `Query`), the `keys` field
-on `ListPlaceNode`, `examples/token_view_filtering/wildlife.py`, `tests/test_token_keys.py` (17).
-
-## As built, 2026-10-09 (phase 2: the protocol)
-
-`DESIGN_RUNNER.md`, "As built, 2026-10-09: keys, queries and the connection's projection",
-and PROTOCOL.md §13: keys on the wire, `query`, `distinct`, `set_filter`, `hidden`, the
-`wildlife` conformance net and transcript `06_keys_query_filter.json`.
-
-## As built, 2026-10-09 (phase 3: keyed input edges)
-
-`TakeWhereEdge(place, transition, argument, where=Filter)` and `MutateWhereEdge(...)`,
-subclasses of `ArgumentEdgeToTransition` and `MutateEdge` (so `construct_graph`, the edge
-validators and the adjacency maps take them as they are), re-exported from
-`petritype.core.keys`. A transition with one is fireable when the place holds a token the
-filter keeps (`KeyedEdges.first_kept`; the filter's `{key, param}` clauses read the net's
-parameters); its firing takes, or hands over live, the oldest such token and nothing else,
-so the other tokens are never removed and re-added and keep their ids. The argument receives
-the one token, never a list. A failed firing restores a keyed take to the front of its place
-(best effort, like a plain take). On the wire the edge is `take_where` / `mutate_where` with
-its `filter` (§13.5); the runner's `launched.consumed` names the token actually taken, and
-its snapshot leaves that token out wherever it stood. `Migrate` in `examples/token_view_filtering/wildlife.py`
-is now one keyed edge; section 6's "only events" (one token out, one in, per firing, the fox
-untouched) is `tests/test_keyed_edges.py`.
-
-## As built, 2026-10-09 (phase 4: the visualiser)
-
-`NodeLabel.default_place(node, summariser, filter=None, params=None)` and
-`RustworkxToGraphviz.activation_coloured_attr_functions(graph, summariser, filter=None)`
-(`petritype/plotting/rustworkx_to_graphviz.py`): with a filter a place lists only the tokens
-it keeps, its header reads `matching / count` and a last line says `(n hidden by filter)`, so
-a hidden token is never mistaken for an absent one (the design's R4 rule for the Bevy viewer,
-applied to the Graphviz renderer). The tabs and the filter bar of R4 are the Bevy viewer's;
-a notebook builds its own controls from `Query.distinct`: `examples/token_view_filtering/wildlife_filter.py`,
-one tab per `class` and per `diet`, a season switch that lets the keyed-edge migration fire,
-and the same question asked of the net as a `Query.matches` table.
+Open: an index per key and value, behind the same `Query` functions, only if profiling
+asks for one.
 
 ---
 
@@ -767,53 +403,20 @@ and the same question asked of the net as a `Query.matches` table.
 
 Decided and built 2026-10-14 from `../petritype-rs/dev-docs/EDGES_ON_EMPTY_PLACES.md`
 (the Cyberpunk2020-Simulation game's proposal, revised after the owner's review; its "As
-built (Python)" section records what differs). The wire side is PROTOCOL.md §5.1. Every
-other input edge holds its transition back until its place has a token; that is right for a
-token the transition works *on*, and wrong for a place it only needs to *look at* when
-something is there ("every promotion running", where none is a good answer), which used to
-need an "empty twin" transition guarded on the place being empty, one more per such place.
-A collection that is an aggregate should stay one token holding a list; these edges are for
-members that must be tokens of their own.
+built (Python)" section records what differs). The wire side is PROTOCOL.md §5.1.
+`DrainEdge` takes every token of its place and `SurveyEdge` copies every token, zero or
+more either way; `ReadAllEdge` (2026-11-23) hands over every token live to look at. README,
+"Edges that accept an empty place"; examples `examples/edges_on_empty_places/shop.py` (the
+survey) and `traffic_light.py` (a drain beside a plain read); tests
+`tests/test_empty_place_edges.py`.
 
-## As built, 2026-10-14
-
-- **`DrainEdge(place, transition, argument)`**, a subclass of `ArgumentEdgeToTransition`
-  (as `TakeWhereEdge` is, so `construct_graph`, the validators and the adjacency maps take it
-  as they are): the body gets every token of the place as a list, oldest first, possibly
-  empty, and they are consumed (a reset arc). A failed firing with
-  `restore_tokens_on_failure` puts them back at the front with their ids; `Fired.consumed`
-  lists them, and none from a place that was empty.
-- **`SurveyEdge(place, transition, argument)`**, a subclass of `SnapshotEdge`: a deep copy
-  of every token, oldest first, possibly none, nothing consumed, no ids touched.
-- **Both need a `list[T]` argument** for the place's `T`, checked when the graph is built
-  (`ExecutableGraphCheck.ensure_argument_takes_every_token`, a `TypeError` naming the edge,
-  the argument and the annotation wanted), since a plain `T` has nothing to receive from an
-  empty place; for these two the check is exact, so a place of lists drains into
-  `list[list[T]]`.
-- **Fireability.** `ExecutableGraphCheck.requires_presence(edge)` is false for the two kinds
-  and true for every other, and `sufficient_tokens_are_available` skips the presence check
-  where it is false. A guard still holds the transition back.
-- **The static checks** count a drain as moving nothing guaranteed, by hand since it is an
-  argument edge by class: `assert_no_source_transitions` names a transition whose only
-  argument edge is a drain (it fires for ever on an empty place), and `assert_acyclic` leaves
-  drains out of the token flow, as it leaves the non-consuming edges out, since a loop closed only through
-  a drain cannot keep itself going (each round costs the draining transition a token taken
-  through another edge). Both docstrings give examples, the traffic light among them.
-- **The runner** lists the kinds as `drain` and `survey` (`DESIGN_RUNNER.md`, "As built,
-  2026-10-14"); **the visualiser** draws both with a hollow arrowhead (Graphviz
-  `arrowhead="empty"`), the drain otherwise as a consuming edge and the survey as a dashed
-  snapshot edge.
-- The examples, split on 2026-10-16 so that each shows one mechanic (the design's section 2
-  net had a shop that priced orders with whatever promotions were running and drained them
-  all when the day closed, and "draining promotions" read badly):
-  `examples/edges_on_empty_places/shop.py` keeps the survey (a shop prices orders with
-  whatever promotions are running), and `examples/edges_on_empty_places/traffic_light.py`
-  shows the drain beside a plain read (cars wait at a light that cycles red, green and
-  amber; `Go` drains every car waiting while the light is green, reading the light and
-  guarded on green and someone waiting, so a car arriving at green goes straight through,
-  and `Change` cycles the light; since later the same day the light is one place whose token
-  is its colour, and the net has these two transitions). They are the conformance nets `shop`
-  and `traffic-light` of PROTOCOL.md §11, whose transcripts are
-  `tests/protocol/07_empty_place_edges.json` and `tests/protocol/08_traffic_light.json`;
-  the marimo notebooks `shop_day.py` (the shop with prices) and `traffic_light_junction.py`
-  run them, and the rest is `tests/test_empty_place_edges.py`.
+- **Why.** Every other input edge holds its transition back until its place has a
+  token. That is right for a token the transition works *on*, and wrong for a place it
+  only needs to *look at* when something is there ("every promotion running", where none
+  is a good answer), which used to need an "empty twin" transition guarded on the place
+  being empty, one more per such place.
+- **An aggregate stays one token holding a list.** These edges are for members that must
+  be tokens of their own.
+- **One mechanic per example.** The proposal's net, a shop that priced orders with the
+  promotions running and drained them all at the close, was split on 2026-10-16 into the
+  shop and the traffic light, since "draining promotions" read badly.

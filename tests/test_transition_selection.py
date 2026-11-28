@@ -1,5 +1,7 @@
 """Tests for transition_selector and activation_function features."""
 
+import asyncio
+
 import pytest
 from petritype.core.executable_graph_components import (
     ExecutableGraph,
@@ -201,6 +203,35 @@ class TestExecuteGraphWithSelector:
 
         assert fired == 1
         assert len(updated_graph.place_named('Output').tokens) == 1
+
+    def test_selector_returning_non_fireable_transition_raises(self):
+        def f(x: int) -> int:
+            return x
+
+        t1 = FunctionTransitionNode("T1", f)
+        t2 = FunctionTransitionNode("T2", f)
+        graph = ExecutableGraphOperations.construct_graph(
+            [
+                ListPlaceNode("A", int, tokens=[1]),
+                ListPlaceNode("B", int),
+                ListPlaceNode("Out", int),
+                t1,
+                t2,
+                ArgumentEdgeToTransition("A", "T1", "x"),
+                ReturnedEdgeFromTransition("T1", "Out"),
+                ArgumentEdgeToTransition("B", "T2", "x"),
+                ReturnedEdgeFromTransition("T2", "Out"),
+            ]
+        )
+        with pytest.raises(ValueError, match="not among the fireable transitions"):
+            asyncio.run(
+                ExecutableGraphOperations.execute_graph(
+                    graph,
+                    stop_after_n_firings=1,
+                    transition_selector=lambda g, fireable: t2,
+                )
+            )
+        assert graph.place_named("A").tokens == [1]
 
 
 class TestSelectorWithActivationFunction:

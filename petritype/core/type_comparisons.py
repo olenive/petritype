@@ -15,6 +15,7 @@ from typing import (
 
 class CompareTypes:
 
+    @staticmethod
     def between_value_and_type(value: Any, type_: Type) -> bool:
         """
         Strict type checking that treats int, float, and bool as distinct types.
@@ -152,6 +153,7 @@ class CompareTypes:
 
         return isinstance(value, type_)
 
+    @staticmethod
     def between_annotations(annotation1: Type, annotation2: Type) -> bool:
         if annotation1 == annotation2:
             return True
@@ -168,6 +170,7 @@ class CompareTypes:
 
         return False
 
+    @staticmethod
     def between_annotations_where_one_maybe_in_list(
         *,
         annotation_not_in_list: Type,
@@ -187,6 +190,7 @@ class CompareTypes:
 
         return CompareTypes.between_annotations(annotation_not_in_list, annotation_maybe_in_list)
 
+    @staticmethod
     def between_annotations_where_both_maybe_in_list(
         annotation1: Type,
         annotation2: Type

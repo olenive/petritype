@@ -124,8 +124,8 @@ def _(Optional, Union):
 
     def a_match_is_possible(graph):
         """Guard for Match Lengths: True while some string/length pair can still match."""
-        strings = graph.place_named("Some Strings").tokens
-        lengths = graph.place_named("Some Lengths").tokens
+        strings = graph.place("Some Strings").tokens
+        lengths = graph.place("Some Lengths").tokens
         return any(len(s) == length for s in strings for length in lengths)
 
     def distribute_result_tokens(

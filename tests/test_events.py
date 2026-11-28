@@ -1,4 +1,4 @@
-"""Event records on ``ExecutableGraph`` (DESIGN_RUNNER.md, "Events").
+"""Event records on ``ExecutableGraph`` (DESIGN_RUNNER.md, "Token ids and events").
 
 With ``record_events`` on, the engine and the runtime append passive event
 records that ``drain_events()`` returns and clears. A firing is reported once,
@@ -37,12 +37,13 @@ def scale(x: int, factor: int = 1) -> int:
 
 
 def _chain(tokens=(1, 2, 3), record_events=True, **graph_options):
+    """``In`` -(Inc)-> ``Out``, both ports, which the program's commands write."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("In", int, list(tokens)),
+        ListPlaceNode("In", int, list(tokens), port=True),
         ArgumentEdgeToTransition("In", "Inc", "x"),
         FunctionTransitionNode("Inc", increment),
         ReturnedEdgeFromTransition("Inc", "Out"),
-        ListPlaceNode("Out", int),
+        ListPlaceNode("Out", int, port=True),
     ], record_events=record_events, **graph_options)
 
 

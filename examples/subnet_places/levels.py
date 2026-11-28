@@ -190,7 +190,7 @@ def main() -> None:
     events = asyncio.run(journey(world))
     for number, line in enumerate(describe_log(events), 1):
         print(f"{number:3}. {line}")
-    print("outside:", ", ".join(f"{hero.name} ({hero.xp} xp)" for hero in world.place_named("Outside").tokens))
+    print("outside:", ", ".join(f"{hero.name} ({hero.xp} xp)" for hero in world.place("Outside").tokens))
 
 
 if __name__ == "__main__":

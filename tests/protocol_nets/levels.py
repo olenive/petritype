@@ -18,7 +18,14 @@ lobby into the arena, ``Fight`` takes them from the arena back into it, having
 fought, and ``Win`` takes a hero who has fought on to the exit hall. The two
 guards read the hero at the front of the arena, so at most one of ``Fight`` and
 ``Win`` is fireable at a time. Every body hands its hero on, changing at most
-``fought``, and none fails.
+``fought``, and none fails. The world marks no port and is closed, as every net
+not declared open is since 2026-11-27, so an ``inject`` by the pair of a level's
+port on the world is refused (``closed_net``). Since later that day, when a closed
+net came to shield the nets inside it, so is an ``inject`` addressed to the level
+by path, at its port as at any other place: the program and the runner write no
+place of a subnet of a closed net. Until then the one addressed to the level
+landed at its port. The world is left closed so that the transcript shows both
+refusals.
 
 The levels' net is stamped with the template name ``Level`` by
 ``construct_graph(template=...)`` and not registered by that name, since

@@ -79,3 +79,18 @@ class TestPlottingGuards:
         with pytest.raises(ModuleNotFoundError) as excinfo:
             _reimport(module, monkeypatch, present=False)
         assert "petritype[viz]" in str(excinfo.value)
+
+    def test_simple_graphviz_imports_with_matplotlib_absent(self, monkeypatch):
+        """matplotlib is in the examples extra, not viz: the module must not
+        ``require`` it. That it imports nothing of matplotlib's is
+        ``test_dependency_boundaries``'s to check."""
+        pytest.importorskip("rustworkx")
+        real_find_spec = _optional.find_spec
+        monkeypatch.setattr(
+            _optional,
+            "find_spec",
+            lambda name: None if name == "matplotlib" else real_find_spec(name),
+        )
+        monkeypatch.delitem(sys.modules, "petritype.plotting.simple_graphviz", raising=False)
+        mod = importlib.import_module("petritype.plotting.simple_graphviz")
+        assert hasattr(mod, "SimpleGraphvizVisualization")

@@ -5,6 +5,10 @@ the *same* object to several destination places, across two different token
 types, with ``allow_token_copying=True``. Every destination must receive
 exactly one token — none may be silently dropped.
 
+The concurrent runtime honours ``allow_token_copying`` too: when type routing
+sends one returned object to two places, each place gets its own copy, and
+without copying the firing fails.
+
 Sync bodies + ``asyncio.run`` because ``execute_graph`` is async and this
 repo doesn't enable pytest-asyncio auto-mode (matches test_step_count.py).
 """
@@ -12,15 +16,19 @@ repo doesn't enable pytest-asyncio auto-mode (matches test_step_count.py).
 import asyncio
 from datetime import date
 
+import pytest
 from pydantic import BaseModel
 
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    ExecutableGraph,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
     ReturnedEdgeFromTransition,
+    TransitionFailedError,
 )
+from petritype.runtime import ExecutionMode, RunContext, Runner
 
 
 class Span(BaseModel):
@@ -136,3 +144,44 @@ def test_distributor_single_destination_with_copying():
     assert fired == 1
     out = _place(graph, "Out").tokens
     assert len(out) == 1 and out[0].value == 7
+
+
+# --- one object routed by type to two places, in the concurrent runtime ---------------------------------
+
+
+def _typed_fanout_graph(allow_token_copying: bool) -> ExecutableGraph:
+    def dup(x: list[int]) -> list[int]:
+        return x
+
+    return ExecutableGraphOperations.construct_graph(
+        [
+            ListPlaceNode("In", list[int], tokens=[[1, 2]]),
+            ListPlaceNode("OutA", list[int]),
+            ListPlaceNode("OutB", list[int]),
+            FunctionTransitionNode("Dup", dup),
+            ArgumentEdgeToTransition("In", "Dup", "x"),
+            ReturnedEdgeFromTransition("Dup", "OutA"),
+            ReturnedEdgeFromTransition("Dup", "OutB"),
+        ],
+        allow_token_copying=allow_token_copying,
+    )
+
+
+def test_concurrent_mode_honours_allow_token_copying():
+    graph = _typed_fanout_graph(allow_token_copying=True)
+    ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT)
+    summary = asyncio.run(Runner.run(ctx))
+    assert summary.quiesced is True
+    assert summary.n_fired == 1
+    out_a = graph.place_named("OutA").tokens
+    out_b = graph.place_named("OutB").tokens
+    assert out_a == [[1, 2]]
+    assert out_b == [[1, 2]]
+    assert out_a[0] is not out_b[0]
+
+
+def test_concurrent_mode_still_rejects_duplicate_token_when_copying_disabled():
+    graph = _typed_fanout_graph(allow_token_copying=False)
+    ctx = RunContext(graph=graph, mode=ExecutionMode.CONCURRENT)
+    with pytest.raises(TransitionFailedError):
+        asyncio.run(Runner.run_to_completion(ctx))

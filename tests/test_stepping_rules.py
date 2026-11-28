@@ -51,9 +51,11 @@ def spin(n: int) -> int:
 
 
 def worker(jobs: int) -> ExecutableGraph:
-    """A bare inner net with ``jobs`` things to do: ``Todo -Work-> Done``."""
+    """A bare inner net with ``jobs`` things to do: ``Todo -Work-> Done``. ``Todo``
+    is a port, where the program hands it more when every net around it is
+    declared open."""
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Todo", int, list(range(jobs))),
+        ListPlaceNode("Todo", int, list(range(jobs)), port=True),
         ListPlaceNode("Done", int),
         FunctionTransitionNode("Work", pass_on),
         ArgumentEdgeToTransition("Todo", "Work", "n"),
@@ -160,11 +162,12 @@ class TestTheDefault:
 # --- the bands -------------------------------------------------------------------------------
 
 
-def bands():
+def bands(open: bool = False):
     """One net with a place of each rule, declared in the opposite order to the
     bands': ``Late`` (outer first) holding a worker with one job, ``Ring`` (take
     turns) one with two, ``Early`` (inner first) one with two, and ``Shelf``
-    (passive) one with five; and three jobs of its own."""
+    (passive) one with five; and three jobs of its own. ``open`` declares it open,
+    so that the program reaches the workers' ports."""
     late, ring, early, shelf = worker(1), worker(2), worker(2), worker(5)
     net = ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Late", ExecutableGraph, [late], nested=True, stepping="outer_first"),
@@ -176,7 +179,7 @@ def bands():
         FunctionTransitionNode("Forward", pass_on),
         ArgumentEdgeToTransition("Inbox", "Forward", "n"),
         ReturnedEdgeFromTransition("Forward", "Outbox"),
-    ])
+    ], open=open)
     names = {late.net_id: "late", ring.net_id: "ring", early.net_id: "early", shelf.net_id: "shelf"}
     return net, names
 
@@ -184,7 +187,7 @@ def bands():
 class TestTheBands:
 
     def test_a_deep_step_tries_inner_first_then_the_ring_then_outer_first(self):
-        net, names = bands()
+        net, names = bands(open=True)  # open, so that the program hands the workers more below
         assert story(net, 9, names) == [
             # The inner-first net until it is at rest.
             "early", "early",

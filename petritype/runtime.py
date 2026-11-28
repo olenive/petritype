@@ -56,11 +56,14 @@ Design notes realised here:
   tokens) / `SetTokens` (replace; `[]` clears). Transitions: `SetParam` (merge kwargs),
   `Enable` / `Disable`, `Fire` (fire it now if it is fireable). The net: `SetNetParam` (one
   of ``graph.params``). Bad commands are dropped-and-logged, or raise under `RunContext.strict`.
-- **Closed nets (since 2026-11-23):** a command the program makes is outside the net, so
+- **Closed nets:** every net is closed unless its definition declares it open, the net a
+  `RunContext` drives included. A command the program makes is outside the net, so
   `Extend` and `SetTokens` at a place of a closed net that is not one of its ports are
-  refused with `ClosedNetError`, dropped-and-logged or raised under `strict` as any bad
-  command is; a command a control of the net gives (`apply_control`, `by_control`) is
-  inside and lands. The knobs and `Fire` stay with the program (`ClosedNets`).
+  refused with `ClosedNetError`, raised in every context, strict or not, since the place
+  not being a port is a matter of the net's definition; a command a control of the net gives (`apply_control`, `by_control`) is
+  inside and lands, pressed by the program or a viewer, and is refused to a body that holds the net,
+  and to everyone while a body holds it, until the firing lands. The knobs and `Fire` stay with the
+  program (`ClosedNets`).
 - **Controls:** a control-map ``{name: ControlSpec}`` binds widgets to commands; a net
   declares one with ``@petri_net(controls=...)`` and its place styles (``PlaceStyle``) with
   ``place_styles=...``, which the protocol runner serves to viewers (PROTOCOL.md §5.1, §6).
@@ -72,16 +75,18 @@ import asyncio
 import dataclasses
 import inspect
 import logging
+import math
+import sys
 import time
+from bisect import bisect_left
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, NoReturn, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict
 
 from petritype.core.executable_graph_components import (
-    ClosedNetError,
     ClosedNets,
     ExecutableGraph,
     ExecutableGraphCheck,
@@ -95,6 +100,7 @@ from petritype.core.executable_graph_components import (
     MutateEdge,
     NestedNets,
     PetritypeError,
+    Questions,
     ReadAllEdge,
     ReadEdge,
     SnapshotEdge,
@@ -180,6 +186,28 @@ class TooManyFiringsError(PetritypeError, RuntimeError):
         self.summary = summary
 
 
+class CancellationTimeoutError(PetritypeError, RuntimeError):
+    """A concurrent run that was ending cancelled the bodies still in flight, and
+    some had not stopped after the net's ``cancellation_timeout_seconds``: a body
+    that catches ``asyncio.CancelledError`` and carries on, or whose cleanup takes
+    longer. ``transitions`` names them. The run has let go of them: what they
+    consumed is in no place, what they return goes nowhere, and their claims are
+    released, so the marking is as partial as after any cancelled run. Raised when
+    the run would otherwise have ended without an error (it was stopped); when the
+    run was ending with an error of its own, the caller's cancellation, or an error
+    whose wait for the firings in flight to land ran out, that error is raised with
+    a note that says the same."""
+
+    def __init__(self, message: str, transitions: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.transitions = transitions
+
+
+# The share of a net's cancellation timeout after which a run that is still waiting
+# for cancelled bodies says so in the log: three minutes of the default five.
+_CANCELLATION_WARNING_SHARE = 0.6
+
+
 class ExecutionMode(Enum):
     SEQUENTIAL = "sequential"
     CONCURRENT = "concurrent"
@@ -193,7 +221,9 @@ class Extend:
     """Append a list of tokens to a place. The argument is *always* a list of tokens; a
     single token is a one-element list (`[token]`). ``place`` is a place's name, or a port
     of a subnet place by its pair, ``Port("Level 3", "Lobby")``: the net driven tells the
-    change, naming the pair, and the port's subnet mints the new tokens' ids."""
+    change, naming the pair, and the port's subnet mints the new tokens' ids. The program
+    is outside the net, and a closed net, every net not declared open, takes it at a port
+    only (``ClosedNetError`` otherwise, ``ClosedNets``); a control's is inside."""
 
     place: PlaceKey
     tokens: list
@@ -202,7 +232,7 @@ class Extend:
 @dataclass
 class SetTokens:
     """Replace a place's tokens with the provided list. `[]` clears the place. ``place``
-    is a ``PlaceKey``, as for ``Extend``."""
+    is a ``PlaceKey``, and a closed net takes it at a port only, as for ``Extend``."""
 
     place: PlaceKey
     tokens: list
@@ -241,10 +271,13 @@ class SetNetParam:
 
 @dataclass
 class Fire:
-    """Fire one transition now, if it is fireable (enabled, not in flight, its inputs there
+    """Fire one transition now, if it is fireable (enabled, not in flight, its inputs there,
+    none of the tokens it would take or be handed claimed against it by a firing in flight,
     and its guard passing); otherwise do nothing. What a ``fire`` control's press produces.
     Fired through the engine's one-firing primitive with a selector pinned to it, outer net
-    only (no descent into inner nets), counted as any firing is."""
+    only (no descent into inner nets), counted as any firing is. The claims are those the
+    concurrent loops launch by: a read edge shares its token with other readers, and a
+    mutate or a consuming edge needs its token alone."""
 
     transition: str
 
@@ -264,6 +297,7 @@ class RunContext:
     - ``inbox``     — an ``asyncio.Queue`` of input commands; drained between steps.
     - ``stop``      — an ``asyncio.Event``; set it to end ``run_indefinitely``.
     - ``strict``    — if True, a malformed command raises; otherwise it is dropped-and-logged.
+                      A write a closed net refuses raises either way (``ClosedNetError``).
     - ``disabled``  — transition names currently disabled via ``Disable`` (runner-level, the
                       engine stays unaware).
     - ``thread_pool`` — executor for transitions marked ``execution="thread"``; ``None`` uses
@@ -277,6 +311,12 @@ class RunContext:
                       ``Runner.run``.
     - ``n_fired``   — total firings driven through this context, maintained by the
                       Runner (the fuse's tally).
+
+    One more field, ``_flight_state``, is the Runner's alone: not an argument, and not
+    shown or compared. While a concurrent loop runs on this context it holds the loop's
+    firings in flight with the claims each has on tokens, so that a ``Fire`` a drain
+    applies is held to the claims the loop launches by; the loop keeps it current and
+    empties it as it ends, however it ends. Otherwise it is empty.
     """
 
     graph: ExecutableGraph
@@ -289,6 +329,9 @@ class RunContext:
     thread_pool: Optional[Executor] = None
     error_after_n_firings: Optional[int] = None
     n_fired: int = 0
+    _flight_state: dict[asyncio.Future, tuple] = field(
+        default_factory=dict, init=False, repr=False, compare=False,
+    )
 
 
 # The widgets a control may be, and what its press does (for a viewer's lighting rule).
@@ -333,6 +376,9 @@ class ControlSpec:
                        ``"fire"`` (lit while ``node`` is fireable), ``"enable"`` (a toggle
                        showing ``node``'s switch), ``"inject"``, or ``None`` (always lit). The
                        constructors ``inject``, ``fire`` and ``enable`` set it.
+
+    The declaration is checked as it is made (``ControlSpec.validate``, since 2026-11-28),
+    with ``ValueError``.
     """
 
     node: str
@@ -341,6 +387,70 @@ class ControlSpec:
     to_command: Callable[..., Optional[Command]]
     config: dict = field(default_factory=dict)
     action: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        ControlSpec.validate(self)
+
+    @staticmethod
+    def validate(spec: "ControlSpec") -> None:
+        """Refuse with ``ValueError`` a declaration no widget can show (since
+        2026-11-28): a ``kind`` or an ``action`` outside the vocabulary
+        (``CONTROL_KINDS``, ``CONTROL_ACTIONS``), a ``node`` or a ``label`` that is no
+        string, a ``to_command`` that cannot be called, a ``config`` that is no dict,
+        and, in it, by kind: a toggle's ``value`` that is no boolean; a slider's
+        ``start``, ``stop``, ``step`` or ``value`` that is no finite number, ``start``
+        above ``stop``, a ``step`` that is not above zero, or a ``value`` outside
+        ``start`` and ``stop`` where they are given; a select with no ``options``, an
+        option that is no string, or a ``value`` that is none of them; a text's
+        ``placeholder`` or ``value`` that is no string. What the config leaves out
+        takes the widget's default, and its other keys are the runtime's own (a
+        notebook's button ``kind``), unchecked. Whether ``node`` names a node of the
+        net is checked when the protocol runner loads the net, as whether the config is
+        plain JSON is."""
+        def refuse(problem: str) -> NoReturn:
+            raise ValueError(f"control {spec.label!r}: {problem}")
+
+        if spec.kind not in CONTROL_KINDS:
+            refuse(f"kind is one of {', '.join(CONTROL_KINDS)}, not {spec.kind!r}")
+        if spec.action is not None and spec.action not in CONTROL_ACTIONS:
+            refuse(f"action is one of {', '.join(CONTROL_ACTIONS)} or None, not {spec.action!r}")
+        if not isinstance(spec.label, str):
+            raise ValueError(f"a control's label is a string, not {spec.label!r}")
+        if not isinstance(spec.node, str):
+            refuse(f"node is the name of a place or a transition, or \"\" for none, not {spec.node!r}")
+        if not callable(spec.to_command):
+            refuse(f"to_command is a function, not {spec.to_command!r}")
+        if not isinstance(spec.config, dict):
+            refuse(f"config is a dict, not {spec.config!r}")
+        config = spec.config
+        if spec.kind == "toggle" and "value" in config and not isinstance(config["value"], bool):
+            refuse(f"a toggle's value is True or False, not {config['value']!r}")
+        elif spec.kind == "slider":
+            for key in ("start", "stop", "step", "value"):
+                number = config.get(key)
+                if key in config and (
+                    isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number)
+                ):
+                    refuse(f"a slider's {key} is a finite number, not {number!r}")
+            start, stop, step, value = (config.get(key) for key in ("start", "stop", "step", "value"))
+            if start is not None and stop is not None and start > stop:
+                refuse(f"a slider's start {start!r} is above its stop {stop!r}")
+            if step is not None and step <= 0:
+                refuse(f"a slider's step is above zero, not {step!r}")
+            if value is not None and ((start is not None and value < start) or (stop is not None and value > stop)):
+                refuse(f"a slider's value {value!r} is outside its range {start}..{stop}")
+        elif spec.kind == "select":
+            options = config.get("options")
+            if not isinstance(options, (list, tuple)) or not options:
+                refuse(f"a select has at least one option in config['options'], not {options!r}")
+            if not all(isinstance(option, str) for option in options):
+                refuse(f"a select's options are strings, not {list(options)!r}")
+            if "value" in config and config["value"] not in options:
+                refuse(f"a select's value {config['value']!r} is not one of its options {list(options)!r}")
+        elif spec.kind == "text":
+            for key in ("placeholder", "value"):
+                if key in config and not isinstance(config[key], str):
+                    refuse(f"a text's {key} is a string, not {config[key]!r}")
 
     @staticmethod
     def inject(place: str, make: Callable[..., Any], label: str, kind: str = "button",
@@ -396,7 +506,13 @@ def apply_control(ctx: RunContext, spec: ControlSpec, value: Any) -> Optional[Co
 
     A control is the net's own, so the command it gives is applied as from inside the net
     (``by_control``, since 2026-11-23): an ``Extend`` it gives lands at any place of a closed
-    net, as a ``press`` of the protocol runner does."""
+    net, as a ``press`` of the protocol runner does. The program and a viewer press it; a body
+    that holds the net, or a net it is inside, is refused with ``HeldByBodyError``, which fails
+    its firing (since 2026-11-28). While a body holds the net the program is refused it too,
+    with ``HeldByBodyError``, until the firing lands, and the body is not failed for it (since
+    2026-11-28): it is refused the net's knobs and a load into it likewise
+    (``ClosedNets.ensure_press``)."""
+    _ensure_pressable(ctx.graph, f"pressing control {spec.label!r}")
     command = ControlSpec.command(spec, value, ctx.graph)
     if command is not None:
         command = by_control(command)
@@ -412,14 +528,29 @@ _BY_CONTROL = "_petritype_by_control"
 def by_control(command: Command) -> Command:
     """A copy of ``command`` marked as given by one of the net's own controls (since
     2026-11-23). ``_apply_command`` applies it as from inside the net, so the rule on closed
-    nets (``ClosedNets``) does not refuse it. ``apply_control`` and the protocol runner's
-    ``press`` mark what a control gives; a command the program makes itself is outside.
+    nets (``ClosedNets``) does not refuse it, unless a body that holds the net applies it, or
+    anyone applies it while a body holds the net (since 2026-11-28). ``apply_control`` and the protocol runner's ``press`` mark what a
+    control gives; a command the program makes itself is outside.
     Anything that is not a command is returned as it is, for ``_apply_command`` to refuse."""
     if not dataclasses.is_dataclass(command) or isinstance(command, type):
         return command
     copy = dataclasses.replace(command)
     object.__setattr__(copy, _BY_CONTROL, True)
     return copy
+
+
+# Why a body that holds a net may not press one of its controls.
+_CONTROL_WHY = (
+    "its controls are pressed by the program and the viewer. Give the command to the program, or put a token "
+    "at a port the edge reaches for a transition of the net's own to act on."
+)
+
+
+def _ensure_pressable(graph: ExecutableGraph, act: str) -> None:
+    """Refuse with ``HeldByBodyError`` a control of ``graph`` pressed or applied by a
+    running body that holds it, or a net it is inside, and by anyone while a body holds
+    it (both since 2026-11-28, ``ClosedNets.ensure_press``)."""
+    ClosedNets.ensure_press(graph, act, _CONTROL_WHY)
 
 
 # --- helpers -----------------------------------------------------------------------------
@@ -462,47 +593,57 @@ def _run_now(coroutine) -> Any:
 
 
 def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
-    """Apply a ``Fire``: if ``cmd.transition`` is fireable now (switched on in ``ctx`` and on
-    the graph, not in flight, inputs there, guard passing), fire it once through
-    ``fire_one_transition`` with a selector pinned to it and no descent into inner nets,
-    counted against the fuse; otherwise do nothing. Returns True iff it fired. A body that
-    fails raises ``TransitionFailedError``, as a step's would. It passes no ``on_launch``,
-    so observers hear of the firing after the drain: ``drain_inbox`` is synchronous, and
-    ``_run_now`` may run the firing on a helper thread's loop, where an observer would be
-    called off the loop's thread."""
+    """Apply a ``Fire``: if ``cmd.transition`` can fire now (not in flight, and by the rule
+    the concurrent sweep launches by, ``_launchable``: switched on in ``ctx`` and on the
+    graph, inputs there, no claim of a firing in flight against its own, guard passing),
+    fire it once through ``fire_one_transition`` with a selector pinned to it, the plan it
+    was checked with and no descent into inner nets, counted against the fuse; otherwise
+    do nothing. Returns True iff it fired. A body that fails raises
+    ``TransitionFailedError``, as a step's would. It passes no ``on_launch``, so observers
+    hear of the firing after the drain: ``drain_inbox`` is synchronous, and ``_run_now``
+    may run the firing on a helper thread's loop, where an observer would be called off
+    the loop's thread.
+
+    The claims are those of the concurrent loop running on ``ctx`` (``_flight_state``),
+    and there are none when no such loop runs. The checked plan is the one taken, since
+    a body on a thread may change a token it holds while the caller waits, and so what a
+    keyed edge would choose if planned again. ``fire_one_transition`` names only its own
+    firing in ``graph.in_flight`` and empties it as it lands, so the names there before
+    are put back: the loop's firings are still in flight."""
     graph = ctx.graph
     transition = _transition_named(graph, cmd.transition)
     if transition is None:
         return _reject(ctx, f"unknown transition {cmd.transition!r}")
     if not _controls_allowed(ctx, cmd, f"firing {cmd.transition!r} by name"):
         return False
-    if transition.name in ctx.disabled or transition.name in graph.in_flight:
+    if transition.name in graph.in_flight:
         return False
     place_nodes, incoming, outgoing, read = ExecutableGraphOperations.maps(graph)
-    if not ExecutableGraphCheck.transition_is_fireable(
-        transition=transition,
-        executable_graph=graph,
-        transition_names_to_incoming_edges=incoming,
-        place_names_to_nodes=place_nodes,
-        transition_names_to_read_edges=read,
-    ):
+    launchable = _launchable(ctx, transition, place_nodes, incoming, read, _holds_of(ctx._flight_state))
+    if launchable is None:
         return False
+    plan, _claims = launchable
     if _fuse_spent(ctx):
         _blow_fuse(ctx, transition.name)
 
     def pinned(_graph, fireable):
         return transition if any(t is transition for t in fireable) else None
 
-    fired = _run_now(ExecutableGraphOperations.fire_one_transition(
-        executable_graph=graph,
-        place_names_to_nodes=place_nodes,
-        transition_names_to_incoming_edges=incoming,
-        transition_names_to_outgoing_edges=outgoing,
-        transition_names_to_read_edges=read,
-        transition_selector=pinned,
-        executor=ctx.thread_pool,
-        descend=False,
-    ))
+    running = graph.in_flight
+    try:
+        fired = _run_now(ExecutableGraphOperations.fire_one_transition(
+            executable_graph=graph,
+            place_names_to_nodes=place_nodes,
+            transition_names_to_incoming_edges=incoming,
+            transition_names_to_outgoing_edges=outgoing,
+            transition_names_to_read_edges=read,
+            transition_selector=pinned,
+            executor=ctx.thread_pool,
+            descend=False,
+            plans={transition.name: plan},
+        ))
+    finally:
+        graph.in_flight = running
     if fired is None:
         return False
     ctx.n_fired += 1
@@ -510,8 +651,10 @@ def _fire_now(ctx: RunContext, cmd: Fire) -> bool:
 
 
 def _refuse(ctx: RunContext, refusal: ValueError) -> bool:
-    """A command the rule on closed nets refuses: raised as it is under ``strict``,
-    otherwise dropped and logged, as any command the net cannot take is."""
+    """A knob or a firing by name refused because a body holds the net now
+    (``HeldByBodyError``): raised as it is under ``strict``, otherwise dropped and
+    logged, as any command the net cannot take at that moment is. A write a closed
+    net refuses is not dropped (``_tokens_allowed``)."""
     if ctx.strict:
         raise refusal
     _log.warning("dropping refused command: %s", refusal)
@@ -520,24 +663,38 @@ def _refuse(ctx: RunContext, refusal: ValueError) -> bool:
 
 def _tokens_allowed(ctx: RunContext, cmd: Command, act: str) -> bool:
     """True when ``cmd`` may write its place: it is inside (``by_control``) or the net
-    lets it (``ClosedNets.ensure_tokens``); otherwise refused through ``_refuse``."""
+    lets it (``ClosedNets.ensure_tokens``). A closed net's refusal is raised as it is,
+    ``ClosedNetError``, in every context, strict or not: the place is not a port, which
+    is a matter of the net's definition and not of the input, so dropping the command
+    would leave a program waiting for a token that never arrives. A control's command
+    applied by a body that holds the net is refused through ``_refuse``
+    (``_control_allowed``)."""
     if getattr(cmd, _BY_CONTROL, False):
-        return True
-    try:
-        ClosedNets.ensure_tokens(ctx.graph, cmd.place, act)
-    except ClosedNetError as refusal:
-        return _refuse(ctx, refusal)
+        return _control_allowed(ctx, act)
+    ClosedNets.ensure_tokens(ctx.graph, cmd.place, act)
     return True
 
 
 def _controls_allowed(ctx: RunContext, cmd: Command, act: str) -> bool:
     """True when ``cmd`` may work a knob or fire by name: it is inside
-    (``by_control``), or no body holds a net under the rule
-    (``ClosedNets.ensure_controls``); otherwise refused through ``_refuse``."""
+    (``by_control``) and no body that holds the net applies it, or no body holds the
+    net (``ClosedNets.ensure_controls``); otherwise refused through ``_refuse``."""
     if getattr(cmd, _BY_CONTROL, False):
-        return True
+        return _control_allowed(ctx, act)
     try:
         ClosedNets.ensure_controls(ctx.graph, act)
+    except HeldByBodyError as refusal:
+        return _refuse(ctx, refusal)
+    return True
+
+
+def _control_allowed(ctx: RunContext, act: str) -> bool:
+    """True when a control's command (``by_control``) may be applied: unless a body
+    that holds the net, or a net it is inside, applies it, or anyone applies it while
+    a body holds the net (both since 2026-11-28), which is refused through ``_refuse``.
+    The program's and a viewer's land while no body holds the net."""
+    try:
+        _ensure_pressable(ctx.graph, f"{act} by a control")
     except HeldByBodyError as refusal:
         return _refuse(ctx, refusal)
     return True
@@ -554,13 +711,15 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
     when it fires (``_fire_now``) and nothing when it does not, which is not a
     rejection (False, nothing logged).
 
-    Closed nets (``ClosedNets``, since 2026-11-23): a command the program makes is
-    outside the net, so ``Extend`` and ``SetTokens`` at a place of a closed net that is
-    not one of its ports are refused with ``ClosedNetError``, and while a body of the
-    net around it holds the net, the knobs and ``Fire`` of a net under the rule with
-    ``HeldByBodyError``: raised under ``strict``, else dropped and logged, as any
-    command the net cannot take. A command a control of the net gives
-    (``by_control``) is inside, and the rule does not refuse it."""
+    Closed nets (``ClosedNets``): a command the program makes is outside the net, so
+    ``Extend`` and ``SetTokens`` at a place of a closed net (every net not declared
+    open) that is not one of its ports are refused with ``ClosedNetError``, raised in
+    every context, strict or not; and while a body of the net around it holds the
+    net, the knobs and ``Fire`` with ``HeldByBodyError``: raised under ``strict``,
+    else dropped and logged, as any command the net cannot take at that moment. A command a control of the net gives
+    (``by_control``) is inside, and the rule does not refuse it, unless a body that holds the net applies it,
+    or anyone applies it while a body holds the net (``HeldByBodyError``, both since 2026-11-28, raised or
+    dropped likewise)."""
     graph = ctx.graph
     TokenIds.resync(graph)
 
@@ -608,6 +767,8 @@ def _apply_command(ctx: RunContext, cmd: Command) -> bool:
             return _reject(ctx, f"unknown transition {cmd.transition!r}")
         if not isinstance(cmd.kwargs, dict):
             return _reject(ctx, f"SetParam.kwargs must be a dict, got {type(cmd.kwargs).__name__}")
+        if "" in cmd.kwargs:
+            return _reject(ctx, "SetParam names a keyword by the empty string; a name holds at least one character")
         if not _controls_allowed(ctx, cmd, f"setting the keywords of {cmd.transition!r}"):
             return False
         transition.kwargs = {**(transition.kwargs or {}), **cmd.kwargs}
@@ -655,6 +816,7 @@ def _selector_for(ctx: RunContext):
     long as anything was disabled."""
     if not ctx.disabled:
         return None
+    _ensure_switches_allowed(ctx)
     disabled = ctx.disabled
 
     def selector(graph, fireable):
@@ -664,6 +826,18 @@ def _selector_for(ctx: RunContext):
         return (graph.transition_selector or default_transition_selector)(graph, remaining)
 
     return selector
+
+
+def _ensure_switches_allowed(ctx: RunContext) -> None:
+    """Refuse with ``HeldByBodyError`` a run of a net a body holds, or a net inside
+    one, while ``ctx.disabled`` switches transitions off (since 2026-11-28): switched
+    off in a context, transitions choose which of the rest fires, which is firing
+    by name, and a transition's switch is a knob, so both stay with the program and
+    the runner while no body holds the net. Both drivers refuse it alike, before
+    anything fires: the sequential one used to refuse it as a selector of the
+    caller's own, and the concurrent one let the switches choose."""
+    if ctx.disabled:
+        ClosedNets.ensure_controls(ctx.graph, "a run with transitions its RunContext switches off")
 
 
 def _prepare(graph: ExecutableGraph) -> tuple[dict, dict, dict, dict]:
@@ -847,44 +1021,192 @@ def _claims_from_plan(plan: Stage1Plan) -> _Claims:
     )
 
 
-def _conflicts(claims: _Claims, flight_state: dict) -> bool:
-    """True iff ``claims`` conflicts with any lock held by an in-flight firing."""
-    if not flight_state:
-        return False
-    held_ex_tok: set[tuple[PlaceKey, int]] = set()
-    held_sh_tok: set[tuple[PlaceKey, int]] = set()
-    held_ex_place: set[PlaceKey] = set()
-    held_sh_place: set[PlaceKey] = set()
-    for _transition, _args, _firing_ids, active in flight_state.values():
-        held_ex_tok.update(active.hold_exclusive_tokens)
-        held_sh_tok.update(active.hold_shared_tokens)
-        held_ex_place.update(active.hold_exclusive_places)
-        held_sh_place.update(active.hold_shared_places)
-    if not (held_ex_tok or held_sh_tok or held_ex_place or held_sh_place):
-        return False
-    held_ex_tok_places = {place for place, _ in held_ex_tok}
-    held_sh_tok_places = {place for place, _ in held_sh_tok}
+@dataclass(slots=True)
+class _Holds:
+    """The claims the firings in flight hold while their bodies run, gathered into sets
+    to look a claim up in: tokens and whole places, exclusive and shared, and the places
+    of the held tokens. Gathered once for a sweep or a ``Fire`` (``_holds_of``), and
+    added to as a sweep launches (``_add_holds``)."""
 
+    exclusive_tokens: set[tuple[PlaceKey, int]] = field(default_factory=set)
+    shared_tokens: set[tuple[PlaceKey, int]] = field(default_factory=set)
+    exclusive_places: set[PlaceKey] = field(default_factory=set)
+    shared_places: set[PlaceKey] = field(default_factory=set)
+    exclusive_token_places: set[PlaceKey] = field(default_factory=set)
+    shared_token_places: set[PlaceKey] = field(default_factory=set)
+
+
+def _holds_anything(claims: _Claims) -> bool:
+    """Whether a firing launched with ``claims`` holds a token or a place while its body
+    runs, through a mutate or a read edge."""
+    return bool(
+        claims.hold_exclusive_tokens or claims.hold_shared_tokens
+        or claims.hold_exclusive_places or claims.hold_shared_places
+    )
+
+
+def _add_holds(holds: _Holds, claims: _Claims) -> None:
+    """Add to ``holds`` what a firing launched with ``claims`` holds while its body runs."""
+    if not _holds_anything(claims):
+        return
+    holds.exclusive_tokens.update(claims.hold_exclusive_tokens)
+    holds.shared_tokens.update(claims.hold_shared_tokens)
+    holds.exclusive_places.update(claims.hold_exclusive_places)
+    holds.shared_places.update(claims.hold_shared_places)
+    holds.exclusive_token_places.update(place for place, _ in claims.hold_exclusive_tokens)
+    holds.shared_token_places.update(place for place, _ in claims.hold_shared_tokens)
+
+
+def _holds_of(flight_state: dict) -> _Holds:
+    """What the firings in ``flight_state`` hold."""
+    holds = _Holds()
+    for _transition, _args, _firing_ids, claims in flight_state.values():
+        _add_holds(holds, claims)
+    return holds
+
+
+def _held_places(claims: _Claims) -> set[PlaceKey]:
+    """The places where a firing launched with ``claims`` holds a token or the whole place."""
+    return {
+        *claims.hold_exclusive_places,
+        *claims.hold_shared_places,
+        *(place for place, _ in claims.hold_exclusive_tokens),
+        *(place for place, _ in claims.hold_shared_tokens),
+    }
+
+
+def _conflicts(claims: _Claims, holds: _Holds) -> bool:
+    """True iff ``claims`` conflicts with a claim held in flight (``holds``): it needs
+    alone a token or a place that a firing holds, or shares one that a firing holds
+    alone. A claim on a whole place meets every claim on one of its tokens."""
+    if not (holds.exclusive_tokens or holds.shared_tokens or holds.exclusive_places or holds.shared_places):
+        return False
     for place in claims.need_exclusive_places:
         if (
-            place in held_ex_place
-            or place in held_sh_place
-            or place in held_ex_tok_places
-            or place in held_sh_tok_places
+            place in holds.exclusive_places
+            or place in holds.shared_places
+            or place in holds.exclusive_token_places
+            or place in holds.shared_token_places
         ):
             return True
     for place in claims.need_shared_places:
-        if place in held_ex_place or place in held_ex_tok_places:
+        if place in holds.exclusive_places or place in holds.exclusive_token_places:
             return True
     for pair in claims.need_exclusive_tokens:
         place = pair[0]
-        if pair in held_ex_tok or pair in held_sh_tok or place in held_ex_place or place in held_sh_place:
+        if (
+            pair in holds.exclusive_tokens
+            or pair in holds.shared_tokens
+            or place in holds.exclusive_places
+            or place in holds.shared_places
+        ):
             return True
     for pair in claims.need_shared_tokens:
-        place = pair[0]
-        if pair in held_ex_tok or place in held_ex_place:
+        if pair in holds.exclusive_tokens or pair[0] in holds.exclusive_places:
             return True
     return False
+
+
+def _launchable(
+    ctx: RunContext,
+    transition: FunctionTransitionNode,
+    place_nodes: dict,
+    incoming: dict,
+    read: dict,
+    holds: _Holds,
+    planned: Optional[dict[str, Optional[tuple[Stage1Plan, _Claims]]]] = None,
+) -> Optional[tuple[Stage1Plan, _Claims]]:
+    """The plan and the claims of a firing of ``transition`` now, beside the firings in
+    flight whose claims ``holds`` gathers, or None when it cannot fire: switched off in
+    ``ctx`` or on the graph, its tokens not there, one of its claims against a claim
+    held in flight (``_conflicts``), or its guard failing, asked in that order. The one
+    rule both the concurrent sweep and a ``Fire`` command launch by; whether the
+    transition is in flight already is the caller's to check.
+
+    ``planned`` is a sweep's: the plan and claims of each transition planned on the
+    marking as it stands, or None for one whose tokens are not there. A transition
+    found there is not planned again, and one planned is put there; the sweep takes
+    out those a launch may have changed. The guard is asked every time."""
+    graph = ctx.graph
+    if transition.name in ctx.disabled or transition.name in graph.disabled:
+        return None
+    if planned is not None and transition.name in planned:
+        found = planned[transition.name]
+    else:
+        plan = ExecutableGraphOperations.plan_stage_1(
+            transition=transition,
+            transition_names_to_incoming_edges=incoming,
+            place_names_to_nodes=place_nodes,
+            transition_names_to_read_edges=read,
+            net_params=graph.params,
+            check_filters=True,
+        )
+        found = None if plan is None else (plan, _claims_from_plan(plan))
+        if planned is not None:
+            planned[transition.name] = found
+    if found is None or _conflicts(found[1], holds):
+        return None
+    if transition.guard is not None and not bool(Questions.ask("guard", transition.name, transition.guard, graph)):
+        return None
+    return found
+
+
+def _exposure(
+    transitions: Sequence[FunctionTransitionNode], place_nodes: dict, incoming: dict, read: dict,
+) -> tuple[dict[int, list[int]], list[int]]:
+    """For a sweep: by place node (its ``id``, so a node two keys name is one), the
+    positions in ``transitions`` of those with an input edge on it, of any kind; and
+    the positions of those with a guard."""
+    on_place: dict[int, list[int]] = {}
+    guarded: list[int] = []
+    for position, transition in enumerate(transitions):
+        for edge in (*incoming.get(transition.name, ()), *read.get(transition.name, ())):
+            node = place_nodes.get(edge.place_node_name)
+            if node is not None:
+                on_place.setdefault(id(node), []).append(position)
+        if transition.guard is not None:
+            guarded.append(position)
+    return on_place, guarded
+
+
+def _keep_candidate(
+    positions: list[int],
+    candidates: list[FunctionTransitionNode],
+    launchable: dict[str, tuple[int, Stage1Plan, _Claims]],
+    position: int,
+    transition: FunctionTransitionNode,
+    found: Optional[tuple[Stage1Plan, _Claims]],
+) -> None:
+    """Put ``transition``, at ``position`` in declaration order, among a sweep's
+    candidates with what ``_launchable`` found, or take it out when that is None."""
+    at = bisect_left(positions, position)
+    present = at < len(positions) and positions[at] == position
+    if found is None:
+        if present:
+            del positions[at]
+            del candidates[at]
+            del launchable[transition.name]
+        return
+    if not present:
+        positions.insert(at, position)
+        candidates.insert(at, transition)
+    launchable[transition.name] = (position, *found)
+
+
+def _offered(
+    chosen: Any,
+    offered: list[FunctionTransitionNode],
+    positions: list[int],
+    launchable: dict[str, tuple[int, Stage1Plan, _Claims]],
+) -> bool:
+    """``chosen in offered``, looked for first where it was offered, which spares a
+    comparison of every transition before it."""
+    entry = launchable.get(chosen.name) if isinstance(chosen, FunctionTransitionNode) else None
+    if entry is not None:
+        at = bisect_left(positions, entry[0])
+        if at < len(offered) and offered[at] is chosen:
+            return True
+    return chosen in offered
 
 
 def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: dict, incoming: dict,
@@ -907,6 +1229,7 @@ def _launch(ctx: RunContext, transition: FunctionTransitionNode, place_nodes: di
             net_params=ctx.graph.params,
             plan=plan,
             record_input_places=False,
+            executable_graph=ctx.graph,
         )
 
     async def timed_body():
@@ -942,59 +1265,89 @@ def _launch_sweep(
 ) -> int:
     """Launch as many non-conflicting transitions as possible in one concurrent
     sweep, honouring ``priority``, ``tie_break``, ``transition_selector``,
-    ``disabled``, guards, and per-token reader/writer locks.
+    ``disabled``, guards, and per-token reader/writer claims.
 
-    Repeatedly computes all launchable (non-airborne, non-disabled,
-    non-conflicting, token-ready, guard-passing) transitions, asks the graph's
-    selector to pick one, checks the fuse, and launches it atomically until no
-    launchable transition remains or ``remaining_cap`` is reached.
-    """
+    Each time round, the transitions that can launch (not in flight, and by
+    ``_launchable``: switched on, tokens there, no claim against one held in flight,
+    guard passing) are handed to the graph's selector in declaration order, and the one
+    it picks is launched, after the fuse is checked, until none can or
+    ``remaining_cap`` is reached.
+
+    What a launch changes is all that is looked at again. The claims held in flight
+    are gathered once, and each launch adds its own. A plan is kept for the sweep and
+    made again only after a launch took from a place the transition has an input edge
+    on, of any kind: a plan reads only those places, and a launch moves tokens only out
+    of the places it takes from. A transition with an input edge on a place where a
+    launch holds a token, or the whole place, has its claims checked again, and every
+    guard is asked again each time round, since a guard may read the whole net. The
+    rest can launch, or not, as before, so the selector is handed the lists it would be
+    handed if every transition were planned again, and a time round costs the
+    selector, the guards and what the last launch touched."""
     graph = ctx.graph
+    _ensure_switches_allowed(ctx)
+    transitions = graph.transitions
     airborne = set(in_flight.values())
     selector = graph.transition_selector or default_transition_selector
+    holds = _holds_of(flight_state)
+    planned: dict[str, Optional[tuple[Stage1Plan, _Claims]]] = {}
+    # The transitions that can launch, in declaration order, with their positions in it;
+    # and by name each one's position, plan and claims.
+    positions: list[int] = []
+    candidates: list[FunctionTransitionNode] = []
+    launchable: dict[str, tuple[int, Stage1Plan, _Claims]] = {}
+    exposure: Optional[tuple[dict[int, list[int]], list[int]]] = None
+    last: Optional[tuple[Stage1Plan, _Claims]] = None
     launched = 0
 
     while remaining_cap is None or launched < remaining_cap:
-        candidates: list[FunctionTransitionNode] = []
-        plans_and_claims: dict[str, tuple[Stage1Plan, _Claims]] = {}
-        for transition in graph.transitions:
-            if (
-                transition.name in airborne
-                or transition.name in ctx.disabled
-                or transition.name in graph.disabled
-            ):
-                continue
-            plan = ExecutableGraphOperations.plan_stage_1(
-                transition=transition,
-                transition_names_to_incoming_edges=incoming,
-                place_names_to_nodes=place_nodes,
-                transition_names_to_read_edges=read,
-                net_params=graph.params,
-                check_filters=True,
-            )
-            if plan is None:
-                continue
-            claims = _claims_from_plan(plan)
-            if _conflicts(claims, flight_state):
-                continue
-            if transition.guard is not None and not bool(transition.guard(graph)):
-                continue
-            candidates.append(transition)
-            plans_and_claims[transition.name] = (plan, claims)
+        if last is None:
+            for position, transition in enumerate(transitions):
+                if transition.name in airborne:
+                    continue
+                found = _launchable(ctx, transition, place_nodes, incoming, read, holds, planned)
+                if found is not None:
+                    positions.append(position)
+                    candidates.append(transition)
+                    launchable[transition.name] = (position, *found)
+        elif len(airborne) == len(transitions):
+            break  # every transition is in flight: none can launch
+        else:
+            if exposure is None:
+                exposure = _exposure(transitions, place_nodes, incoming, read)
+            on_place, guarded = exposure
+            last_plan, last_claims = last
+            again: set[int] = set()
+            for node in {id(item.place) for item in last_plan.incoming}:
+                for position in on_place.get(node, ()):
+                    again.add(position)
+                    planned.pop(transitions[position].name, None)
+            if _holds_anything(last_claims):
+                for key in _held_places(last_claims):
+                    node = place_nodes.get(key)
+                    if node is not None:
+                        again.update(on_place.get(id(node), ()))
+            again.update(guarded)
+            for position in sorted(again):
+                transition = transitions[position]
+                if transition.name in airborne:
+                    continue
+                found = _launchable(ctx, transition, place_nodes, incoming, read, holds, planned)
+                _keep_candidate(positions, candidates, launchable, position, transition, found)
 
         if not candidates:
             break
-        chosen = selector(graph, candidates)
+        offered = list(candidates)
+        chosen = Questions.ask("selector", None, selector, graph, offered)
         if chosen is None:
             break
-        if chosen not in candidates:
+        if not _offered(chosen, offered, positions, launchable):
             raise ValueError(
                 f"transition_selector returned {chosen!r}, which is not among the launchable transitions "
-                f"{[t.name for t in candidates]}"
+                f"{[t.name for t in offered]}"
             )
         if _fuse_spent(ctx):
             _blow_fuse(ctx, chosen.name)
-        plan, claims = plans_and_claims[chosen.name]
+        position, plan, claims = launchable[chosen.name]
         task, firing_ids, args = _launch(
             ctx, chosen, place_nodes, incoming, outgoing, read, plan=plan,
         )
@@ -1003,6 +1356,9 @@ def _launch_sweep(
         airborne.add(chosen.name)
         launched += 1
         ctx.n_fired += 1
+        _keep_candidate(positions, candidates, launchable, position, transitions[position], None)
+        _add_holds(holds, claims)
+        last = (plan, claims)
 
     if launched:
         NestedNets.took_own_turn(graph)
@@ -1059,10 +1415,114 @@ def _release_all(flight_state: dict) -> None:
         ClosedNets.release(entry[2])
 
 
-async def _cancel_and_cleanup(in_flight: dict, flight_state: dict, graph: ExecutableGraph) -> None:
+def _retrieve(task: asyncio.Future) -> None:
+    """Take a finished task's exception, if it has one, so that asyncio does not
+    report it as never retrieved: the run that cancelled the task has no use for it."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _wait_for_cancelled(tasks: list, names: dict, timeout: Optional[float]) -> tuple[str, ...]:
+    """Wait for cancelled ``tasks`` to finish, for ``timeout`` seconds at most (None:
+    without limit), logging a warning that names those still running once
+    ``_CANCELLATION_WARNING_SHARE`` of it has passed. Returns the names (from
+    ``names``, by task) of those that had not finished, in the order launched."""
+    waiting = set(tasks)
+    if timeout is None:
+        _, waiting = await asyncio.wait(waiting)
+    else:
+        warn_after = timeout * _CANCELLATION_WARNING_SHARE
+        _, waiting = await asyncio.wait(waiting, timeout=warn_after)
+        if waiting:
+            _log.warning(
+                "petritype: %d cancelled bod%s still running after %.6g s (%s); "
+                "the run stops waiting at %.6g s (cancellation_timeout_seconds)",
+                len(waiting), "y is" if len(waiting) == 1 else "ies are", warn_after,
+                ", ".join(names[task] for task in tasks if task in waiting), timeout,
+            )
+            _, waiting = await asyncio.wait(waiting, timeout=timeout - warn_after)
+    for task in tasks:
+        if task in waiting:
+            task.add_done_callback(_retrieve)
+        else:
+            _retrieve(task)
+    return tuple(names[task] for task in tasks if task in waiting)
+
+
+def _lands_first(ending_with: Optional[BaseException]) -> bool:
+    """Whether a concurrent run ending with ``ending_with`` lands its firings in flight
+    before the error goes on: for every error (``Exception``), since the firings in
+    flight did nothing wrong. A failed firing (``TransitionFailedError``) lets its peers
+    land since 2026-11-28, as an error that is no firing's failure, a guard, a priority
+    or a selector that raised, the fuse, a refused command or an observer that raised,
+    already did. A cancellation from outside cancels them, and so does a stop, which
+    ends with no error."""
+    return isinstance(ending_with, Exception)
+
+
+async def _land_in_flight(
+    ctx: RunContext, in_flight: dict, flight_state: dict, place_nodes: dict, incoming: dict,
+    ending_with: BaseException,
+) -> None:
+    """Let every body in flight finish, for the net's ``cancellation_timeout_seconds``
+    at most, and land each that did, in the order launched: its outputs deposited
+    and its events recorded, as a landing in the loop does, those that had finished
+    beside the firing whose failure ends the run included. A landing that fails
+    fails as in the loop (``restore_tokens_on_failure`` applies, ``Failed`` is
+    recorded) and is told in a note on ``ending_with``, the error the run ends
+    with, which stays the one raised. Bodies still running at the timeout stay in
+    ``in_flight``, for ``_cancel_and_cleanup``, and a note names them."""
+    if not in_flight:
+        return
+    graph = ctx.graph
+    timeout = graph.cancellation_timeout_seconds
+    done, _pending = await asyncio.wait(set(in_flight), timeout=timeout)
+    for task in [task for task in in_flight if task in done]:
+        name = in_flight.pop(task)
+        fired_transition, consumed, firing_ids, _claims = flight_state.pop(task)
+        try:
+            _complete(ctx, task, fired_transition, consumed, firing_ids, place_nodes, incoming)
+        except Exception as failed:
+            ending_with.add_note(f"petritype: {name!r}, in flight as the run ended, failed as it landed: {failed}")
+    if in_flight:
+        ending_with.add_note(
+            f"petritype: still running after {timeout:g} s (cancellation_timeout_seconds), so cancelled, not "
+            f"landed: {', '.join(in_flight.values())}. What they consumed is in no place."
+        )
+    graph.in_flight = set(in_flight.values())
+
+
+async def _end_concurrent_run(
+    ctx: RunContext, in_flight: dict, flight_state: dict, place_nodes: dict, incoming: dict,
+    ending_with: Optional[BaseException],
+) -> None:
+    """How a concurrent loop ends, from its ``finally``, ``ending_with`` the error it
+    ends with, if any: the firings in flight land first when it ends with an error,
+    a failed firing's included (``_lands_first``), and whatever is still in flight
+    is cancelled and let go of (``_cancel_and_cleanup``)."""
+    try:
+        if _lands_first(ending_with):
+            try:
+                await _land_in_flight(ctx, in_flight, flight_state, place_nodes, incoming, ending_with)
+            except BaseException as interrupted:  # cancelled while it waited
+                await _cancel_and_cleanup(in_flight, flight_state, ctx.graph, interrupted)
+                raise
+        await _cancel_and_cleanup(in_flight, flight_state, ctx.graph, ending_with)
+    finally:
+        ctx._flight_state = {}
+
+
+async def _cancel_and_cleanup(
+    in_flight: dict, flight_state: dict, graph: ExecutableGraph, ending_with: Optional[BaseException] = None,
+) -> None:
     """Cancel all in-flight tasks, await cancellation of non-thread tasks so their
     cleanup blocks run before holds are released, release any remaining holds, and
-    clear ``graph.in_flight``."""
+    clear ``graph.in_flight``.
+
+    The wait is for the net's ``cancellation_timeout_seconds`` at most. Bodies that
+    have not stopped by then are let go of, and named: in a note on ``ending_with``,
+    the error the run is ending with, or, when it is ending with none, in a
+    ``CancellationTimeoutError`` raised here."""
     pending = list(in_flight)
     for task in pending:
         task.cancel()
@@ -1070,20 +1530,39 @@ async def _cancel_and_cleanup(in_flight: dict, flight_state: dict, graph: Execut
         task for task in pending
         if task in flight_state and flight_state[task][0].execution != "thread"
     ]
-    if awaitable:
-        await asyncio.gather(*awaitable, return_exceptions=True)
-    _release_all(flight_state)
-    graph.in_flight = set()
+    stuck: tuple[str, ...] = ()
+    try:
+        if awaitable:
+            stuck = await _wait_for_cancelled(awaitable, in_flight, graph.cancellation_timeout_seconds)
+    finally:
+        _release_all(flight_state)
+        graph.in_flight = set()
+    if stuck:
+        message = (
+            f"cancelled but still running after {graph.cancellation_timeout_seconds:g} s "
+            f"(cancellation_timeout_seconds): {', '.join(stuck)}. The run has let go of "
+            f"them: what they consumed is in no place and what they return goes nowhere."
+        )
+        if ending_with is None:
+            raise CancellationTimeoutError(message, stuck)
+        ending_with.add_note(f"petritype: {message}")
 
 
-def _held(flight_state: dict) -> frozenset:
+def _held(flight_state: dict, place_nodes: dict) -> frozenset:
     """The ``(place, token id)`` pairs the outer bodies in flight hold through a
     mutate edge or a read edge (since 2026-11-23): tokens still in their places,
-    whose inner nets no inner firing may touch while such a body runs."""
-    return frozenset(
+    whose inner nets no inner firing may touch while such a body runs. A body handed
+    every token of a place to change (a mutate edge in list mode, which claims the
+    whole place) holds the place's own list, so it also holds whatever lands there
+    while it runs: every token now in such a place is among the pairs."""
+    pairs = {
         pair for entry in flight_state.values()
         for pair in (*entry[2].mutated, *entry[2].read)
-    )
+    }
+    for entry in flight_state.values():
+        for place in entry[3].hold_exclusive_places:
+            pairs.update((place, token_id) for token_id in place_nodes[place].token_ids)
+    return frozenset(pairs)
 
 
 async def _fire_inner(ctx: RunContext, part: str, held: frozenset = frozenset()) -> bool:
@@ -1131,6 +1610,7 @@ async def _sleep_or_stop(ctx: RunContext, tick: float) -> bool:
 class Runner:
     """Functions that drive a ``RunContext``. No instances — call ``Runner.run_to_completion(ctx)``."""
 
+    @staticmethod
     def drain_inbox(ctx: RunContext) -> int:
         """Apply all currently-queued input commands, in FIFO order. Synchronous (no await),
         so it is safe to call between fires without interleaving a torn marking. Returns the
@@ -1148,6 +1628,7 @@ class Runner:
                 applied += 1
         return applied
 
+    @staticmethod
     async def run(ctx: RunContext, *, stop_after_n_firings: Optional[int] = None) -> RunSummary:
         """Drive the net using ``ctx.mode`` until it quiesces — or, if
         ``stop_after_n_firings`` is set, until that many firings have run this call —
@@ -1163,6 +1644,11 @@ class Runner:
         If ``ctx.error_after_n_firings`` is spent and the net attempts another firing,
         raises ``TooManyFiringsError`` with the interrupted call's summary attached.
         Cancellation behaves as on ``run_to_completion``.
+
+        In concurrent mode a run that ends on an error (a failed firing, a guard,
+        priority or selector that raised, the fuse) lets the other firings in flight
+        land before the error goes on, for the net's ``cancellation_timeout_seconds``
+        at most (since 2026-11-28); a cancellation from outside cancels them.
         """
         previous = dict(ctx.graph.fired_counts)
         try:
@@ -1175,6 +1661,7 @@ class Runner:
             raise
         return _summarise(previous, ctx.graph, quiesced)
 
+    @staticmethod
     async def run_to_completion(ctx: RunContext) -> ExecutableGraph:
         """Drive the net to quiescence using ``ctx.mode``, draining input between steps and
         notifying observers as it goes. Equivalent to ``Runner.run(ctx)`` (which also
@@ -1193,6 +1680,7 @@ class Runner:
         await Runner.run(ctx)
         return ctx.graph
 
+    @staticmethod
     async def run_indefinitely(ctx: RunContext, *, tick: float = 0.1) -> None:
         """Drive the net on an internal clock — forever — draining input each tick and
         notifying observers, until ``ctx.stop`` is set (or the task is cancelled).
@@ -1207,7 +1695,8 @@ class Runner:
         ``await`` points inside async bodies; a synchronous body finishes first; an
         ``execution="thread"`` body cannot be interrupted (the thread runs to completion).
         In concurrent mode, in-flight tasks are cancelled on the way out — their consumed
-        tokens are not restored, so the graph shows the partial marking.
+        tokens are not restored, so the graph shows the partial marking. A stop cancels them
+        too; an error, a failed firing included, lets them land first, as on ``run``.
 
         ``ctx.error_after_n_firings`` applies here too: an idle net past the fuse keeps
         ticking (nothing is attempting to fire), but the moment a firing is attempted,
@@ -1223,6 +1712,7 @@ class Runner:
             error.summary = _summarise(previous, ctx.graph, quiesced=False)
             raise
 
+    @staticmethod
     async def step(ctx: RunContext) -> int:
         """Drain queued input, then fire a single transition (sequential semantics). Returns
         the number fired (0 or 1). The observer-driven primitive: the caller renders, then
@@ -1244,6 +1734,7 @@ class Runner:
             await _notify(ctx)
         return 1 if fired else 0
 
+    @staticmethod
     async def _run_sequential(ctx: RunContext, stop_after_n_firings: Optional[int] = None) -> bool:
         """Returns True if the net quiesced, False if ``stop_after_n_firings`` ended
         the call first (work may remain)."""
@@ -1261,6 +1752,7 @@ class Runner:
             fired_this_call += 1
             await _notify(ctx)
 
+    @staticmethod
     async def _run_concurrent(ctx: RunContext, stop_after_n_firings: Optional[int] = None) -> bool:
         """Returns True if the net quiesced, False if ``stop_after_n_firings`` capped
         this call's launches (work may remain). In-flight firings always finish and
@@ -1277,8 +1769,10 @@ class Runner:
 
         await _notify(ctx)  # initial marking
         in_flight: dict[asyncio.Future, str] = {}
-        # What each task consumed, so a failed firing can put its tokens back.
+        # What each task consumed, so a failed firing can put its tokens back, and what
+        # it claims; on ctx too, so that a Fire the drain applies is held to the claims.
         flight_state: dict[asyncio.Future, tuple] = {}
+        ctx._flight_state = flight_state
         launched_this_call = 0
         try:
             while True:
@@ -1292,7 +1786,7 @@ class Runner:
                     and launched_this_call >= stop_after_n_firings
                 )
                 # The turns ahead of the outer net's own.
-                inner_turn = not capped and await _fire_inner(ctx, "ahead", _held(flight_state))
+                inner_turn = not capped and await _fire_inner(ctx, "ahead", _held(flight_state, place_nodes))
                 if inner_turn:
                     launched_this_call += 1
                 launched_this_sweep = 0
@@ -1320,7 +1814,7 @@ class Runner:
                 if not capped and not inner_turn and not launched_this_sweep:
                     # The turns behind the outer net's own: the rest of the ring, bodies
                     # in flight or not, then the outer-first places once none is.
-                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state))
+                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state, place_nodes))
                     if inner_turn:
                         launched_this_call += 1
                 if inner_turn:
@@ -1342,7 +1836,9 @@ class Runner:
                     done, _pending = await asyncio.wait(set(in_flight), return_when=asyncio.FIRST_COMPLETED)
                 if not done:
                     continue
-                for task in done:
+                # In the order launched, as the tick loop and _land_in_flight land, so
+                # that of two failures in one batch the one launched first is raised.
+                for task in [task for task in in_flight if task in done]:
                     in_flight.pop(task)
                     fired_transition, consumed, firing_ids, _claims = flight_state.pop(task)
                     if task.exception() is not None:
@@ -1353,12 +1849,13 @@ class Runner:
                 graph.in_flight = set(in_flight.values())
                 await _notify(ctx)  # tokens deposited — branches advanced one stage
         finally:
-            # On cancellation, or a failed firing propagating out: don't orphan
-            # in-flight bodies. asyncio.wait does not cancel what it waits on, and
-            # an abandoned task's outputs would never be deposited — silent token
-            # loss on top of whatever interrupted the run.
-            await _cancel_and_cleanup(in_flight, flight_state, graph)
+            # Don't orphan in-flight bodies: asyncio.wait does not cancel what it
+            # waits on, and an abandoned task's outputs would never be deposited.
+            # On an error, a failed firing's included, the firings in flight land
+            # first; on a cancellation or a stop they are cancelled.
+            await _end_concurrent_run(ctx, in_flight, flight_state, place_nodes, incoming, sys.exception())
 
+    @staticmethod
     async def _tick_sequential(ctx: RunContext, tick: float) -> None:
         place_nodes, incoming, outgoing, read = _prepare(ctx.graph)
         await _notify(ctx)
@@ -1371,6 +1868,7 @@ class Runner:
             if await _sleep_or_stop(ctx, tick):
                 return
 
+    @staticmethod
     async def _tick_concurrent(ctx: RunContext, tick: float) -> None:
         """One turn a tick, in the order of ``_run_concurrent``: an inner firing ahead
         of the outer net's turn if one has a firing, else the launch sweep, else an
@@ -1380,15 +1878,17 @@ class Runner:
 
         await _notify(ctx)
         in_flight: dict[asyncio.Future, str] = {}
-        # What each task consumed, so a failed firing can put its tokens back.
+        # What each task consumed, so a failed firing can put its tokens back, and what
+        # it claims; on ctx too, so that a Fire the drain applies is held to the claims.
         flight_state: dict[asyncio.Future, tuple] = {}
+        ctx._flight_state = flight_state
         try:
             while not (ctx.stop is not None and ctx.stop.is_set()):
                 changed = bool(Runner.drain_inbox(ctx))
                 # An observer or a body may have assigned place.tokens directly.
                 TokenIds.resync(graph)
 
-                inner_turn = await _fire_inner(ctx, "ahead", _held(flight_state))
+                inner_turn = await _fire_inner(ctx, "ahead", _held(flight_state, place_nodes))
                 launched_this_sweep = (
                     0
                     if inner_turn
@@ -1408,7 +1908,7 @@ class Runner:
                 graph.in_flight = set(in_flight.values())
                 if not inner_turn and not launched_this_sweep:
                     # The rest of the ring, then the outer-first places once nothing is in flight.
-                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state))
+                    inner_turn = await _fire_inner(ctx, "behind", _held(flight_state, place_nodes))
                 changed = changed or inner_turn or bool(launched_this_sweep)
 
                 if changed:
@@ -1416,4 +1916,4 @@ class Runner:
                 if await _sleep_or_stop(ctx, tick):
                     return
         finally:
-            await _cancel_and_cleanup(in_flight, flight_state, graph)
+            await _end_concurrent_run(ctx, in_flight, flight_state, place_nodes, incoming, sys.exception())

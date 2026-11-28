@@ -11,6 +11,7 @@ from petritype.helpers.structures import SafeMerge
 
 class ASTAnnAssign:
 
+    @staticmethod
     def extract_types(node: ast.AnnAssign, excluded_types: set[TypeName] | None = None) -> set[TypeName]:
         if excluded_types is None:
             excluded_types = set()
@@ -30,6 +31,7 @@ class ASTAnnAssign:
 
 class TypeAnnotation:
 
+    @staticmethod
     def outermost_type(type_annotation: str) -> str:
         tree = ast.parse(type_annotation, mode='eval')
         expression = tree.body  # The root of the tree in 'eval' mode will be an Expression.
@@ -46,6 +48,7 @@ class TypeAnnotation:
         else:
             raise ValueError("Expected a subscripted type annotation but got: " + type_annotation)
 
+    @staticmethod
     def subtypes(
         annotation: Optional[str],
         ignored_types=COMMON_TYPES,
@@ -74,14 +77,17 @@ class TypeAnnotation:
 
 class ASTFunction:
 
+    @staticmethod
     def arg_annotations(func_def: ast.FunctionDef) -> dict[str, str]:
         return {arg.arg: ast.unparse(arg.annotation) if arg.annotation else None for arg in func_def.args.args}
 
+    @staticmethod
     def return_annotation(func_def: ast.FunctionDef) -> Optional[str]:
         if func_def.returns is not None:
             return ast.unparse(func_def.returns)
         return None
 
+    @staticmethod
     def names_and_annotations(
         func_def: ast.FunctionDef,
         module_path_components: Sequence[str],
@@ -107,6 +113,7 @@ class ASTFunction:
 
 class ASTClass:
 
+    @staticmethod
     def is_decorated_as_dataclass(class_node: Any) -> bool:
         if not isinstance(class_node, ast.ClassDef):
             return False
@@ -121,10 +128,12 @@ class ASTClass:
 
         return any(is_dataclass_decorator(decorator) for decorator in class_node.decorator_list)
 
+    @staticmethod
     def is_dataclass(class_node: ClassDef) -> bool:
         # TODO: What about inheriting from dataclass rather than using a decorator?
         return ASTClass.is_decorated_as_dataclass(class_node)
 
+    @staticmethod
     def is_a_relevant_type(class_node: ClassDef) -> bool:
         if ASTClass.is_dataclass(class_node):
             return True
@@ -139,12 +148,14 @@ class ASTClass:
                 return True
         return False
 
+    @staticmethod
     def functions(class_node: ClassDef) -> tuple[ast.FunctionDef, ...]:
         return tuple(
             node for node in ast.walk(class_node)
             if (isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef))
         )
 
+    @staticmethod
     def functions_with_annotations(
         class_node: ClassDef, module_path_components: Sequence[str], include_private: bool = True
     ) -> list[FunctionWithAnnotations]:
@@ -157,11 +168,13 @@ class ASTClass:
             ))
         return out
 
+    @staticmethod
     def parent_type(class_def: ClassDef) -> Optional[TypeName]:
         if isinstance(class_def, ast.ClassDef) and class_def.bases:
             return ast.unparse(class_def.bases[0])
         return None
 
+    @staticmethod
     def attribute_types(class_def: ClassDef) -> ArgumentTypes:
         out = {}
         if not isinstance(class_def, ast.ClassDef):
@@ -174,6 +187,7 @@ class ASTClass:
 
 class ASTType:
 
+    @staticmethod
     def alias_subtypes(node: ast.TypeAlias | ast.ClassDef) -> set[TypeName]:
         if isinstance(node, ast.TypeAlias):
             # Use TypeAnnotation.subtypes to extract the subtypes of the alias including the alias itself.
@@ -183,6 +197,7 @@ class ASTType:
             return all_types - {node.name.id}
         return set()
 
+    @staticmethod
     def to_type_variables_with_annotations(
         node: ASTNodeForType, module_path_components: Sequence[str]
     ) -> TypeVariableWithAnnotations:
@@ -223,14 +238,17 @@ class ASTType:
 
 class ASTModule:
 
+    @staticmethod
     def class_declarations(module_tree: Module) -> dict[str, ClassDef]:
         return {node.name: node for node in ast.walk(module_tree) if isinstance(node, ast.ClassDef)}
 
+    @staticmethod
     def type_aliases_to_nodes(module_tree: Module) -> TypeNameToASTNode:
         return {
             node.name.id: node for node in ast.walk(module_tree) if isinstance(node, ast.TypeAlias)
         }
 
+    @staticmethod
     def relevant_types(module_tree: Module) -> TypeNameToASTNode:
         types_from_classes = {
             name: node for name, node in ASTModule.class_declarations(module_tree).items()

@@ -71,6 +71,7 @@ def _cached_adapter(annotation: Any) -> Optional[TypeAdapter]:
 class NetEntries:
     """Functions that build and use ``NetEntry`` records."""
 
+    @staticmethod
     def from_factory(factory: Callable, name: Optional[str] = None) -> NetEntry:
         """An entry for ``factory``, decorated with ``@petri_net`` or not. The name
         is ``name``, else the decorator's, else the function's."""
@@ -89,6 +90,7 @@ class NetEntries:
             place_styles=config.get("place_styles"),
         )
 
+    @staticmethod
     def controls(entry: NetEntry) -> dict:
         """The entry's control-map for a new generation: the declared map, or what the
         declared callable returns; ``{}`` when it declares none. ``TypeError`` for
@@ -100,12 +102,14 @@ class NetEntries:
             raise TypeError(f"net {entry.name!r} declares controls that are not a map of names to controls")
         return dict(declared)
 
+    @staticmethod
     def first_doc_line(factory: Callable) -> Optional[str]:
         doc = inspect.getdoc(factory)
         if not doc:
             return None
         return doc.strip().splitlines()[0].strip() or None
 
+    @staticmethod
     def params_of(factory: Callable) -> tuple[tuple[ParamSpec, ...], bool]:
         """The parameters of ``factory``'s signature (``@wraps`` is followed), and
         whether it takes ``**kwargs``. ``*args`` cannot be named, so it is skipped.
@@ -147,6 +151,7 @@ class NetEntries:
             ))
         return tuple(specs), accepts_any
 
+    @staticmethod
     def describe(entry: NetEntry) -> wire.NetDescription:
         params = []
         for spec in entry.params:
@@ -162,6 +167,7 @@ class NetEntries:
             params=params,
         )
 
+    @staticmethod
     def bind(entry: NetEntry, params: dict) -> dict:
         """The keyword arguments for ``entry.factory`` from JSON ``params``, or
         ``ProtocolError(invalid_params)``: an unknown name (unless the factory
@@ -189,6 +195,7 @@ class NetEntries:
             bound[name] = value if spec is None else NetEntries.decode(spec, value)
         return bound
 
+    @staticmethod
     def adapter(spec: ParamSpec) -> Optional[TypeAdapter]:
         """What validates a value of this parameter: a ``TypeAdapter`` of its
         annotation, or ``None`` when it has none, a string one, or one pydantic
@@ -204,6 +211,7 @@ class NetEntries:
             except Exception:
                 return None
 
+    @staticmethod
     def decode(spec: ParamSpec, value: Any) -> Any:
         """``value`` validated against the parameter's annotation in strict JSON
         mode (``invalid_params`` when it does not validate); as given when there is

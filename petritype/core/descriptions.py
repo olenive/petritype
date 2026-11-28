@@ -29,12 +29,14 @@ class Description:
             logger.warning("%s", e)
             return None
 
+    @staticmethod
     def of_petritype_data_structures():
         return Description.of_module(
             "petritype.core.data_structures",
             "BACKGROUND: The following data structures are used:\n"
         )
 
+    @staticmethod
     def of_petritype_relationship_graph_components():
         return Description.of_module(
             "petritype.core.relationship_graph_components",

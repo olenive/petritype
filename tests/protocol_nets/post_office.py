@@ -1,7 +1,8 @@
 """The shared conformance net ``post-office`` (PROTOCOL.md §11, §5.1, §12.7): a
-post is a net of its own that marks one place as a port, so it is closed, and a
-second post is the same net declared open, so that a transcript shows a closed
-net and an open one, an outer body that writes at a port and lands, one that
+post is a net of its own that marks one place as a port and is closed, as every
+net not declared open is (since 2026-11-27; until then a net was closed because
+it marked a port), and a second post is the same net declared open, so that a
+transcript shows a closed net and an open one, an outer body that writes at a port and lands, one that
 writes to a place that is not a port and fails, and an ``inject`` refused with
 ``closed_net`` where the same ``inject`` into the open post lands (since
 2026-11-23).
@@ -12,12 +13,24 @@ so that the Rust runner can build the same net from the text alone and replay
 ``Post`` or ``Open Post``: ``Inbox``, a port, and ``Ledger``, its own place, both
 of strings and empty, and no transitions; ``Open Post`` declares itself open.
 The net's ``Deliver`` takes a letter and puts it into the front post's ``Inbox``
-through a mutate edge that declares it reaches ``Inbox``. Its ``Forge`` takes a
+through a mutate edge that names ``Inbox`` in its ``reaches``, as a body writing
+a port of a closed net it holds must since 2026-11-27. Its ``Forge`` takes a
 forgery and the front post, and puts the forgery into the post's ``Ledger``,
 which the front post, being closed, refuses, so the firing fails. A refusal in
 a consuming firing costs what any failure costs: the net restores nothing on
 failure, so both tokens are lost (the Rust core cannot restore a token that
 carries a net). Had it landed, the body would return the post into ``Posts``.
+
+The post office itself is declared open (since 2026-11-27). A closed net shields
+the nets inside it, the nets its tokens carry included, from the program and the
+runner: an ``inject`` into a post, by path or by nested id, lands only when every
+net around the post is declared open. Open, the post office leaves each post to
+its own rule, so the transcript's three injects keep their meaning: the closed
+post takes a note at its ``Inbox`` and refuses one at its ``Ledger``
+(``closed_net``), both addressed by path, and the open post takes one at its
+``Ledger``, addressed by its nested id since 2026-11-27, so that the shared
+transcripts hold an ``inject`` by nested id that lands. The bodies are not affected: ``Deliver``
+and ``Forge`` are judged by the posts' own rule and the edges' ``reaches``.
 
 The templates are registered, so a post has a saved form and ``Posts`` is
 serializable through them, as the ``trays`` net registers its own.
@@ -47,8 +60,8 @@ def _post(open: bool) -> ExecutableGraph:
 @Templates.template("Post")
 def post_template() -> ExecutableGraph:
     """The ``Post`` template: the port ``Inbox`` and the place ``Ledger``, of
-    strings, holding no tokens, and no transitions. No parameters. It marks a
-    port, so it is closed."""
+    strings, holding no tokens, and no transitions. No parameters. It does not
+    declare itself open, so it is closed."""
     return _post(open=False)
 
 
@@ -86,4 +99,4 @@ def post_office() -> ExecutableGraph:
         ArgumentEdgeToTransition("Forgeries", "Forge", "forgery"),
         ArgumentEdgeToTransition("Posts", "Forge", "post"),
         ReturnedEdgeFromTransition("Forge", "Posts"),
-    ])
+    ], open=True)

@@ -8,7 +8,9 @@ kinds, output slots, the deferral rule and the guard are the Rust example's, so
 that a transcript recorded against either runtime replays against the other.
 
 ``Receiving -Sort-> Sorting -Stage-> Staging Area -Dispatch Truck-> Dispatched``,
-seeded with eight parcels. ``Dispatch Truck`` takes the whole platform at once
+seeded with eight parcels. ``Receiving`` is a port, where parcels arrive from
+outside: a transcript ``inject``s one there, which since 2026-11-27, when every
+net not declared open became closed, lands only at a port. ``Dispatch Truck`` takes the whole platform at once
 (a ``take_all`` edge) and writes the parcels it leaves behind back to it (slot
 1); every fourth parcel misses its first truck. The truck waits for at least two
 parcels, unless nothing more is coming.
@@ -72,7 +74,7 @@ def truck_is_worth_sending(graph: ExecutableGraph) -> bool:
 @petri_net(name="parcel-distribution", description="Sort, stage and dispatch parcels")
 def parcel_distribution() -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
-        ListPlaceNode("Receiving", Parcel, [Parcel(id=i) for i in range(1, 9)]),
+        ListPlaceNode("Receiving", Parcel, [Parcel(id=i) for i in range(1, 9)], port=True),
         ListPlaceNode("Sorting", Parcel),
         ListPlaceNode("Staging Area", Parcel),
         ListPlaceNode("Dispatched", Parcel),

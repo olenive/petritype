@@ -9,8 +9,10 @@ cycle check and fires forever anyway).
 
 import pytest
 
+from petritype.core.events import Port
 from petritype.core.executable_graph_components import (
     ArgumentEdgeToTransition,
+    DrainEdge,
     ExecutableGraphCheck,
     ExecutableGraphOperations,
     FunctionTransitionNode,
@@ -18,6 +20,7 @@ from petritype.core.executable_graph_components import (
     MutateEdge,
     ReturnedEdgeFromTransition,
     SnapshotEdge,
+    SubnetPlaceNode,
 )
 
 
@@ -178,3 +181,132 @@ class TestConstructGraphExpectAcyclic:
     def test_acyclic_net_constructs(self):
         graph = ExecutableGraphOperations.construct_graph(_chain_components(3), expect_acyclic=True)
         assert graph.place_named('P0').tokens == [1]
+
+
+# --- through a subnet's ports (since 2026-11-28) -----------------------------------------------
+
+
+def _pipe():
+    """A subnet ``In → Pass → Out``, both of them ports."""
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode('In', int, port=True),
+        ListPlaceNode('Out', int, port=True),
+        FunctionTransitionNode('Pass', _passthrough()),
+        ArgumentEdgeToTransition('In', 'Pass', 'x'),
+        ReturnedEdgeFromTransition('Pass', 'Out'),
+    ])
+
+
+def _deeper_pipe():
+    """A subnet whose way from ``In`` to ``Out`` goes through a pipe of its own:
+    ``In → Down → Inner/In``, then ``Inner/Out → Up → Out``."""
+    return ExecutableGraphOperations.construct_graph([
+        ListPlaceNode('In', int, port=True),
+        ListPlaceNode('Out', int, port=True),
+        SubnetPlaceNode('Inner', _pipe()),
+        FunctionTransitionNode('Down', _passthrough()),
+        FunctionTransitionNode('Up', _passthrough()),
+        ArgumentEdgeToTransition('In', 'Down', 'x'),
+        ReturnedEdgeFromTransition('Down', Port('Inner', 'In')),
+        ArgumentEdgeToTransition(Port('Inner', 'Out'), 'Up', 'x'),
+        ReturnedEdgeFromTransition('Up', 'Out'),
+    ])
+
+
+def _back_through(subnet):
+    """``Back`` takes from the subnet's ``Out`` and puts into its ``In``."""
+    return [
+        SubnetPlaceNode('S', subnet),
+        FunctionTransitionNode('Back', _passthrough()),
+        ArgumentEdgeToTransition(Port('S', 'Out'), 'Back', 'x'),
+        ReturnedEdgeFromTransition('Back', Port('S', 'In')),
+    ]
+
+
+class TestThroughASubnetsPorts:
+    """Until 2026-11-28 the check stopped at a subnet's ports, so a cycle that left
+    the net at one port and came back at another passed."""
+
+    @pytest.mark.parametrize('subnet', [_pipe, _deeper_pipe], ids=['one level', 'two levels'])
+    def test_a_cycle_through_a_subnet_is_found_and_named(self, subnet):
+        graph = ExecutableGraphOperations.construct_graph(_back_through(subnet()))
+        with pytest.raises(ValueError) as found:
+            ExecutableGraphCheck.assert_acyclic(graph)
+        assert str(found.value) == (
+            "Token flow contains a cycle: Port(place='S', port='Out') → Back → Port(place='S', port='In') → "
+            "(inside subnet place 'S') → Port(place='S', port='Out')"
+        )
+        with pytest.raises(ValueError, match='cycle'):
+            ExecutableGraphOperations.construct_graph(_back_through(subnet()), expect_acyclic=True)
+
+    def test_a_cycle_through_two_subnets_is_found(self):
+        graph = ExecutableGraphOperations.construct_graph([
+            SubnetPlaceNode('A', _pipe()),
+            SubnetPlaceNode('B', _deeper_pipe()),
+            FunctionTransitionNode('Over', _passthrough()),
+            FunctionTransitionNode('Back', _passthrough()),
+            ArgumentEdgeToTransition(Port('A', 'Out'), 'Over', 'x'),
+            ReturnedEdgeFromTransition('Over', Port('B', 'In')),
+            ArgumentEdgeToTransition(Port('B', 'Out'), 'Back', 'x'),
+            ReturnedEdgeFromTransition('Back', Port('A', 'In')),
+        ])
+        with pytest.raises(ValueError, match="inside subnet place 'A'.*inside subnet place 'B'|"
+                                             "inside subnet place 'B'.*inside subnet place 'A'"):
+            ExecutableGraphCheck.assert_acyclic(graph)
+
+    def test_a_pipeline_through_a_subnet_passes(self):
+        graph = ExecutableGraphOperations.construct_graph([
+            ListPlaceNode('Start', int, [1]),
+            ListPlaceNode('End', int),
+            SubnetPlaceNode('S', _deeper_pipe()),
+            FunctionTransitionNode('Enter', _passthrough()),
+            FunctionTransitionNode('Leave', _passthrough()),
+            ArgumentEdgeToTransition('Start', 'Enter', 'x'),
+            ReturnedEdgeFromTransition('Enter', Port('S', 'In')),
+            ArgumentEdgeToTransition(Port('S', 'Out'), 'Leave', 'x'),
+            ReturnedEdgeFromTransition('Leave', 'End'),
+        ], expect_acyclic=True)
+        assert ExecutableGraphCheck.port_paths(graph.subnet('S')) == {'In': ['Out'], 'Out': []}
+
+    def test_a_way_back_inside_the_subnet_to_the_port_it_left_from_is_a_cycle(self):
+        loop = ExecutableGraphOperations.construct_graph([
+            ListPlaceNode('In', int, port=True),
+            ListPlaceNode('Middle', int),
+            FunctionTransitionNode('Out', _passthrough()),
+            FunctionTransitionNode('Back', _passthrough()),
+            ArgumentEdgeToTransition('In', 'Out', 'x'),
+            ReturnedEdgeFromTransition('Out', 'Middle'),
+            ArgumentEdgeToTransition('Middle', 'Back', 'x'),
+            ReturnedEdgeFromTransition('Back', 'In'),
+        ])
+        assert ExecutableGraphCheck.port_paths(loop) == {'In': ['In']}
+        graph = ExecutableGraphOperations.construct_graph([SubnetPlaceNode('S', loop)])
+        with pytest.raises(ValueError, match=r"Port\(place='S', port='In'\) → \(inside subnet place 'S'\) → "
+                                             r"Port\(place='S', port='In'\)"):
+            ExecutableGraphCheck.assert_acyclic(graph)
+
+    def test_a_drain_or_a_snapshot_inside_the_subnet_leads_nowhere(self):
+        """As in the net around: they move no token guaranteed."""
+        for edge in (DrainEdge('In', 'Pass', 'xs'), SnapshotEdge('In', 'Pass', 'xs')):
+            async def drain(xs: list[int]) -> int:
+                return len(xs)
+
+            subnet = ExecutableGraphOperations.construct_graph([
+                ListPlaceNode('In', int, port=True),
+                ListPlaceNode('Out', int, port=True),
+                FunctionTransitionNode('Pass', drain),
+                edge,
+                ReturnedEdgeFromTransition('Pass', 'Out'),
+            ])
+            assert ExecutableGraphCheck.port_paths(subnet) == {'In': [], 'Out': []}
+            ExecutableGraphCheck.assert_acyclic(ExecutableGraphOperations.construct_graph(_back_through(subnet)))
+
+    def test_a_cycle_inside_a_subnet_through_none_of_its_ports_is_the_subnets_own(self):
+        inner = ExecutableGraphOperations.construct_graph([
+            ListPlaceNode('In', int, port=True), *_loop_components(),
+        ])
+        ExecutableGraphCheck.assert_acyclic(
+            ExecutableGraphOperations.construct_graph([SubnetPlaceNode('S', inner)])
+        )  # does not raise
+        with pytest.raises(ValueError, match='P1 → T1 → P2 → T2 → P1'):
+            ExecutableGraphCheck.assert_acyclic(inner)

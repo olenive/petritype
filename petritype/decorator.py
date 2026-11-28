@@ -52,7 +52,9 @@ def petri_net(
         Decorator that attaches `_petri_net_config` to the function.
 
     Raises:
-        ValueError: If mode="cron" but no schedule provided.
+        ValueError: If mode="cron" but no schedule provided; for an empty ``name``, or a
+            control-map given as a dict with a control named by the empty string (since
+            2026-11-28; a callable's map is checked when the runner loads the net).
 
     Example:
         @petri_net(
@@ -71,6 +73,11 @@ def petri_net(
 
     if schedule and mode != "cron":
         raise ValueError("schedule parameter is only valid for mode='cron'")
+
+    if name == "":
+        raise ValueError("a net is named by the empty string; a name holds at least one character")
+    if isinstance(controls, dict) and "" in controls:
+        raise ValueError(f"a control of net {name!r} is named by the empty string; a name holds at least one character")
 
     def decorator(fn: F) -> F:
         config = {

@@ -103,11 +103,14 @@ def _(
 
     def build_graph():
         nodes_and_edges = [
-            ListPlaceNode(name="Inbox", type=Parcel, tokens=[]),
+            # The ports: parcels come in at Inbox and Sorted is cleared from outside. The
+            # net is closed, as every net not declared open is, so the buttons' Extend and
+            # SetTokens land only at a port.
+            ListPlaceNode(name="Inbox", type=Parcel, tokens=[], port=True),
             ArgumentEdgeToTransition("Inbox", "Sort", "parcel"),
             FunctionTransitionNode(name="Sort", function=sort_parcel),
             ReturnedEdgeFromTransition("Sort", "Sorted"),
-            ListPlaceNode(name="Sorted", type=Parcel),
+            ListPlaceNode(name="Sorted", type=Parcel, port=True),
         ]
         graph = ExecutableGraphOperations.construct_graph(nodes_and_edges)
         return graph, RustworkxGraph.from_executable_graph(graph)
@@ -199,8 +202,8 @@ async def _(
         [add_button, toggle_button, clear_button, reset_button, refresh], justify="start"
     )
     _sorter = "🟥 OFF" if "Sort" in _ctx.disabled else "🟩 ON"
-    _inbox_n = len(_ctx.graph.place_named("Inbox").tokens)
-    _sorted_ids = [p.id for p in _ctx.graph.place_named("Sorted").tokens]
+    _inbox_n = len(_ctx.graph.place("Inbox").tokens)
+    _sorted_ids = [p.id for p in _ctx.graph.place("Sorted").tokens]
     mo.vstack(
         [
             _controls,

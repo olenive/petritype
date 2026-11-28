@@ -48,10 +48,14 @@ Petritype is a typed, executable, visual Petri net library for Python, designed 
   ```
 
 ### Running Checks (`Justfile`)
-- Common tasks are defined in `Justfile`; run `just check` before a release (runs `lint`, `test`, `notebooks`, `gallery`, `build`).
+- Common tasks are defined in `Justfile`; run `just check` before a release (runs `lint`, `typecheck`, `test`, `notebooks`, `gallery`, `build`).
 - Lint with `ruff` (do not introduce `mypy`):
   ```bash
-  uv run --extra dev ruff check petritype tests
+  uv run --extra dev ruff check petritype tests examples scripts
+  ```
+- Type-check with `pyright` (`just typecheck`): it checks user-style code against the public API, `tests/typecheck/user_code.py`, as set in `pyproject.toml`'s `[tool.pyright]`, and not the library's own modules:
+  ```bash
+  uv run --extra dev pyright
   ```
 - Run tests from the repository root (some fixtures resolve paths relative to cwd):
   ```bash
@@ -67,7 +71,7 @@ Petritype is a typed, executable, visual Petri net library for Python, designed 
 - Modify or extend example notebooks to test new features.
 
 ## Project-Specific Conventions
-- **Namespace Classes**: Group related stateless functions in namespace classes **without** `self` and **without** `@staticmethod` (e.g., `ExecutableGraphOperations.construct_graph(...)`, `TypeNames.of(...)`). Do not add `@staticmethod` decorators to these methods.
+- **Namespace Classes**: Group related stateless functions in namespace classes **without** `self`, and decorate every one of them `@staticmethod` (outermost, above any other decorator) so that type checkers, pyright among them, accept calls through the class (e.g., `ExecutableGraphOperations.construct_graph(...)`, `TypeNames.of(...)`). `tests/test_namespace_classes.py` enforces this.
 - **Mutable State**: Be cautious of in-place modifications to tokens and the Petri net during transition firing (especially with mutate/read edges).
 - **Transition Priority**: Ensure priority functions are well-defined to avoid deadlocks or infinite loops.
 - **Edge Direction**: While edges are directed, transitions can affect both input and output places (e.g., mutate edges update tokens in input places).

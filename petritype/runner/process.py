@@ -19,7 +19,9 @@ on stderr and exit 2. ``-h``/``--help`` prints the usage and exits 0.
 
 The heartbeat (and the clock tick that keeps a ``"24/7"`` net checking) fires
 every 30 seconds, or every ``PETRITYPE_RUNNER_HEARTBEAT_MS`` milliseconds when
-that environment variable holds a positive integer (meant for tests).
+that environment variable holds a positive integer (meant for tests). A request
+line may be 4 MiB long, without its newline, or ``PETRITYPE_RUNNER_MAX_LINE_BYTES``
+bytes when that holds a positive integer (since 2026-11-28).
 
 Order at start
 --------------
@@ -36,11 +38,12 @@ Order at start
 
 While serving
 -------------
-- A **reader** thread reads stdin (descriptor 0, raw ``os.read``; lines of
-  any length) and posts each parsed line to the owner's ``asyncio.Queue``
-  with ``loop.call_soon_threadsafe``; end of file posts ``_EOF``. A line that
-  is not a request becomes a ``Malformed`` that the owner answers at once with
-  ``invalid_params``.
+- A **reader** thread reads stdin (descriptor 0, raw ``os.read``) and posts
+  each parsed line to the owner's ``asyncio.Queue`` with
+  ``loop.call_soon_threadsafe``; end of file posts ``_EOF``. A line that is not
+  a request becomes a ``Malformed`` that the owner answers at once with
+  ``invalid_params``, and so does a line longer than the cap, which is
+  discarded up to its newline without being held (``Reading.lines``).
 - The **owner loop** takes one item at a time (a request, a landed firing, a
   tick, end of file), calls ``handle``/``completed``/``tick`` with
   ``datetime.now(UTC)``, hands the batch to the writer, and runs a ``Launch``
@@ -89,6 +92,9 @@ from petritype.runner.registry import Registry
 
 HEARTBEAT_ENV = "PETRITYPE_RUNNER_HEARTBEAT_MS"
 DEFAULT_HEARTBEAT_S = 30.0
+# The longest request line the reader takes, in bytes without its newline (since 2026-11-28).
+MAX_LINE_ENV = "PETRITYPE_RUNNER_MAX_LINE_BYTES"
+DEFAULT_MAX_LINE_BYTES = 4 << 20
 
 USAGE = (
     "usage: python -m petritype.runner [--module MODULE ...]\n"
@@ -118,6 +124,7 @@ class Arguments:
 class CommandLine:
     """Functions that read the command line."""
 
+    @staticmethod
     def parse(argv: list[str]) -> Arguments:
         """``argv`` without the program name. ``--module NAME`` and
         ``--module=NAME`` repeat; ``--describe`` needs at least one."""
@@ -147,6 +154,7 @@ class CommandLine:
             raise UsageError("--describe needs at least one --module")
         return Arguments(modules=tuple(modules), describe=describe)
 
+    @staticmethod
     def heartbeat_period(environ: Union[dict, os._Environ]) -> float:
         """Seconds between heartbeats: ``PETRITYPE_RUNNER_HEARTBEAT_MS`` when it
         is a positive integer, else 30."""
@@ -157,35 +165,81 @@ class CommandLine:
             return DEFAULT_HEARTBEAT_S
         return ms / 1000.0 if ms > 0 else DEFAULT_HEARTBEAT_S
 
+    @staticmethod
+    def max_line_bytes(environ: Union[dict, os._Environ]) -> int:
+        """The longest request line taken, in bytes without its newline:
+        ``PETRITYPE_RUNNER_MAX_LINE_BYTES`` when it is a positive integer, else
+        4 MiB (since 2026-11-28)."""
+        raw = environ.get(MAX_LINE_ENV, "").strip()
+        try:
+            limit = int(raw)
+        except ValueError:
+            return DEFAULT_MAX_LINE_BYTES
+        return limit if limit > 0 else DEFAULT_MAX_LINE_BYTES
+
 
 # --- reading -------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TooLong:
+    """A line longer than the reader takes (``Reading.lines``), discarded unread:
+    ``limit`` is the cap it passed."""
+
+    limit: int
 
 
 class Reading:
     """Functions that turn stdin bytes into requests."""
 
-    def lines(read: Callable[[int], bytes]) -> Iterator[bytes]:
+    @staticmethod
+    def lines(
+        read: Callable[[int], bytes], max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
+    ) -> Iterator[Union[bytes, TooLong]]:
         """The lines (without ``\\n``) of whatever ``read`` returns until it
         returns ``b""``; a last line without a newline counts. Each byte is
-        scanned once, so a very long line costs no more than its length."""
+        scanned once, so a long line costs no more than its length.
+
+        A line longer than ``max_line_bytes`` (since 2026-11-28) is a ``TooLong``
+        in its place: as soon as it passes the cap what was read of it is let go,
+        and the rest is skipped up to its newline unheld, so the reader never holds
+        more than the cap and one chunk. The lines after it are read as ever."""
         pending = bytearray()
         scanned = 0
+        skipping = False
         while True:
             chunk = read(READ_CHUNK)
             if not chunk:
-                if pending:
+                if skipping:
+                    yield TooLong(max_line_bytes)
+                elif pending:
                     yield bytes(pending)
                 return
+            if skipping:
+                end = chunk.find(b"\n")
+                if end < 0:
+                    continue
+                skipping = False
+                yield TooLong(max_line_bytes)
+                chunk = chunk[end + 1:]
             pending += chunk
             while (end := pending.find(b"\n", scanned)) >= 0:
-                yield bytes(pending[:end])
+                yield bytes(pending[:end]) if end <= max_line_bytes else TooLong(max_line_bytes)
                 del pending[:end + 1]
                 scanned = 0
             scanned = len(pending)
+            if scanned > max_line_bytes:
+                pending, scanned, skipping = bytearray(), 0, True
 
-    def parse(raw: bytes) -> Optional[Union[Request, Malformed]]:
+    @staticmethod
+    def parse(raw: Union[bytes, TooLong]) -> Optional[Union[Request, Malformed]]:
         """One line as a request, a ``Malformed`` for the owner to refuse, or
-        ``None`` for a blank line (ignored)."""
+        ``None`` for a blank line (ignored). A line too long to read
+        (``TooLong``) is a ``Malformed`` with no ``id``, since none could be read."""
+        if isinstance(raw, TooLong):
+            return Malformed(
+                "", f"a request line is at most {raw.limit} bytes long; a longer one was discarded unread",
+            )
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -236,6 +290,7 @@ class Gauges:
 class Frames:
     """Functions that encode lines."""
 
+    @staticmethod
     def encode(lines: list[dict]) -> bytes:
         """One JSON object per line, UTF-8, each ending in ``\\n``. ``json.dumps``
         without ``indent`` escapes every newline inside a string, so none can
@@ -244,6 +299,7 @@ class Frames:
             (json.dumps(line, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8") for line in lines
         )
 
+    @staticmethod
     def iso(moment: datetime) -> str:
         """ISO 8601 in UTC with milliseconds and ``Z``, as the owner writes times."""
         return moment.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -262,12 +318,40 @@ class ProtocolStream:
 
     def write(self, lines: list[dict], gauges: Optional[Gauges] = None) -> bool:
         """Write ``lines`` with one write and one flush, then record ``gauges``.
-        False once the stream is broken (the host has gone)."""
-        data = Frames.encode(lines) if lines else b""
+        False once the stream is broken (the host has gone).
+
+        A line that will not encode as JSON (``Frames.encode`` refuses a NaN or an
+        infinity, and anything ``json`` cannot write) costs that line and not the
+        process: an answer is written as an ``internal`` error to its request, and
+        a notification is left out, which a host meets as a gap in the version
+        (PROTOCOL.md §4) if it moved one. Either is reported on stderr. The owner
+        keeps such values off its lines; this is for the one it missed."""
+        try:
+            data = Frames.encode(lines) if lines else b""
+        except (TypeError, ValueError):
+            data = b"".join(ProtocolStream._encoded(line) for line in lines)
         with self._lock:
             if gauges is not None:
                 self._gauges = gauges
             return self._put(data)
+
+    @staticmethod
+    def _encoded(line: dict) -> bytes:
+        """One line's bytes, or what stands in for a line that will not encode."""
+        try:
+            return Frames.encode([line])
+        except (TypeError, ValueError) as error:
+            request_id = line.get("id") if isinstance(line, dict) else None
+            if isinstance(request_id, str) and ("result" in line or "error" in line):
+                print(f"petritype.runner: the answer to request {request_id!r} is not JSON ({error}); "
+                      f"answered with an internal error", file=sys.stderr, flush=True)
+                return Frames.encode([wire.Lines.error(
+                    request_id, wire.ErrorCode.INTERNAL, f"the answer could not be written as JSON: {error}",
+                )])
+            method = line.get("method") if isinstance(line, dict) else None
+            print(f"petritype.runner: a {method!r} notification is not JSON ({error}); left out",
+                  file=sys.stderr, flush=True)
+            return b""
 
     def heartbeat(self) -> bool:
         with self._lock:
@@ -301,6 +385,7 @@ _TICK = object()
 class StdoutGuard:
     """Functions that take stdout for the protocol."""
 
+    @staticmethod
     def take() -> BinaryIO:
         """The real stdout as a binary stream for the protocol; afterwards
         descriptor 1 and ``sys.stdout`` are stderr. Where stdout has no
@@ -325,13 +410,19 @@ class StdoutGuard:
 class Process:
     """Functions that run the process."""
 
+    @staticmethod
     def import_modules(names: tuple[str, ...]) -> Registry:
         modules = [importlib.import_module(name) for name in names]
         return Registry.from_modules(modules)
 
-    async def serve(registry: Registry, stream: ProtocolStream, stdin_fd: int, period: float) -> bool:
-        """Serve until ``shutdown``, end of file, a signal or a broken stream.
-        True when a body was still airborne at the end."""
+    @staticmethod
+    async def serve(
+        registry: Registry, stream: ProtocolStream, stdin_fd: int, period: float,
+        max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
+    ) -> bool:
+        """Serve until ``shutdown``, end of file, a signal or a broken stream,
+        taking request lines of up to ``max_line_bytes``. True when a body was
+        still airborne at the end."""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         owner = Owner(registry)
@@ -346,7 +437,7 @@ class Process:
 
         def read() -> None:
             try:
-                for raw in Reading.lines(lambda size: os.read(stdin_fd, size)):
+                for raw in Reading.lines(lambda size: os.read(stdin_fd, size), max_line_bytes):
                     item = Reading.parse(raw)
                     if item is not None:
                         post(item)
@@ -400,10 +491,13 @@ class Process:
         return owner.airborne
 
 
-    async def run(registry: Registry, stream: ProtocolStream, period: float) -> None:
+    @staticmethod
+    async def run(
+        registry: Registry, stream: ProtocolStream, period: float, max_line_bytes: int = DEFAULT_MAX_LINE_BYTES,
+    ) -> None:
         """``serve`` on stdin, then abandon a body still running: leaving
         ``asyncio.run`` normally would wait for its executor thread."""
-        if await Process.serve(registry, stream, 0, period):
+        if await Process.serve(registry, stream, 0, period, max_line_bytes):
             sys.stderr.flush()
             os._exit(0)
 
@@ -429,5 +523,5 @@ def main(argv: Optional[list[str]] = None) -> int:
     if arguments.describe:
         return 0 if stream.write([registry.describe().wire()]) else 1
     period = CommandLine.heartbeat_period(os.environ)
-    asyncio.run(Process.run(registry, stream, period))
+    asyncio.run(Process.run(registry, stream, period, CommandLine.max_line_bytes(os.environ)))
     return 0

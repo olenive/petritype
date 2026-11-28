@@ -15,7 +15,7 @@ that only drawings read:
 ``Energy`` is in no group: every concern reads it in its guard and changes it
 through a mutate edge, so the concerns cannot be split into subnets without
 moving their rules into the net around them. The net stays flat, and the groups
-gather its parts under names for a drawing: each is a dashed frame titled with
+gather its parts under names for a drawing: each is a dotted frame titled with
 its name, and ``Energy`` stands outside them. Being in a group changes nothing
 about how the net runs.
 
@@ -69,7 +69,7 @@ BENCHES = ("Bench 1", "Bench 2")
 
 
 def energy_of(graph: ExecutableGraph) -> int:
-    return graph.place_named("Energy").tokens[0].level
+    return graph.place("Energy").tokens[0].level
 
 
 def can_walk(graph: ExecutableGraph) -> bool:
@@ -84,7 +84,7 @@ def too_tired(graph: ExecutableGraph) -> bool:
 
 def too_tired_with_nothing_to_eat(graph: ExecutableGraph) -> bool:
     """``Rest``'s guard: not enough energy for a leg, and the pack empty."""
-    return too_tired(graph) and not graph.place_named("Pack").tokens
+    return too_tired(graph) and not graph.place("Pack").tokens
 
 
 def walk(leg: str, energy: Energy) -> str:

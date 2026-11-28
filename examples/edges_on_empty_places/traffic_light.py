@@ -35,7 +35,8 @@ at amber and red.
 ``assert_no_source_transitions`` flags; its guard is what makes it safe, so this example does
 not call that check. ``Change`` takes the light from ``Light`` and puts it back, a loop, so
 ``assert_acyclic`` would reject the net as well. Cars come from outside, put into ``Waiting``
-as an ``inject`` does.
+as an ``inject`` does, so ``Waiting`` is the net's port: the net is closed, as every net not
+declared open is, and takes tokens from outside only there.
 
 The net declares, beside it, two controls and a place style (PROTOCOL.md §5.1), which a viewer
 draws without knowing the net and runs with ``press``, the code being here: ``car`` (``+ Car``,
@@ -105,7 +106,7 @@ def next_colour(colour: Colour) -> Colour:
 def colour(graph: ExecutableGraph) -> Colour | None:
     """The light's colour, ``"red"``, ``"green"`` or ``"amber"``: the token in ``Light``.
     ``None`` while a firing has taken the light and not yet put it back."""
-    light = graph.place_named("Light").tokens
+    light = graph.place("Light").tokens
     return light[0] if light else None
 
 
@@ -115,7 +116,7 @@ def colour(graph: ExecutableGraph) -> Colour | None:
 def green_and_someone_waiting(graph: ExecutableGraph) -> bool:
     """``Go``'s guard: the light is green and a car is waiting. Without the second half the
     drain, which accepts an empty place, would let ``Go`` fire at every green taking nothing."""
-    return colour(graph) == "green" and bool(graph.place_named("Waiting").tokens)
+    return colour(graph) == "green" and bool(graph.place("Waiting").tokens)
 
 
 # --- bodies ---------------------------------------------------------------------------------
@@ -138,7 +139,7 @@ def change(light: Colour) -> Colour:
 def build_traffic_light(record_events: bool = True) -> ExecutableGraph:
     return ExecutableGraphOperations.construct_graph([
         ListPlaceNode("Light", Colour, [Colour("red")]),
-        ListPlaceNode("Waiting", str),
+        ListPlaceNode("Waiting", str, port=True),
         ListPlaceNode("Passed", str),
         # At green with someone waiting, every car waiting goes; the light is read.
         FunctionTransitionNode("Go", go, guard=green_and_someone_waiting),
@@ -161,7 +162,7 @@ def car(name: str, graph: ExecutableGraph) -> str:
     the marking, with no counter of its own, so every runtime names it alike."""
     if name:
         return name
-    return f"Car {len(graph.place_named('Waiting').tokens) + len(graph.place_named('Passed').tokens) + 1}"
+    return f"Car {len(graph.place('Waiting').tokens) + len(graph.place('Passed').tokens) + 1}"
 
 
 # In the order a viewer lists them.
@@ -222,7 +223,7 @@ def step(graph: ExecutableGraph) -> int:
 
 
 def marking(graph: ExecutableGraph, places=PLACES) -> dict[str, list[str]]:
-    return {place: list(graph.place_named(place).tokens) for place in places}
+    return {place: list(graph.place(place).tokens) for place in places}
 
 
 def cars(names: list[str]) -> str:
@@ -252,16 +253,16 @@ async def fire(graph: ExecutableGraph) -> str | None:
     """One firing, the first fireable transition in declaration order, as the protocol's
     ``step`` chooses; what it did in words, or ``None`` when nothing could fire (never, from
     the seed: the light always has somewhere to go)."""
-    before = len(graph.place_named("Passed").tokens)
+    before = len(graph.place("Passed").tokens)
     # Ids only grow and the light gets a fresh one at every Change, so a car whose id is
     # higher than the light's arrived after the light last changed: while it was green.
-    light_ids = graph.place_named("Light").token_ids
-    came_at_green = bool(light_ids) and all(car > light_ids[0] for car in graph.place_named("Waiting").token_ids)
+    light_ids = graph.place("Light").token_ids
+    came_at_green = bool(light_ids) and all(car > light_ids[0] for car in graph.place("Waiting").token_ids)
     _, fired = await ExecutableGraphOperations.execute_graph(graph, stop_after_n_firings=1)
     if not fired:
         return None
-    went = list(graph.place_named("Passed").tokens[before:])
-    return explain(graph.last_fired, went, list(graph.place_named("Waiting").tokens), colour(graph),
+    went = list(graph.place("Passed").tokens[before:])
+    return explain(graph.last_fired, went, list(graph.place("Waiting").tokens), colour(graph),
                    came_at_green)
 
 

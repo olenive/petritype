@@ -119,7 +119,7 @@ def _(PASSENGERS, everyone_arrived, label, snapshot, step):
         if fired is None:
             return 0
         session["log"].append(label(fired))
-        arrived = len(graph.place_named("Arrived").tokens)
+        arrived = len(graph.place("Arrived").tokens)
         snapshot(session, f"Firing {len(session['log'])} — {label(fired)}  ·  arrived {arrived} of {len(PASSENGERS)}")
         return 1
 
@@ -143,7 +143,7 @@ def _(RustworkxGraph, build_city, reset_button, snapshot):
     session = {
         "graph": _graph,
         "pydigraph": RustworkxGraph.from_executable_graph(_graph),
-        "cabin_id": _graph.place_named("Depot").tokens[0].cabin.net_id,
+        "cabin_id": _graph.place("Depot").tokens[0].cabin.net_id,
         "history": [],
         "log": [],
         "cursor": 0,

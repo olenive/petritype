@@ -3,6 +3,7 @@ driven through ``Owner`` directly: keys on the wire, ``query`` and ``distinct``,
 and the connection's projection (``set_filter``): what it lists, what it counts,
 and how it reports the tokens it hides."""
 
+import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from examples.token_view_filtering.wildlife import wildlife  # noqa: E402
 from petritype import petri_net  # noqa: E402
 from petritype.core.executable_graph_components import (  # noqa: E402
     ArgumentEdgeToTransition,
+    ExecutableGraph,
     ExecutableGraphOperations,
     FunctionTransitionNode,
     ListPlaceNode,
@@ -75,6 +77,7 @@ class TestKeysOnTheWire:
         state = result(await harness.send("get_state"))
         assert state["topology"]["places"][0] == {
             "name": "Forest", "type_name": "Species", "serializable": True, "key_names": ["species", "class", "diet"],
+            "port": True,
         }
         robin, fox, deer, woodpecker = state["marking"]["places"]["Forest"]["tokens"]
         assert robin["keys"] == {"species": "Robin", "class": "Bird", "diet": "Insectivore"}
@@ -167,6 +170,51 @@ class TestQueryAndDistinct:
         ]
         assert result(await harness.send("distinct", {"key": "colour"}))["values"] == []
         assert error(await harness.send("distinct", {"key": "class", "places": ["Nowhere"]})) == "unknown_place"
+
+    async def test_distinct_while_a_body_runs_tells_one_from_true_and_extracts_only_its_key(self):
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        other_calls = 0
+
+        def other_key(_x):
+            nonlocal other_calls
+            other_calls += 1
+            return "x"
+
+        async def slow(x: int) -> int:
+            started.set()
+            await gate.wait()
+            return x
+
+        @petri_net(name="distinct-airborne")
+        def distinct_airborne() -> ExecutableGraph:
+            return ExecutableGraphOperations.construct_graph([
+                ListPlaceNode("Work", int, [99]),
+                ListPlaceNode("Done", int),
+                ListPlaceNode(
+                    "Vals", object, [1, True, 0, False, 1, True],
+                    keys={"v": lambda x: x, "other": other_key},
+                ),
+                ArgumentEdgeToTransition("Work", "Run", "x"),
+                FunctionTransitionNode("Run", slow),
+                ReturnedEdgeFromTransition("Run", "Done"),
+            ])
+
+        owner = Owner(Registry.from_factories([distinct_airborne]))
+        await owner.handle({"id": "1", "method": "load", "params": {"net": "distinct-airborne"}}, NOW)
+        step_out = await owner.handle({"id": "2", "method": "step", "params": {}}, NOW)
+        task = asyncio.create_task(step_out.launch.coroutine)
+        await started.wait()
+
+        other_calls = 0
+        distinct_out = await owner.handle({"id": "3", "method": "distinct", "params": {"key": "v"}}, NOW)
+        values = distinct_out.lines[-1]["result"]["values"]
+        assert [(type(v), v) for v in values] == [(int, 1), (bool, True), (int, 0), (bool, False)]
+        assert other_calls == 0
+
+        gate.set()
+        landing = await task
+        await owner.completed(landing, NOW)
 
     async def test_bad_filters(self):
         harness = await loaded_wildlife()

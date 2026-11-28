@@ -208,8 +208,8 @@ async def _(
         Runner.drain_inbox(_ctx)      # apply control commands immediately (no fire)
 
     _sorter = "🟥 OFF" if "Sort" in _ctx.disabled else "🟩 ON"
-    _inbox_n = len(_ctx.graph.place_named("Inbox").tokens)
-    _sorted_ids = [p.id for p in _ctx.graph.place_named("Sorted").tokens]
+    _inbox_n = len(_ctx.graph.place("Inbox").tokens)
+    _sorted_ids = [p.id for p in _ctx.graph.place("Sorted").tokens]
     mo.vstack(
         [
             mo.hstack([controls_row(controls, control_map), step_button, reset_button], justify="start"),

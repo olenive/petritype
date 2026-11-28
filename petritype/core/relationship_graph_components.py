@@ -27,6 +27,7 @@ type FunctionToTypeEdges = dict[tuple[FunctionFullName, TypeName], TypeRelations
 
 class RelationshipEdges:
 
+    @staticmethod
     def type_to_type(
         types: Sequence[TypeVariableWithAnnotations],
         ignored_types: set[TypeName] = COMMON_TYPES,
@@ -61,6 +62,7 @@ class RelationshipEdges:
                 out[from_to] = TypeRelationship.CONTAINS_AS_SUBTYPE
         return out
 
+    @staticmethod
     def type_to_function(
         types: Sequence[TypeVariableWithAnnotations],
         functions: Sequence[FunctionWithAnnotations],
@@ -84,6 +86,7 @@ class RelationshipEdges:
                             out[from_to] = TypeRelationship.TAKES_AS_SUBTYPE_OF_ARGUMENT
         return out
 
+    @staticmethod
     def function_to_type(
         functions: Sequence[FunctionWithAnnotations],
         types: Sequence[TypeVariableWithAnnotations],
